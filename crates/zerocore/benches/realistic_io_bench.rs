@@ -85,7 +85,7 @@ fn execute_transactions_realistic(
         
         // 3. 检查 nonce (内存 + 数据库)
         if let Some(account) = state_db.get_account(&sender) {
-            if tx.nonce < account.nonce {
+            if tx.nonce() < account.nonce {
                 continue; // nonce 过小
             }
         }
