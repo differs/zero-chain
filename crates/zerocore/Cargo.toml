@@ -46,6 +46,7 @@ rand = "0.8"
 criterion = { version = "0.5", features = ["html_reports"] }
 rand = "0.8"
 proptest = "1.4"
+ed25519-dalek = "2.1"
 
 [[bench]]
 name = "evm_bench"
@@ -71,3 +72,8 @@ path = "benches/parallel_bench.rs"
 name = "real_validation_bench"
 harness = false
 path = "benches/real_validation_bench.rs"
+
+[[bench]]
+name = "signature_comparison"
+harness = false
+path = "benches/signature_comparison.rs"
