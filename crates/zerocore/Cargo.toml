@@ -87,3 +87,8 @@ path = "benches/5sec_limit_test.rs"
 name = "full_execution_bench"
 harness = false
 path = "benches/full_execution_bench.rs"
+
+[[bench]]
+name = "realistic_io_bench"
+harness = false
+path = "benches/realistic_io_bench.rs"
