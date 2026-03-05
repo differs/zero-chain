@@ -13,7 +13,6 @@ fn create_test_transactions(count: usize) -> Vec<UnsignedTransaction> {
             i as u64,
             U256::from(1_000_000_000),
             U256::from(21000),
-            U256::from(21000),
             None,
             U256::from(1000),
             vec![],

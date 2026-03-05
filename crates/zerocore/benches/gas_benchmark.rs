@@ -14,7 +14,6 @@ fn create_test_transactions(count: usize) -> Vec<UnsignedTransaction> {
         let tx = UnsignedTransaction::new_legacy(
             i as u64,
             U256::from(1_000_000_000),
-            U256::from(21000), // 简单转账 Gas
             U256::from(21000),
             None,
             U256::from(1000),
@@ -23,6 +22,8 @@ fn create_test_transactions(count: usize) -> Vec<UnsignedTransaction> {
         );
         txs.push(tx);
     }
+    txs
+}
     txs
 }
 
@@ -51,7 +52,7 @@ fn bench_gas_processing(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::from_parameter(format!("{}M_Gas", gas_limit / 1_000_000)),
             gas_limit,
-            |b, &gas_limit| {
+            |b, &_gas_limit| {
                 b.iter(|| {
                     let txs = create_test_transactions(tx_count as usize);
                     validate_transactions(&txs);
