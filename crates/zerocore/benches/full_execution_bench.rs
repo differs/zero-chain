@@ -1,31 +1,17 @@
 //! 完整交易执行基准测试
 //! 
-//! 包含：签名验证 + EVM 执行 + 状态更新
+//! 包含：签名验证 + 交易池添加 + 状态更新
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use zerocore::crypto::{PrivateKey, Address};
-use zerocore::account::{U256, InMemoryAccountManager, Account};
-use zerocore::transaction::{UnsignedTransaction, SignedTransaction, TransactionPool, TxPoolConfig};
-use zerocore::state::StateDb;
-use zerocore::block::BlockHeader;
+use zerocore::account::{U256, InMemoryAccountManager};
+use zerocore::transaction::{UnsignedTransaction, SignedTransaction, TransactionPool};
+use zerocore::transaction::pool::TxPoolConfig;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// 创建测试账户和交易
-fn setup_test_environment(tx_count: usize) -> (StateDb, TransactionPool, Vec<SignedTransaction>) {
-    // 创建状态数据库
-    let state_db = StateDb::new(zerocore::crypto::Hash::zero());
-    
-    // 创建账户管理器
-    let account_manager = Arc::new(InMemoryAccountManager::new());
-    
-    // 创建交易池
-    let pool = TransactionPool::new(
-        TxPoolConfig::default(),
-        account_manager.clone(),
-    );
-    
-    // 创建测试交易
+/// 创建测试交易
+fn create_test_transactions(tx_count: usize) -> Vec<SignedTransaction> {
     let mut txs = Vec::new();
     for i in 0..tx_count {
         let private_key = PrivateKey::random();
@@ -35,21 +21,18 @@ fn setup_test_environment(tx_count: usize) -> (StateDb, TransactionPool, Vec<Sig
             U256::from(21000),
             Some(Address::from_bytes([i as u8; 20])),
             U256::from(1000),
-            vec![],  // 简单转账，无合约调用
+            vec![],
             10086,
         );
         
-        if let Ok(signed_tx) = tx.sign(&private_key) {
-            txs.push(signed_tx);
-        }
+        let signed_tx = tx.sign(&private_key);
+        txs.push(signed_tx);
     }
-    
-    (state_db, pool, txs)
+    txs
 }
 
 /// 完整交易执行流程
 fn execute_transactions_full(
-    state: &StateDb,
     pool: &TransactionPool,
     txs: &[SignedTransaction],
 ) -> usize {
@@ -61,16 +44,11 @@ fn execute_transactions_full(
             continue;
         }
         
-        // 2. 添加到交易池
+        // 2. 添加到交易池 (包含 nonce 检查、余额检查等)
         if pool.add_transaction(tx.clone()).is_err() {
             continue;
         }
         
-        // 3. 执行交易 (简化版，实际会更复杂)
-        // - 检查 nonce
-        // - 检查余额
-        // - 扣款
-        // - 更新状态
         executed += 1;
     }
     
@@ -85,15 +63,21 @@ fn bench_full_execution(c: &mut Criterion) {
     group.warm_up_time(Duration::from_secs(5));
     
     for tx_count in [100, 500, 1000].iter() {
-        let (state, pool, txs) = setup_test_environment(*tx_count);
+        let txs = create_test_transactions(*tx_count);
+        
+        let account_manager = Arc::new(InMemoryAccountManager::new());
+        let pool = TransactionPool::new(
+            TxPoolConfig::default(),
+            account_manager,
+        );
         
         group.throughput(Throughput::Elements(*tx_count as u64));
         group.bench_with_input(
             BenchmarkId::from_parameter(format!("{}_txs_full", tx_count)),
-            &(state, pool, txs),
-            |b, (state, pool, txs)| {
+            &txs,
+            |b, txs| {
                 b.iter(|| {
-                    black_box(execute_transactions_full(state, pool, txs));
+                    black_box(execute_transactions_full(&pool, txs));
                 });
             },
         );
@@ -109,7 +93,7 @@ fn bench_verify_only(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(30));
     
     for tx_count in [100, 500, 1000].iter() {
-        let (_, _, txs) = setup_test_environment(*tx_count);
+        let txs = create_test_transactions(*tx_count);
         
         group.throughput(Throughput::Elements(*tx_count as u64));
         group.bench_with_input(
