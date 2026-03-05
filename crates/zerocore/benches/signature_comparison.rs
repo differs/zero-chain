@@ -3,10 +3,10 @@
 //! 对比 secp256k1 (ECDSA) vs ed25519
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use zerocore::crypto::{PrivateKey, Signature};
+use zerocore::crypto::PrivateKey;
 use zerocore::account::U256;
 use zerocore::transaction::UnsignedTransaction;
-use ed25519_dalek::{SigningKey, VerifyingKey, Signature as EdSignature, Signer, Verifier};
+use ed25519_dalek::{SigningKey, VerifyingKey, Signer, Verifier};
 use rand::rngs::OsRng;
 use std::time::Duration;
 
@@ -27,7 +27,7 @@ fn create_secp256k1_tx(nonce: u64) -> (UnsignedTransaction, PrivateKey) {
 
 /// 创建 ed25519 交易并签名
 fn create_ed25519_tx(nonce: u64) -> (Vec<u8>, SigningKey, VerifyingKey) {
-    let signing_key = SigningKey::generate(&mut OsRng);
+    let signing_key = SigningKey::generate(SigningKey::generate(&mut OsRng)mut OsRng::<rand::rngs::OsRng>::default());
     let verifying_key = VerifyingKey::from(&signing_key);
     
     // 模拟交易数据
