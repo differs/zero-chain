@@ -1,0 +1,43 @@
+[package]
+name = "zeroapi"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "ZeroChain API services - JSON-RPC, REST, WebSocket"
+
+[dependencies]
+zerocore.workspace = true
+zeronet.workspace = true
+zerostore.workspace = true
+
+# Web framework
+axum = "0.7"
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+
+# Async runtime
+tokio.workspace = true
+tokio-util.workspace = true
+futures.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Utils
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+parking_lot.workspace = true
+hex.workspace = true
+bytes.workspace = true
+
+# WebSocket
+tokio-tungstenite = "0.21"
+
+# JSON-RPC types
+jsonrpc-v2 = "0.12"
+
+[dev-dependencies]
+reqwest = { version = "0.11", features = ["json"] }

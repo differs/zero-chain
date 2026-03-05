@@ -1,0 +1,69 @@
+# Rust
+/target/
+**/target/
+**/*.rs.bk
+*.pdb
+Cargo.lock
+
+# Build output
+*.so
+*.dylib
+*.dll
+*.exe
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Test coverage
+*.gcno
+*.gcda
+coverage/
+*.lcov
+
+# Logs
+*.log
+logs/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.temp
+
+# Benchmark results
+criterion/
+benches/results/
+
+# Database files (for local testing)
+*.ldb
+*.log.*
+MANIFEST-*
+
+# Mining data (local)
+mining/
+dag_cache/
+
+# Node data (local)
+chaindata/
+keystore/
+
+# Documentation build
+doc/
+
+# Release artifacts
+*.tar.gz
+*.zip
+
+# Debug
+debug/
+*.dSYM/
