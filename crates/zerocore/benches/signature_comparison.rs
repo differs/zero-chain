@@ -27,14 +27,15 @@ fn create_secp256k1_tx(nonce: u64) -> (UnsignedTransaction, PrivateKey) {
 
 /// 创建 ed25519 交易并签名
 fn create_ed25519_tx(nonce: u64) -> (Vec<u8>, SigningKey, VerifyingKey) {
-    let signing_key = SigningKey::generate(SigningKey::generate(&mut OsRng)mut OsRng::<rand::rngs::OsRng>::default());
+    let csprng = OsRng {};
+    let signing_key = SigningKey::generate(&csprng);
     let verifying_key = VerifyingKey::from(&signing_key);
     
     // 模拟交易数据
     let mut tx_data = Vec::new();
     tx_data.extend_from_slice(&nonce.to_be_bytes());
-    tx_data.extend_from_slice(&[1u8; 32]); // 模拟接收地址
-    tx_data.extend_from_slice(&[2u8; 32]); // 模拟金额
+    tx_data.extend_from_slice(&[1u8; 32]);
+    tx_data.extend_from_slice(&[2u8; 32]);
     
     (tx_data, signing_key, verifying_key)
 }
@@ -71,7 +72,6 @@ fn bench_secp256k1_verify(c: &mut Criterion) {
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(30));
     
-    // 预签名交易
     let signed_txs: Vec<_> = (0..1000)
         .map(|i| {
             let (tx, private_key) = create_secp256k1_tx(i);
@@ -129,7 +129,6 @@ fn bench_ed25519_verify(c: &mut Criterion) {
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(30));
     
-    // 预签名交易
     let signed_txs: Vec<_> = (0..1000)
         .map(|i| {
             let (tx_data, signing_key, verifying_key) = create_ed25519_tx(i);
