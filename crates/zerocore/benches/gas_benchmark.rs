@@ -1,6 +1,9 @@
 //! Gas 处理性能基准测试
+//!
+//! 测试不同 Gas 上限下的交易处理时间
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use std::time::Duration;
 use zerocore::account::U256;
 use zerocore::transaction::UnsignedTransaction;
 
@@ -11,7 +14,7 @@ fn create_test_transactions(count: usize) -> Vec<UnsignedTransaction> {
         let tx = UnsignedTransaction::new_legacy(
             i as u64,
             U256::from(1_000_000_000),
-            U256::from(21000),
+            U256::from(21000), // 简单转账 Gas
             U256::from(21000),
             None,
             U256::from(1000),
@@ -23,30 +26,46 @@ fn create_test_transactions(count: usize) -> Vec<UnsignedTransaction> {
     txs
 }
 
+/// 模拟交易验证开销
+fn validate_transactions(txs: &[UnsignedTransaction]) {
+    for tx in txs {
+        // 模拟签名验证、nonce 检查等开销
+        black_box(tx.nonce);
+        black_box(tx.gas_limit);
+        black_box(tx.value);
+    }
+}
+
 /// 测试不同 Gas 上限的处理时间
 fn bench_gas_processing(c: &mut Criterion) {
     let mut group = c.benchmark_group("gas_processing");
-    group.sample_size(10);  // 减少样本数加快测试
-    group.measurement_time(std::time::Duration::from_secs(30));
-    
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(30));
+    group.warm_up_time(Duration::from_secs(3));
+
+    // 测试不同 Gas 上限场景
     for gas_limit in [30_000_000u64, 50_000_000, 60_000_000, 100_000_000].iter() {
-        let tx_count = gas_limit / 21000;
-        
+        let tx_count = gas_limit / 21000; // 简单转账数量
+
+        group.throughput(Throughput::Elements(tx_count));
         group.bench_with_input(
-            BenchmarkId::from_parameter(format!("{}M", gas_limit / 1_000_000)),
+            BenchmarkId::from_parameter(format!("{}M_Gas", gas_limit / 1_000_000)),
             gas_limit,
             |b, &gas_limit| {
                 b.iter(|| {
-                    let txs = create_test_transactions((gas_limit / 21000) as usize);
-                    for tx in &txs {
-                        black_box(tx.nonce);
-                    }
+                    let txs = create_test_transactions(tx_count as usize);
+                    validate_transactions(&txs);
                 });
             },
         );
     }
+
     group.finish();
 }
 
-criterion_group!(benches, bench_gas_processing);
+criterion_group!(
+    name = benches;
+    config = Criterion::default().noise_threshold(0.05);
+    targets = bench_gas_processing
+);
 criterion_main!(benches);
