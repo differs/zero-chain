@@ -1,6 +1,7 @@
 //! 并行执行性能基准测试
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use rayon::prelude::*;
 use std::time::Duration;
 use zerocore::account::U256;
 use zerocore::transaction::UnsignedTransaction;
