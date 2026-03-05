@@ -6,8 +6,9 @@ use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criteri
 use zerocore::crypto::PrivateKey;
 use zerocore::account::U256;
 use zerocore::transaction::UnsignedTransaction;
-use ed25519_dalek::{SigningKey, VerifyingKey, Signer, Verifier};
+use ed25519_dalek::{SigningKey, VerifyingKey, Signer, Verifier, SecretKey};
 use rand::rngs::OsRng;
+use rand::RngCore;
 use std::time::Duration;
 
 /// 创建 secp256k1 交易并签名
@@ -27,8 +28,11 @@ fn create_secp256k1_tx(nonce: u64) -> (UnsignedTransaction, PrivateKey) {
 
 /// 创建 ed25519 交易并签名
 fn create_ed25519_tx(nonce: u64) -> (Vec<u8>, SigningKey, VerifyingKey) {
-    let csprng = OsRng {};
-    let signing_key = SigningKey::generate(&csprng);
+    // 生成随机密钥
+    let mut secret_bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut secret_bytes);
+    let secret_key = SecretKey::from_bytes(&secret_bytes);
+    let signing_key = SigningKey::from_bytes(&secret_key);
     let verifying_key = VerifyingKey::from(&signing_key);
     
     // 模拟交易数据
