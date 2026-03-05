@@ -31,7 +31,7 @@ fn create_ed25519_tx(nonce: u64) -> (Vec<u8>, SigningKey, VerifyingKey) {
     // 生成随机密钥
     let mut secret_bytes = [0u8; 32];
     OsRng.fill_bytes(&mut secret_bytes);
-    let secret_key = SecretKey::from_bytes(&secret_bytes);
+    let secret_key = secret_bytes.into();
     let signing_key = SigningKey::from_bytes(&secret_key);
     let verifying_key = VerifyingKey::from(&signing_key);
     
