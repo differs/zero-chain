@@ -42,7 +42,7 @@ fn validate_transactions(txs: &[SignedTransaction]) -> usize {
 /// 5 秒极限测试 - 固定时间窗口
 fn bench_5sec_limit(c: &mut Criterion) {
     let mut group = c.benchmark_group("5sec_limit");
-    group.sample_size(5);
+    group.sample_size(10);
     group.measurement_time(Duration::from_secs(5));
     group.warm_up_time(Duration::from_secs(1));
     
