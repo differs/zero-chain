@@ -24,13 +24,10 @@ fn create_test_transactions(count: usize) -> Vec<UnsignedTransaction> {
     }
     txs
 }
-    txs
-}
 
 /// 模拟交易验证开销
 fn validate_transactions(txs: &[UnsignedTransaction]) {
     for tx in txs {
-        // 模拟签名验证、nonce 检查等开销
         black_box(tx.nonce);
         black_box(tx.gas_limit);
         black_box(tx.value);
@@ -44,9 +41,8 @@ fn bench_gas_processing(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(30));
     group.warm_up_time(Duration::from_secs(3));
 
-    // 测试不同 Gas 上限场景
     for gas_limit in [30_000_000u64, 50_000_000, 60_000_000, 100_000_000].iter() {
-        let tx_count = gas_limit / 21000; // 简单转账数量
+        let tx_count = gas_limit / 21000;
 
         group.throughput(Throughput::Elements(tx_count));
         group.bench_with_input(
