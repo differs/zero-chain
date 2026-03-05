@@ -77,3 +77,8 @@ path = "benches/real_validation_bench.rs"
 name = "signature_comparison"
 harness = false
 path = "benches/signature_comparison.rs"
+
+[[bench]]
+name = "5sec_limit_test"
+harness = false
+path = "benches/5sec_limit_test.rs"
