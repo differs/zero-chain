@@ -3,10 +3,10 @@
 //! 包含完整的签名验证、nonce 检查、余额验证
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use zerocore::account::{U256, InMemoryAccountManager, Account};
-use zerocore::crypto::{PrivateKey, Hash};
-use zerocore::transaction::{UnsignedTransaction, SignedTransaction, TransactionPool, TxPoolConfig};
-use zerocore::state::StateDb;
+use zerocore::account::{U256, InMemoryAccountManager};
+use zerocore::crypto::{PrivateKey};
+use zerocore::transaction::{UnsignedTransaction, SignedTransaction, TransactionPool};
+use zerocore::transaction::pool::TxPoolConfig;
 use std::sync::Arc;
 use std::time::Duration;
 
