@@ -84,7 +84,9 @@ impl BlockHeader {
         let target = difficulty_to_target(self.difficulty);
         let pow_hash = compute_pow_hash(self, self.nonce);
 
-        if pow_hash > target {
+        // Convert hash to U256 for comparison
+        let pow_hash_u256 = U256::from_big_endian(pow_hash.as_bytes());
+        if pow_hash_u256 > target {
             return Err(BlockError::InvalidPow);
         }
 
@@ -141,7 +143,7 @@ pub fn create_genesis_block() -> Block {
         gas_limit: 30_000_000,
         gas_used: 0,
         timestamp: 0,
-        difficulty: U256::from(1_000_000_000_000_000u128),
+        difficulty: U256::from_u128(1_000_000_000_000_000u128),
         nonce: 0,
         extra_data: b"ZeroChain Genesis".to_vec(),
         mix_hash: Hash::zero(),

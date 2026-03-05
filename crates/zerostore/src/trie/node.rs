@@ -8,11 +8,18 @@ use zerocore::crypto::Hash;
 /// Trie node hash
 pub type NodeHash = Hash;
 
-/// Empty trie root hash
-pub const EMPTY_TRIE_ROOT: NodeHash = Hash::from_bytes([
+/// Trie node data
+pub type NodeData = Vec<u8>;
+
+/// Empty trie root hash data
+pub const EMPTY_TRIE_ROOT_DATA: [u8; 32] = [
     0x56, 0xe8, 0x1f, 0x17, 0x1b, 0xcc, 0x55, 0xa6, 0xff, 0x83, 0x45, 0xe6, 0x92, 0xc0, 0xf8, 0x6e,
     0x5b, 0x48, 0xe0, 0x1b, 0x99, 0x6c, 0xad, 0xc0, 0x01, 0x62, 0x2f, 0xb5, 0xe3, 0x63, 0xb4, 0x21,
-]);
+];
+
+pub fn empty_trie_root() -> NodeHash {
+    Hash::from_bytes(EMPTY_TRIE_ROOT_DATA)
+}
 
 /// Trie node enumeration
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,7 +43,7 @@ pub struct BranchNode {
     /// 16 children (indexed by nibble 0-15)
     pub children: [Option<NodeHash>; 16],
     /// Optional value stored at this node
-    pub value: Option<Bytes>,
+    pub value: Option<Vec<u8>>,
 }
 
 impl Default for BranchNode {
@@ -97,11 +104,11 @@ pub struct LeafNode {
     /// Key suffix (nibbles)
     pub key_suffix: Vec<u8>,
     /// Stored value
-    pub value: Bytes,
+    pub value: Vec<u8>,
 }
 
 impl LeafNode {
-    pub fn new(key_suffix: Vec<u8>, value: Bytes) -> Self {
+    pub fn new(key_suffix: Vec<u8>, value: Vec<u8>) -> Self {
         Self { key_suffix, value }
     }
 }
@@ -193,28 +200,30 @@ pub fn encode_node(node: &TrieNode) -> Vec<u8> {
         TrieNode::Leaf(leaf) => {
             let mut stream = RlpStream::new_list(2);
             stream.append(&encode_hex_prefix(&leaf.key_suffix, true));
-            stream.append(&leaf.value.as_ref());
-            stream.out()
+            stream.append(&Bytes::copy_from_slice(&leaf.value));
+            stream.out().to_vec()
         }
         TrieNode::Extension(ext) => {
             let mut stream = RlpStream::new_list(2);
             stream.append(&encode_hex_prefix(&ext.prefix, false));
             stream.append(&ext.child.as_bytes());
-            stream.out()
+            stream.out().to_vec()
         }
         TrieNode::Branch(branch) => {
             let mut stream = RlpStream::new_list(17);
             for child in &branch.children {
-                match child {
-                    Some(hash) => stream.append(&hash.as_bytes()),
-                    None => stream.append_empty_data(),
+                if let Some(hash) = child {
+                    stream.append(&hash.as_bytes());
+                } else {
+                    stream.append_empty_data();
                 }
             }
-            match &branch.value {
-                Some(val) => stream.append(&val.as_ref()),
-                None => stream.append_empty_data(),
+            if let Some(val) = &branch.value {
+                stream.append(&Bytes::copy_from_slice(val));
+            } else {
+                stream.append_empty_data();
             }
-            stream.out()
+            stream.out().to_vec()
         }
     }
 }
@@ -309,7 +318,7 @@ mod tests {
     fn test_encode_decode_leaf() {
         let leaf = TrieNode::Leaf(LeafNode {
             key_suffix: vec![1, 2, 3],
-            value: Bytes::from(b"test value".to_vec()),
+            value: b"test value".to_vec(),
         });
 
         let encoded = encode_node(&leaf);

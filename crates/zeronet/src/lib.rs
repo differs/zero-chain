@@ -24,7 +24,7 @@ use parking_lot::RwLock;
 use thiserror::Error;
 
 /// Network error types
-#[derive(Error, Debug, Clone)]
+#[derive(Error, Debug)]
 pub enum NetworkError {
     #[error("IO error: {0}")]
     IO(#[from] std::io::Error),
@@ -142,7 +142,7 @@ impl NetworkService {
         
         // Start sync
         if let Some(sync) = &self.sync_manager {
-            sync.start().await?;
+            sync.start_default().await?;
         }
         
         *self.is_running.write() = true;
@@ -200,12 +200,12 @@ impl NetworkService {
     
     /// Get connected peer count
     pub fn peer_count(&self) -> usize {
-        self.peer_manager.get_active_peers().len()
+        self.peer_manager.get_active_peer_infos().len()
     }
     
     /// Get all connected peers
     pub fn get_peers(&self) -> Vec<PeerInfo> {
-        self.peer_manager.get_active_peers()
+        self.peer_manager.get_active_peer_infos()
     }
     
     /// Add peer

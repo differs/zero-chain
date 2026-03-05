@@ -66,7 +66,11 @@ impl RocksDb {
     pub fn open(path: &str) -> Result<Self> {
         let mut opts = rocksdb::Options::default();
         opts.create_if_missing(true);
-        opts.increase_parallelism(num_cpus::get() as i32);
+        // Use std::thread::available_parallelism instead of num_cpus
+        let parallelism = std::thread::available_parallelism()
+            .map(|p| p.get() as i32)
+            .unwrap_or(4);
+        opts.increase_parallelism(parallelism);
         opts.set_max_background_flushes(4);
         opts.set_max_background_compactions(4);
         opts.set_write_buffer_size(256 * 1024 * 1024); // 256MB
@@ -113,7 +117,11 @@ impl KeyValueDB for RocksDb {
     }
 
     fn has(&self, key: &[u8]) -> Result<bool> {
-        Ok(self.db.get(key)?.is_some())
+        Ok(self
+            .db
+            .get(key)
+            .map_err(|e| StorageError::Database(e.to_string()))?
+            .is_some())
     }
 
     fn write_batch(&self, batch: Batch) -> Result<()> {

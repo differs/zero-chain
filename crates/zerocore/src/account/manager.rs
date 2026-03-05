@@ -1,6 +1,7 @@
 //! Account manager trait and implementation
 
 use super::{Account, AccountType, AccountConfig, AccountError, U256, I256};
+use serde::{Deserialize, Serialize};
 use crate::crypto::{Address, Hash, Signature};
 use crate::account::utxo::{UtxoReference, UtxoOutput, LockScript};
 use async_trait::async_trait;
@@ -247,14 +248,14 @@ impl AccountManager for InMemoryAccountManager {
     ) -> Result<UtxoReference, AccountError> {
         let tx_hash = Hash::from_bytes([1u8; 32]);  // Would be computed from transaction
         
-        let utxo = UtxoOutput::new(amount, lock_script);
+        let utxo = UtxoOutput::new(amount, lock_script.clone());
         self.utxos.insert(tx_hash, utxo);
         
         Ok(UtxoReference {
             tx_hash,
             output_index: 0,
             amount,
-            lock_script: utxo.lock_script,
+            lock_script,
             spent: false,
         })
     }

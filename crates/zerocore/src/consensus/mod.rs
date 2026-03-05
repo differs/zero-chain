@@ -53,8 +53,8 @@ impl PowConsensus {
         Self {
             algorithm,
             target_block_time: 10,
-            min_difficulty: U256::from(1_000_000),
-            max_difficulty: U256::from(u128::MAX),
+            min_difficulty: U256::from_u128(1_000_000),
+            max_difficulty: U256::from_u128(u128::MAX),
             initial_reward: U256::from_u128(5_000_000_000_000_000_000u128),
             halving_period: 2_100_000,
         }
@@ -106,11 +106,16 @@ impl Consensus for PowConsensus {
     fn calculate_difficulty(&self, parent: &BlockHeader, current_timestamp: u64) -> U256 {
         let actual_block_time = current_timestamp.saturating_sub(parent.timestamp);
 
+        // Adjust difficulty based on block time
+        // Fast block (< target): increase difficulty
+        // Slow block (> target): decrease difficulty
         let difficulty_delta = if actual_block_time < self.target_block_time {
+            // Fast block - increase difficulty
             let ratio = self.target_block_time as f64 / actual_block_time.max(1) as f64;
             ratio.min(1.1)
         } else {
-            let ratio = actual_block_time as f64 / self.target_block_time.max(1) as f64;
+            // Slow block - decrease difficulty
+            let ratio = self.target_block_time as f64 / actual_block_time as f64;
             ratio.max(0.9)
         };
 
@@ -128,7 +133,7 @@ impl Consensus for PowConsensus {
 
         let mut reward = self.initial_reward;
         for _ in 0..halving_count {
-            reward = U256::from(reward.as_u128() / 2);
+            reward = U256::from_u128(reward.as_u128() / 2);
         }
 
         reward.max(U256::from_u128(2_000_000_000_000_000_000u128))

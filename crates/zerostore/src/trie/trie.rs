@@ -3,7 +3,6 @@
 use super::node::*;
 use super::proof::TrieProof;
 use crate::{Result, StorageError};
-use bytes::Bytes;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -88,11 +87,11 @@ impl MerklePatriciaTrie {
 
     /// Get root hash
     pub fn root(&self) -> Hash {
-        *self.root.read().unwrap_or(&EMPTY_TRIE_ROOT)
+        self.root.read().clone().unwrap_or_else(empty_trie_root)
     }
 
     /// Get value by key
-    pub fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
+    pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         let hashed_key = keccak256(key);
         let nibbles = NibbleSlice::new(&hashed_key);
 
@@ -111,7 +110,7 @@ impl MerklePatriciaTrie {
         node: &TrieNode,
         key: &NibbleSlice,
         depth: usize,
-    ) -> Result<Option<Bytes>> {
+    ) -> Result<Option<Vec<u8>>> {
         match node {
             TrieNode::Empty => Ok(None),
 
@@ -154,7 +153,7 @@ impl MerklePatriciaTrie {
     }
 
     /// Insert key-value pair
-    pub fn insert(&self, key: &[u8], value: Bytes) -> Result<Hash> {
+    pub fn insert(&self, key: &[u8], value: Vec<u8>) -> Result<Hash> {
         let hashed_key = keccak256(key);
         let nibbles = NibbleSlice::new(&hashed_key);
 
@@ -182,7 +181,7 @@ impl MerklePatriciaTrie {
         node: &TrieNode,
         key: &NibbleSlice,
         depth: usize,
-        value: Bytes,
+        value: Vec<u8>,
     ) -> Result<NodeHash> {
         match node {
             TrieNode::Empty => {
@@ -262,7 +261,7 @@ impl MerklePatriciaTrie {
         key: &NibbleSlice,
         depth: usize,
         common: usize,
-        value: Bytes,
+        value: Vec<u8>,
     ) -> Result<NodeHash> {
         let leaf_nibbles = NibbleSlice::new(&leaf.key_suffix);
 
@@ -310,7 +309,7 @@ impl MerklePatriciaTrie {
         key: &NibbleSlice,
         depth: usize,
         common: usize,
-        value: Bytes,
+        value: Vec<u8>,
     ) -> Result<NodeHash> {
         // Implementation similar to split_leaf
         // Simplified for brevity
@@ -322,7 +321,7 @@ impl MerklePatriciaTrie {
     }
 
     /// Remove key
-    pub fn remove(&self, key: &[u8]) -> Result<Option<Bytes>> {
+    pub fn remove(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         let hashed_key = keccak256(key);
         let nibbles = NibbleSlice::new(&hashed_key);
 
@@ -348,7 +347,7 @@ impl MerklePatriciaTrie {
         node: &TrieNode,
         key: &NibbleSlice,
         depth: usize,
-    ) -> Result<(Option<NodeHash>, Option<Bytes>)> {
+    ) -> Result<(Option<NodeHash>, Option<Vec<u8>>)> {
         match node {
             TrieNode::Empty => Ok((None, None)),
 
@@ -505,7 +504,7 @@ impl MerklePatriciaTrie {
     }
 
     /// Verify proof
-    pub fn verify_proof(key: &[u8], value: Option<&Bytes>, proof: &TrieProof) -> Result<bool> {
+    pub fn verify_proof(key: &[u8], value: Option<&Vec<u8>>, proof: &TrieProof) -> Result<bool> {
         let hashed_key = keccak256(key);
         let nibbles = NibbleSlice::new(&hashed_key);
 
@@ -541,7 +540,7 @@ mod tests {
 
         // Insert key-value
         let key = b"test_key";
-        let value = Bytes::from(b"test_value".to_vec());
+        let value = b"test_value".to_vec();
 
         let root = trie.insert(key, value.clone()).unwrap();
         assert!(!root.is_zero());
@@ -557,25 +556,25 @@ mod tests {
         let trie = MerklePatriciaTrie::new(db);
 
         // Insert multiple keys
-        trie.insert(b"key1", Bytes::from(b"value1".to_vec()))
+        trie.insert(b"key1", b"value1".to_vec())
             .unwrap();
-        trie.insert(b"key2", Bytes::from(b"value2".to_vec()))
+        trie.insert(b"key2", b"value2".to_vec())
             .unwrap();
-        trie.insert(b"key3", Bytes::from(b"value3".to_vec()))
+        trie.insert(b"key3", b"value3".to_vec())
             .unwrap();
 
         // Verify all values
         assert_eq!(
             trie.get(b"key1").unwrap(),
-            Some(Bytes::from(b"value1".to_vec()))
+            Some(b"value1".to_vec())
         );
         assert_eq!(
             trie.get(b"key2").unwrap(),
-            Some(Bytes::from(b"value2".to_vec()))
+            Some(b"value2".to_vec())
         );
         assert_eq!(
             trie.get(b"key3").unwrap(),
-            Some(Bytes::from(b"value3".to_vec()))
+            Some(b"value3".to_vec())
         );
     }
 
@@ -585,17 +584,17 @@ mod tests {
         let trie = MerklePatriciaTrie::new(db);
 
         // Insert
-        trie.insert(b"key", Bytes::from(b"value1".to_vec()))
+        trie.insert(b"key", b"value1".to_vec())
             .unwrap();
 
         // Update
-        trie.insert(b"key", Bytes::from(b"value2".to_vec()))
+        trie.insert(b"key", b"value2".to_vec())
             .unwrap();
 
         // Verify updated value
         assert_eq!(
             trie.get(b"key").unwrap(),
-            Some(Bytes::from(b"value2".to_vec()))
+            Some(b"value2".to_vec())
         );
     }
 
@@ -605,11 +604,11 @@ mod tests {
         let trie = MerklePatriciaTrie::new(db);
 
         // Insert
-        trie.insert(b"key", Bytes::from(b"value".to_vec())).unwrap();
+        trie.insert(b"key", b"value".to_vec()).unwrap();
 
         // Remove
         let removed = trie.remove(b"key").unwrap();
-        assert_eq!(removed, Some(Bytes::from(b"value".to_vec())));
+        assert_eq!(removed, Some(b"value".to_vec()));
 
         // Verify removed
         assert_eq!(trie.get(b"key").unwrap(), None);

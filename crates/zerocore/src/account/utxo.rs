@@ -190,8 +190,9 @@ impl UtxoTransaction {
         }
 
         // Verify all unlock scripts
-        for (input, _) in self.inputs.iter() {
+        for input in self.inputs.iter() {
             // Would verify signatures here
+            let _ = input;
         }
 
         Ok(())

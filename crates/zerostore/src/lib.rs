@@ -1,5 +1,5 @@
 //! ZeroChain Storage Layer
-//! 
+//!
 //! Provides:
 //! - Merkle Patricia Trie (MPT) for state storage
 //! - Database abstraction (RocksDB/Redb)
@@ -12,9 +12,9 @@ pub mod db;
 pub mod index;
 pub mod trie;
 
-pub use db::{Database, RocksDb, RedbDatabase, KeyValueDB};
-pub use index::{TxIndex, BlockIndex, IndexDB};
-pub use trie::{MerklePatriciaTrie, TrieDB, TrieNode, TrieError, TrieProof};
+pub use db::{KeyValueDB, RedbDatabase, RocksDb};
+pub use index::{BlockIndex, IndexDB, TxIndex};
+pub use trie::{MerklePatriciaTrie, TrieDB, TrieNode, TrieProof};
 
 /// Storage error types
 #[derive(Debug, thiserror::Error)]
@@ -29,6 +29,14 @@ pub enum StorageError {
     NotFound(String),
     #[error("IO error: {0}")]
     IO(#[from] std::io::Error),
+    #[error("Crypto error: {0}")]
+    Crypto(String),
+}
+
+impl From<zerocore::crypto::CryptoError> for StorageError {
+    fn from(e: zerocore::crypto::CryptoError) -> Self {
+        StorageError::Crypto(e.to_string())
+    }
 }
 
 pub type Result<T> = std::result::Result<T, StorageError>;

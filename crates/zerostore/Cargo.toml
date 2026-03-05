@@ -44,3 +44,4 @@ criterion = "0.5"
 [[bench]]
 name = "trie_bench"
 harness = false
+path = "../../benches/trie_bench.rs"

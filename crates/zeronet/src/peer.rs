@@ -189,7 +189,17 @@ impl PeerManager {
     }
 
     /// Get all active peers
-    pub fn get_active_peers(&self) -> Vec<PeerInfo> {
+    pub fn get_active_peers(&self) -> Vec<Arc<Peer>> {
+        self.peers
+            .read()
+            .values()
+            .filter(|p| p.status == PeerStatus::Connected)
+            .cloned()
+            .collect()
+    }
+
+    /// Get active peer infos
+    pub fn get_active_peer_infos(&self) -> Vec<PeerInfo> {
         self.peers
             .read()
             .values()

@@ -5,6 +5,31 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use thiserror::Error;
 
+/// UTXO reference for hybrid account model
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UtxoReference {
+    /// Transaction hash
+    pub tx_hash: Hash,
+    /// Output index
+    pub output_index: u32,
+    /// Amount
+    pub amount: U256,
+    /// Locking script or address
+    pub lock_hash: Hash,
+}
+
+impl UtxoReference {
+    /// Create a new UTXO reference
+    pub fn new(tx_hash: Hash, output_index: u32, amount: U256, lock_hash: Hash) -> Self {
+        Self {
+            tx_hash,
+            output_index,
+            amount,
+            lock_hash,
+        }
+    }
+}
+
 /// Account error types
 #[derive(Error, Debug, Clone, PartialEq, Eq)]
 pub enum AccountError {
@@ -68,6 +93,10 @@ impl U256 {
         u64::from_be_bytes(self.0[24..32].try_into().unwrap())
     }
 
+    pub fn as_u8(&self) -> u8 {
+        self.0[31]
+    }
+
     pub fn as_u128(&self) -> u128 {
         u128::from_be_bytes(self.0[16..32].try_into().unwrap())
     }
@@ -82,7 +111,7 @@ impl U256 {
 
     pub fn from_big_endian(bytes: &[u8]) -> Self {
         let mut result = [0u8; 32];
-        let start = 32.saturating_sub(bytes.len());
+        let start = 32usize.saturating_sub(bytes.len());
         result[start..].copy_from_slice(bytes);
         Self(result)
     }
@@ -130,6 +159,84 @@ impl U256 {
             result
         }
     }
+
+    pub fn overflowing_mul(self, other: Self) -> (Self, bool) {
+        let mut result = [0u8; 32];
+        let mut carry = 0u32;
+
+        for i in (0..32).rev() {
+            let mut sum = carry;
+            for j in (0..=i).rev() {
+                let prod = self.0[j] as u32 * other.0[i - (31 - j)] as u32;
+                sum += prod;
+            }
+            result[i] = sum as u8;
+            carry = sum >> 8;
+        }
+
+        (Self(result), carry != 0)
+    }
+
+    pub fn overflowing_pow(self, exp: u32) -> (Self, bool) {
+        if exp == 0 {
+            return (Self::one(), false);
+        }
+
+        let mut result = Self::one();
+        let mut base = self;
+        let mut e = exp;
+        let mut overflow = false;
+
+        while e > 0 {
+            if e % 2 == 1 {
+                let (r, o) = result.overflowing_mul(base);
+                result = r;
+                overflow |= o;
+            }
+            let (b, o) = base.overflowing_mul(base);
+            base = b;
+            overflow |= o;
+            e /= 2;
+        }
+
+        (result, overflow)
+    }
+
+    pub fn overflowing_pow_u256(self, exp: Self) -> (Self, bool) {
+        // Simplified: only handle small exponents
+        if exp.is_zero() {
+            return (Self::one(), false);
+        }
+
+        // For large exponents, just use u32 version
+        let exp_u32 = exp.as_u64().min(u32::MAX as u64) as u32;
+        self.overflowing_pow(exp_u32)
+    }
+
+    pub fn leading_zeros(&self) -> u32 {
+        let mut count = 0u32;
+        for &byte in &self.0 {
+            if byte == 0 {
+                count += 8;
+            } else {
+                count += byte.leading_zeros();
+                break;
+            }
+        }
+        count
+    }
+
+    pub fn wrapping_add(self, other: Self) -> Self {
+        self.overflowing_add(other).0
+    }
+
+    pub fn wrapping_sub(self, other: Self) -> Self {
+        self.overflowing_sub(other).0
+    }
+
+    pub fn wrapping_mul(self, other: Self) -> Self {
+        self.overflowing_mul(other).0
+    }
 }
 
 impl std::ops::Add for U256 {
@@ -148,6 +255,191 @@ impl std::ops::Sub for U256 {
     }
 }
 
+impl std::ops::Mul for U256 {
+    type Output = Self;
+
+    fn mul(self, other: Self) -> Self::Output {
+        self.overflowing_mul(other).0
+    }
+}
+
+impl std::ops::Div for U256 {
+    type Output = Self;
+
+    fn div(self, other: Self) -> Self::Output {
+        if other.is_zero() {
+            return Self::zero();
+        }
+
+        if self.is_zero() {
+            return Self::zero();
+        }
+
+        let mut quotient = Self::zero();
+        let mut remainder = Self::zero();
+
+        for i in 0..256 {
+            remainder = remainder.wrapping_mul(Self::from(2));
+
+            let bit = (self.0[i / 8] >> (7 - (i % 8))) & 1;
+            if bit == 1 {
+                remainder = remainder.wrapping_add(Self::one());
+            }
+
+            if remainder >= other {
+                remainder = remainder.wrapping_sub(other);
+                let bit_pos = 255 - i;
+                quotient.0[bit_pos / 8] |= 1 << (7 - (bit_pos % 8));
+            }
+        }
+
+        quotient
+    }
+}
+
+impl std::ops::Rem for U256 {
+    type Output = Self;
+
+    fn rem(self, other: Self) -> Self::Output {
+        if other.is_zero() {
+            return Self::zero();
+        }
+        let quotient = self / other;
+        self - (quotient * other)
+    }
+}
+
+impl std::ops::BitAnd for U256 {
+    type Output = Self;
+
+    fn bitand(self, other: Self) -> Self::Output {
+        let mut result = [0u8; 32];
+        for i in 0..32 {
+            result[i] = self.0[i] & other.0[i];
+        }
+        Self(result)
+    }
+}
+
+impl std::ops::BitOr for U256 {
+    type Output = Self;
+
+    fn bitor(self, other: Self) -> Self::Output {
+        let mut result = [0u8; 32];
+        for i in 0..32 {
+            result[i] = self.0[i] | other.0[i];
+        }
+        Self(result)
+    }
+}
+
+impl std::ops::BitXor for U256 {
+    type Output = Self;
+
+    fn bitxor(self, other: Self) -> Self::Output {
+        let mut result = [0u8; 32];
+        for i in 0..32 {
+            result[i] = self.0[i] ^ other.0[i];
+        }
+        Self(result)
+    }
+}
+
+impl std::ops::Not for U256 {
+    type Output = Self;
+
+    fn not(self) -> Self::Output {
+        let mut result = [0u8; 32];
+        for i in 0..32 {
+            result[i] = !self.0[i];
+        }
+        Self(result)
+    }
+}
+
+impl std::ops::Shl<usize> for U256 {
+    type Output = Self;
+
+    fn shl(self, shift: usize) -> Self::Output {
+        if shift >= 256 {
+            return Self::zero();
+        }
+
+        let mut result = [0u8; 32];
+        let byte_shift = shift / 8;
+        let bit_shift = shift % 8;
+
+        for i in (0..32).rev() {
+            if i >= byte_shift {
+                let src_idx = i - byte_shift;
+                result[i] = self.0[src_idx] << bit_shift;
+                if bit_shift > 0 && src_idx > 0 {
+                    result[i] |= self.0[src_idx - 1] >> (8 - bit_shift);
+                }
+            }
+        }
+
+        Self(result)
+    }
+}
+
+impl std::ops::Shl<u64> for U256 {
+    type Output = Self;
+
+    fn shl(self, shift: u64) -> Self::Output {
+        self << (shift as usize)
+    }
+}
+
+impl std::ops::Shl<Self> for U256 {
+    type Output = Self;
+
+    fn shl(self, shift: Self) -> Self::Output {
+        self << (shift.as_u64() as usize)
+    }
+}
+
+impl std::ops::Shr<usize> for U256 {
+    type Output = Self;
+
+    fn shr(self, shift: usize) -> Self::Output {
+        if shift >= 256 {
+            return Self::zero();
+        }
+
+        let mut result = [0u8; 32];
+        let byte_shift = shift / 8;
+        let bit_shift = shift % 8;
+
+        for i in 0..32 {
+            if i + byte_shift < 32 {
+                result[i] = self.0[i + byte_shift] >> bit_shift;
+                if bit_shift > 0 && i + byte_shift + 1 < 32 {
+                    result[i] |= self.0[i + byte_shift + 1] << (8 - bit_shift);
+                }
+            }
+        }
+
+        Self(result)
+    }
+}
+
+impl std::ops::Shr<u64> for U256 {
+    type Output = Self;
+
+    fn shr(self, shift: u64) -> Self::Output {
+        self >> (shift as usize)
+    }
+}
+
+impl std::ops::Shr<Self> for U256 {
+    type Output = Self;
+
+    fn shr(self, shift: Self) -> Self::Output {
+        self >> (shift.as_u64() as usize)
+    }
+}
+
 impl std::fmt::Debug for U256 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "U256({})", self.as_u128())
@@ -161,7 +453,7 @@ impl std::fmt::Display for U256 {
 }
 
 /// Signed 256-bit integer
-#[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct I256(pub [u8; 32]);
 
 impl I256 {
@@ -216,7 +508,7 @@ impl Default for AccountState {
 }
 
 /// State machine events
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StateEvent {
     /// Account created
     AccountCreated,
@@ -296,7 +588,7 @@ impl Default for SignatureScheme {
 }
 
 /// Social recovery configuration
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecoveryConfig {
     /// Guardian addresses
     pub guardians: Vec<Address>,
@@ -417,7 +709,7 @@ impl Default for Account {
                 public_key: PublicKey::from_bytes([0u8; 65]).unwrap_or_else(|_| {
                     let mut pk = [0u8; 65];
                     pk[0] = 0x04;
-                    pk
+                    PublicKey::from_bytes(pk).unwrap()
                 }),
                 signature_scheme: SignatureScheme::default(),
             },

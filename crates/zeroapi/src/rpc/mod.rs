@@ -110,6 +110,14 @@ impl RpcErrorObject {
     }
 }
 
+impl std::fmt::Display for RpcErrorObject {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for RpcErrorObject {}
+
 /// RPC API handler
 pub struct RpcApi {
     config: RpcConfig,
@@ -203,11 +211,11 @@ impl RpcApi {
     }
     
     fn web3_sha3(&self, params: Option<Vec<serde_json::Value>>) -> Result<serde_json::Value, RpcErrorObject> {
-        let params = params.ok_or_else(|| RpcErrorObject::invalid_params("Missing params"))?;
+        let params = params.ok_or(RpcErrorObject::invalid_params("Missing params".to_string()))?;
         let data = params.get(0)
-            .ok_or_else(|| RpcErrorObject::invalid_params("Missing data"))?
+            .ok_or_else(|| RpcErrorObject::invalid_params("Missing data".to_string()))?
             .as_str()
-            .ok_or_else(|| RpcErrorObject::invalid_params("Data must be string"))?;
+            .ok_or_else(|| RpcErrorObject::invalid_params("Data must be string".to_string()))?;
         
         let bytes = hex::decode(data.strip_prefix("0x").unwrap_or(data))
             .map_err(|e| RpcErrorObject::invalid_params(format!("Invalid hex: {}", e)))?;
@@ -240,36 +248,36 @@ impl RpcApi {
     fn eth_block_number(&self, _params: Option<Vec<serde_json::Value>>) -> Result<serde_json::Value, RpcErrorObject> {
         let block = self.latest_block.read();
         let number = block.as_ref().map(|b| b.header.number).unwrap_or(U256::zero());
-        Ok(serde_json::json!(format!("0x{:x}", number)))
+        Ok(serde_json::json!(format!("0x{:x}", number.as_u64())))
     }
     
     fn eth_get_balance(&self, params: Option<Vec<serde_json::Value>>) -> Result<serde_json::Value, RpcErrorObject> {
-        let params = params.ok_or_else(|| RpcErrorObject::invalid_params("Missing params"))?;
+        let params = params.ok_or(RpcErrorObject::invalid_params("Missing params".to_string()))?;
         
         let address_str = params.get(0)
-            .ok_or_else(|| RpcErrorObject::invalid_params("Missing address"))?
+            .ok_or_else(|| RpcErrorObject::invalid_params("Missing address".to_string()))?
             .as_str()
-            .ok_or_else(|| RpcErrorObject::invalid_params("Address must be string"))?;
+            .ok_or_else(|| RpcErrorObject::invalid_params("Address must be string".to_string()))?;
         
         let address = parse_address(address_str)?;
         
         let balance = self.state_db.get_balance(&address);
         
-        Ok(serde_json::json!(format!("0x{:x}", balance)))
+        Ok(serde_json::json!(format!("0x{:x}", balance.as_u64())))
     }
     
     fn eth_get_storage_at(&self, params: Option<Vec<serde_json::Value>>) -> Result<serde_json::Value, RpcErrorObject> {
-        let params = params.ok_or_else(|| RpcErrorObject::invalid_params("Missing params"))?;
+        let params = params.ok_or(RpcErrorObject::invalid_params("Missing params".to_string()))?;
         
         let address_str = params.get(0)
-            .ok_or_else(|| RpcErrorObject::invalid_params("Missing address"))?
+            .ok_or_else(|| RpcErrorObject::invalid_params("Missing address".to_string()))?
             .as_str()
-            .ok_or_else(|| RpcErrorObject::invalid_params("Address must be string"))?;
+            .ok_or_else(|| RpcErrorObject::invalid_params("Address must be string".to_string()))?;
         
         let position_str = params.get(1)
-            .ok_or_else(|| RpcErrorObject::invalid_params("Missing position"))?
+            .ok_or_else(|| RpcErrorObject::invalid_params("Missing position".to_string()))?
             .as_str()
-            .ok_or_else(|| RpcErrorObject::invalid_params("Position must be string"))?;
+            .ok_or_else(|| RpcErrorObject::invalid_params("Position must be string".to_string()))?;
         
         let address = parse_address(address_str)?;
         let position = parse_hash(position_str)?;
@@ -280,12 +288,12 @@ impl RpcApi {
     }
     
     fn eth_get_transaction_count(&self, params: Option<Vec<serde_json::Value>>) -> Result<serde_json::Value, RpcErrorObject> {
-        let params = params.ok_or_else(|| RpcErrorObject::invalid_params("Missing params"))?;
+        let params = params.ok_or(RpcErrorObject::invalid_params("Missing params".to_string()))?;
         
         let address_str = params.get(0)
-            .ok_or_else(|| RpcErrorObject::invalid_params("Missing address"))?
+            .ok_or_else(|| RpcErrorObject::invalid_params("Missing address".to_string()))?
             .as_str()
-            .ok_or_else(|| RpcErrorObject::invalid_params("Address must be string"))?;
+            .ok_or_else(|| RpcErrorObject::invalid_params("Address must be string".to_string()))?;
         
         let address = parse_address(address_str)?;
         let nonce = self.state_db.get_nonce(&address);
@@ -335,12 +343,12 @@ impl RpcApi {
     }
     
     fn eth_send_raw_transaction(&self, params: Option<Vec<serde_json::Value>>) -> Result<serde_json::Value, RpcErrorObject> {
-        let params = params.ok_or_else(|| RpcErrorObject::invalid_params("Missing params"))?;
+        let params = params.ok_or(RpcErrorObject::invalid_params("Missing params".to_string()))?;
         
         let tx_data = params.get(0)
-            .ok_or_else(|| RpcErrorObject::invalid_params("Missing transaction data"))?
+            .ok_or_else(|| RpcErrorObject::invalid_params("Missing transaction data".to_string()))?
             .as_str()
-            .ok_or_else(|| RpcErrorObject::invalid_params("Transaction data must be string"))?;
+            .ok_or_else(|| RpcErrorObject::invalid_params("Transaction data must be string".to_string()))?;
         
         let tx_bytes = hex::decode(tx_data.strip_prefix("0x").unwrap_or(tx_data))
             .map_err(|e| RpcErrorObject::invalid_params(format!("Invalid hex: {}", e)))?;
@@ -362,19 +370,19 @@ impl RpcApi {
     // ============ ZeroChain extensions ============
     
     fn zero_get_account(&self, params: Option<Vec<serde_json::Value>>) -> Result<serde_json::Value, RpcErrorObject> {
-        let params = params.ok_or_else(|| RpcErrorObject::invalid_params("Missing params"))?;
+        let params = params.ok_or(RpcErrorObject::invalid_params("Missing params".to_string()))?;
         
         let address_str = params.get(0)
-            .ok_or_else(|| RpcErrorObject::invalid_params("Missing address"))?
+            .ok_or_else(|| RpcErrorObject::invalid_params("Missing address".to_string()))?
             .as_str()
-            .ok_or_else(|| RpcErrorObject::invalid_params("Address must be string"))?;
+            .ok_or_else(|| RpcErrorObject::invalid_params("Address must be string".to_string()))?;
         
         let address = parse_address(address_str)?;
         
         // Would get full account info
         Ok(serde_json::json!({
             "address": address_str,
-            "balance": format!("0x{:x}", self.state_db.get_balance(&address)),
+            "balance": format!("0x{:x}", self.state_db.get_balance(&address).as_u64()),
             "nonce": format!("0x{:x}", self.state_db.get_nonce(&address)),
         }))
     }

@@ -12,7 +12,7 @@ zeronet.workspace = true
 zerostore.workspace = true
 
 # Web framework
-axum = "0.7"
+axum = { version = "0.7", features = ["ws"] }
 tower = "0.4"
 tower-http = { version = "0.5", features = ["cors", "trace"] }
 
@@ -20,6 +20,7 @@ tower-http = { version = "0.5", features = ["cors", "trace"] }
 tokio.workspace = true
 tokio-util.workspace = true
 futures.workspace = true
+futures-util = "0.3"
 
 # Serialization
 serde.workspace = true
@@ -32,6 +33,7 @@ tracing.workspace = true
 parking_lot.workspace = true
 hex.workspace = true
 bytes.workspace = true
+uuid = { version = "1.6", features = ["v4"] }
 
 # WebSocket
 tokio-tungstenite = "0.21"

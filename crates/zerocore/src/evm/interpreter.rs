@@ -6,7 +6,7 @@ use super::precompiles::*;
 use super::EvmError;
 use crate::account::{Account, AccountType, I256, U256};
 use crate::crypto::{keccak256, Address, Hash};
-use crate::state::StateDb;
+use crate::evm::StateDb;
 use bytes::Bytes;
 use parking_lot::RwLock;
 use std::sync::Arc;
@@ -380,7 +380,7 @@ impl<'a> EvmInterpreter<'a> {
         let exp_byte_cost = ((256 - exp.leading_zeros()) as u64 + 7) / 8 * 50;
         consume_gas(&mut self.gas_left, exp_byte_cost)?;
 
-        self.stack.push(base.overflowing_pow(exp).0)?;
+        self.stack.push(base.overflowing_pow_u256(exp).0)?;
         Ok(())
     }
 
@@ -591,7 +591,8 @@ impl<'a> EvmInterpreter<'a> {
     fn op_balance(&mut self) -> Result<(), EvmError> {
         consume_gas(&mut self.gas_left, 100)?;
         let addr_u256 = self.stack.pop()?;
-        let addr = Address::from_slice(&addr_u256.to_big_endian()[12..]).unwrap();
+        let addr = Address::from_slice(&addr_u256.to_big_endian()[12..])
+            .map_err(|_| EvmError::InvalidAddress)?;
 
         let balance = self.context.state.get_balance(&addr);
         self.stack.push(balance)?;
@@ -640,7 +641,8 @@ impl<'a> EvmInterpreter<'a> {
 
     fn op_calldatasize(&mut self) -> Result<(), EvmError> {
         consume_gas(&mut self.gas_left, GAS_BASE)?;
-        self.stack.push(U256::from(self.context.input.len()))?;
+        self.stack
+            .push(U256::from_u128(self.context.input.len() as u128))?;
         Ok(())
     }
 
@@ -672,7 +674,8 @@ impl<'a> EvmInterpreter<'a> {
 
     fn op_codesize(&mut self) -> Result<(), EvmError> {
         consume_gas(&mut self.gas_left, GAS_BASE)?;
-        self.stack.push(U256::from(self.context.code.len()))?;
+        self.stack
+            .push(U256::from_u128(self.context.code.len() as u128))?;
         Ok(())
     }
 
@@ -711,10 +714,11 @@ impl<'a> EvmInterpreter<'a> {
     fn op_extcodesize(&mut self) -> Result<(), EvmError> {
         consume_gas(&mut self.gas_left, 100)?;
         let addr_u256 = self.stack.pop()?;
-        let addr = Address::from_slice(&addr_u256.to_big_endian()[12..]).unwrap();
+        let addr = Address::from_slice(&addr_u256.to_big_endian()[12..])
+            .map_err(|_| EvmError::InvalidAddress)?;
 
         let code = self.context.state.get_code(&addr).unwrap_or_default();
-        self.stack.push(U256::from(code.len()))?;
+        self.stack.push(U256::from_u128(code.len() as u128))?;
         Ok(())
     }
 
@@ -725,7 +729,9 @@ impl<'a> EvmInterpreter<'a> {
         let code_offset = self.stack.pop()?;
         let size = self.stack.pop()?;
 
-        let addr = Address::from_slice(&addr_u256.to_big_endian()[12..]).unwrap();
+        // Copy code
+        let addr = Address::from_slice(&addr_u256.to_big_endian()[12..])
+            .map_err(|_| EvmError::InvalidAddress)?;
         let mem_offset_usize = mem_offset.as_u64() as usize;
         let code_offset_usize = code_offset.as_u64() as usize;
         let size_usize = size.as_u64() as usize;
@@ -749,7 +755,8 @@ impl<'a> EvmInterpreter<'a> {
 
     fn op_returndatasize(&mut self) -> Result<(), EvmError> {
         consume_gas(&mut self.gas_left, GAS_BASE)?;
-        self.stack.push(U256::from(self.return_data.len()))?;
+        self.stack
+            .push(U256::from_u128(self.return_data.len() as u128))?;
         Ok(())
     }
 
@@ -782,12 +789,15 @@ impl<'a> EvmInterpreter<'a> {
     fn op_extcodehash(&mut self) -> Result<(), EvmError> {
         consume_gas(&mut self.gas_left, 100)?;
         let addr_u256 = self.stack.pop()?;
-        let addr = Address::from_slice(&addr_u256.to_big_endian()[12..]).unwrap();
+        let addr = Address::from_slice(&addr_u256.to_big_endian()[12..])
+            .map_err(|_| EvmError::InvalidAddress)?;
 
         let code = self.context.state.get_code(&addr).unwrap_or_default();
         let hash = keccak256(&code);
 
-        self.stack.push(U256::from_big_endian(&hash))?;
+        self.stack.push(U256::from_u128(u128::from_be_bytes(
+            hash[0..16].try_into().unwrap_or([0u8; 16]),
+        )))?;
         Ok(())
     }
 
@@ -917,7 +927,7 @@ impl<'a> EvmInterpreter<'a> {
             .state
             .get_storage(&self.context.address, &key_hash);
 
-        self.stack.push(value)?;
+        self.stack.push(U256::from_big_endian(value.as_bytes()))?;
         Ok(())
     }
 
@@ -931,9 +941,11 @@ impl<'a> EvmInterpreter<'a> {
         let value = self.stack.pop()?;
 
         let key_hash = Hash::from_bytes(key.to_big_endian());
-        self.context
-            .state
-            .set_storage(self.context.address, key_hash, value);
+        self.context.state.set_storage(
+            self.context.address,
+            key_hash,
+            Hash::from_bytes(value.to_big_endian()),
+        );
 
         Ok(())
     }
@@ -969,13 +981,14 @@ impl<'a> EvmInterpreter<'a> {
 
     fn op_pc(&mut self) -> Result<(), EvmError> {
         consume_gas(&mut self.gas_left, GAS_BASE)?;
-        self.stack.push(U256::from(self.pc))?;
+        self.stack.push(U256::from_u128(self.pc as u128))?;
         Ok(())
     }
 
     fn op_msize(&mut self) -> Result<(), EvmError> {
         consume_gas(&mut self.gas_left, GAS_BASE)?;
-        self.stack.push(U256::from(self.memory.size()))?;
+        self.stack
+            .push(U256::from_u128(self.memory.size() as u128))?;
         Ok(())
     }
 

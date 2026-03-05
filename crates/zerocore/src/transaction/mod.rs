@@ -1,5 +1,7 @@
 //! Transaction module
 
+pub mod pool;
+
 use crate::account::{Account, AccountError, U256};
 use crate::crypto::{Address, Hash, PrivateKey, Signature};
 use serde::{Deserialize, Serialize};
@@ -210,7 +212,7 @@ impl UnsignedTransaction {
             signature,
             sender: Address::from_public_key(&private_key.public_key()),
             hash: Hash::from_bytes(crate::crypto::keccak256(
-                &[signing_hash.as_bytes(), signature.as_bytes()].concat(),
+                &[signing_hash.as_bytes(), &signature.as_bytes()].concat(),
             )),
         }
     }
@@ -358,7 +360,7 @@ impl SignedTransaction {
         // Simplified encoding for demonstration
         let mut data = Vec::new();
         data.extend_from_slice(&self.tx.nonce.to_be_bytes());
-        data.extend_from_slice(self.signature.as_bytes());
+        data.extend_from_slice(&self.signature.as_bytes());
         data
     }
 }
@@ -389,7 +391,7 @@ pub struct TransactionReceipt {
     /// Logs
     pub logs: Vec<Log>,
     /// Logs bloom filter
-    pub logs_bloom: [u8; 256],
+    pub logs_bloom: Vec<u8>,
     /// Status code (1 = success, 0 = failure)
     pub status: u8,
 }
@@ -468,3 +470,5 @@ mod tests {
         assert_eq!(effective_price, U256::from(1_000_000_000));
     }
 }
+
+pub use pool::TransactionPool;

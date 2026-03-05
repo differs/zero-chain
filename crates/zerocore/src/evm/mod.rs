@@ -1,17 +1,17 @@
 //! EVM execution engine - Complete implementation
 
+mod gas;
 mod interpreter;
 mod opcodes;
 mod precompiles;
-mod gas;
 
+pub use gas::*;
 pub use interpreter::*;
 pub use opcodes::*;
 pub use precompiles::*;
-pub use gas::*;
 
+use crate::account::{Account, AccountType, U256};
 use crate::crypto::{Address, Hash, PublicKey};
-use crate::account::{Account, U256, AccountType};
 use crate::transaction::SignedTransaction;
 use thiserror::Error;
 
@@ -48,6 +48,8 @@ pub enum EvmError {
     ExecutionError(String),
     #[error("Precompile error: {0}")]
     PrecompileError(String),
+    #[error("Invalid address")]
+    InvalidAddress,
 }
 
 /// EVM execution result
@@ -106,7 +108,7 @@ impl EvmEngine {
         state: &mut dyn StateDb,
     ) -> Result<ExecutionResult, EvmError> {
         // Calculate contract address
-        let nonce = state.get_nonce(tx.sender).unwrap_or(0);
+        let nonce = state.get_nonce(&tx.sender);
         let contract_address = self.calculate_contract_address(tx.sender, nonce);
 
         // Get init code
@@ -134,7 +136,7 @@ impl EvmEngine {
         state: &mut dyn StateDb,
     ) -> Result<ExecutionResult, EvmError> {
         let to = tx.tx.to.unwrap();
-        let code = state.get_code(to).unwrap_or_default();
+        let code = state.get_code(&to).unwrap_or_default();
 
         if code.is_empty() {
             // Simple transfer
@@ -184,11 +186,11 @@ impl EvmEngine {
 
 /// State database trait
 pub trait StateDb: Send + Sync {
-    fn get_account(&self, address: Address) -> Option<Account>;
-    fn get_balance(&self, address: Address) -> U256;
-    fn get_nonce(&self, address: Address) -> u64;
-    fn get_code(&self, address: Address) -> Option<Vec<u8>>;
-    fn get_storage(&self, address: Address, key: Hash) -> Hash;
+    fn get_account(&self, address: &Address) -> Option<Account>;
+    fn get_balance(&self, address: &Address) -> U256;
+    fn get_nonce(&self, address: &Address) -> u64;
+    fn get_code(&self, address: &Address) -> Option<Vec<u8>>;
+    fn get_storage(&self, address: &Address, key: &Hash) -> Hash;
 
     fn set_balance(&mut self, address: Address, balance: U256);
     fn set_nonce(&mut self, address: Address, nonce: u64);
@@ -219,19 +221,19 @@ mod tests {
     }
 
     impl StateDb for MockStateDb {
-        fn get_account(&self, _address: Address) -> Option<Account> {
+        fn get_account(&self, _address: &Address) -> Option<Account> {
             None
         }
-        fn get_balance(&self, address: Address) -> U256 {
-            *self.balances.get(&address).unwrap_or(&U256::zero())
+        fn get_balance(&self, address: &Address) -> U256 {
+            *self.balances.get(address).unwrap_or(&U256::zero())
         }
-        fn get_nonce(&self, address: Address) -> u64 {
-            *self.nonces.get(&address).unwrap_or(&0)
+        fn get_nonce(&self, address: &Address) -> u64 {
+            *self.nonces.get(address).unwrap_or(&0)
         }
-        fn get_code(&self, address: Address) -> Option<Vec<u8>> {
-            self.codes.get(&address).cloned()
+        fn get_code(&self, address: &Address) -> Option<Vec<u8>> {
+            self.codes.get(address).cloned()
         }
-        fn get_storage(&self, _address: Address, _key: Hash) -> Hash {
+        fn get_storage(&self, _address: &Address, _key: &Hash) -> Hash {
             Hash::zero()
         }
 

@@ -75,7 +75,7 @@ pub enum SubscriptionType {
 }
 
 /// Logs filter
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LogsFilter {
     /// From block
     pub from_block: Option<String>,

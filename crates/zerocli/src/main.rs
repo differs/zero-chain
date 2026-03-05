@@ -3,7 +3,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-use zerocore::{block::create_genesis_block, consensus::{PowConsensus, PowAlgorithm}};
+
 
 mod commands;
 
@@ -80,6 +80,7 @@ enum Commands {
 }
 
 #[derive(Subcommand)]
+#[derive(Debug)]
 enum AccountAction {
     /// Create new account
     New,
@@ -93,6 +94,7 @@ enum AccountAction {
 }
 
 #[derive(Subcommand)]
+#[derive(Debug)]
 enum TransactionAction {
     /// Send transaction
     Send {
@@ -111,6 +113,7 @@ enum TransactionAction {
 }
 
 #[derive(Subcommand)]
+#[derive(Debug)]
 enum BlockAction {
     /// Get latest block
     Latest,
@@ -143,13 +146,13 @@ async fn main() -> Result<()> {
             commands::init::init_data_dir(&cli.data_dir)?;
         }
         Some(Commands::Account { action }) => {
-            commands::account::handle_account(action).await?;
+            commands::account::handle_account(format!("{:?}", action)).await?;
         }
         Some(Commands::Transaction { action }) => {
-            commands::transaction::handle_transaction(action).await?;
+            commands::transaction::handle_transaction(format!("{:?}", action)).await?;
         }
         Some(Commands::Block { action }) => {
-            commands::block::handle_block(action).await?;
+            commands::block::handle_block(format!("{:?}", action)).await?;
         }
         Some(Commands::Console) => {
             commands::console::start_console().await?;

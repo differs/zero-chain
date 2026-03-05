@@ -1,6 +1,6 @@
 //! State management module
 
-use crate::account::{Account, AccountChange, AccountError, U256};
+use crate::account::{Account, AccountChange, AccountError, I256, U256};
 use crate::block::BlockHeader;
 use crate::crypto::{Address, Hash};
 use parking_lot::RwLock;
@@ -101,6 +101,20 @@ impl StateDb {
             .entry(address)
             .or_insert_with(std::collections::HashMap::new)
             .insert(key, value);
+    }
+
+    pub fn set_balance(&self, address: Address, balance: U256) {
+        let mut accounts = self.accounts.write();
+        if let Some(account) = accounts.get_mut(&address) {
+            account.balance = balance;
+        }
+    }
+
+    pub fn set_nonce(&self, address: Address, nonce: u64) {
+        let mut accounts = self.accounts.write();
+        if let Some(account) = accounts.get_mut(&address) {
+            account.nonce = nonce;
+        }
     }
 
     pub fn apply_changes(&self, changes: &[AccountChange]) -> Result<Hash, StateError> {

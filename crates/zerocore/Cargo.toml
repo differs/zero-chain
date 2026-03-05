@@ -40,6 +40,7 @@ lru.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 num_cpus.workspace = true
+rand = "0.8"
 
 [dev-dependencies]
 criterion = "0.5"
@@ -49,3 +50,4 @@ proptest = "1.4"
 [[bench]]
 name = "evm_bench"
 harness = false
+path = "../../benches/evm_bench.rs"

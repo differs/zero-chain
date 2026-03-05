@@ -28,7 +28,7 @@ pub use consensus::{Consensus, PowAlgorithm};
 pub use crypto::{Address, Hash, PublicKey, PrivateKey, Signature};
 pub use evm::EvmEngine;
 pub use state::StateDb;
-pub use transaction::{Transaction, SignedTransaction};
+pub use transaction::{UnsignedTransaction as Transaction, SignedTransaction};
 
 /// ZeroChain protocol version
 pub const PROTOCOL_VERSION: u32 = 1;

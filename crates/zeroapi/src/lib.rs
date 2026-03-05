@@ -11,6 +11,7 @@
 pub mod rpc;
 pub mod rest;
 pub mod ws;
+pub mod subscription;
 
 pub use rpc::{RpcServer, RpcConfig, RpcApi};
 pub use rest::{RestServer, RestConfig};
@@ -20,7 +21,7 @@ use std::sync::Arc;
 use thiserror::Error;
 
 /// API error types
-#[derive(Error, Debug, Clone)]
+#[derive(Error, Debug)]
 pub enum ApiError {
     #[error("IO error: {0}")]
     IO(#[from] std::io::Error),
