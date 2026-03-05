@@ -66,3 +66,8 @@ path = "benches/transaction_bench.rs"
 name = "parallel_bench"
 harness = false
 path = "benches/parallel_bench.rs"
+
+[[bench]]
+name = "real_validation_bench"
+harness = false
+path = "benches/real_validation_bench.rs"
