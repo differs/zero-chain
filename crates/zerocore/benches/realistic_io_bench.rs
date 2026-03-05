@@ -76,7 +76,7 @@ fn execute_transactions_realistic(
         // 2. 检查余额 (需要数据库查询 - 真实 I/O)
         let sender = tx.sender();
         if let Some(account) = state_db.get_account(&sender) {
-            if account.balance < tx.value {
+            if account.balance < tx.value() {
                 continue; // 余额不足
             }
         } else {
@@ -85,7 +85,7 @@ fn execute_transactions_realistic(
         
         // 3. 检查 nonce (内存 + 数据库)
         if let Some(account) = state_db.get_account(&sender) {
-            if tx.nonce() < account.nonce {
+            if tx.nonce < account.nonce {
                 continue; // nonce 过小
             }
         }
