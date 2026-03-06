@@ -92,3 +92,8 @@ path = "benches/full_execution_bench.rs"
 name = "realistic_io_bench"
 harness = false
 path = "benches/realistic_io_bench.rs"
+
+[[bench]]
+name = "evm_contract_bench"
+harness = false
+path = "benches/evm_contract_bench.rs"
