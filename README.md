@@ -199,6 +199,18 @@ cargo test -- --nocapture
 bash scripts/run_tests.sh
 ```
 
+### Observability (OpenTelemetry)
+
+```bash
+# Start local collector + Jaeger
+cd deploy/observability && docker compose up -d
+
+# Run node with OTel export
+zerocchain --otel-enabled --otel-endpoint http://127.0.0.1:4317 --network testnet run
+```
+
+See `docs/OBSERVABILITY.md` for details.
+
 Release gate report path:
 
 ```text

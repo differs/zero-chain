@@ -1,7 +1,9 @@
 //! JSON-RPC Server Implementation
 
 use axum::{extract::DefaultBodyLimit, extract::State, routing::post, Json, Router};
+use once_cell::sync::Lazy;
 use parking_lot::RwLock;
+use prometheus::{Encoder, IntCounterVec, IntGauge, Registry, TextEncoder};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -22,6 +24,83 @@ use zerocore::state::StateDb;
 use zerocore::transaction::{pool::TxPoolConfig, SignedTransaction, TransactionPool};
 use zerostore::db::{KeyValueDB, MemDatabase, RedbDatabase, RocksDb};
 use zerostore::ComputeStore;
+
+static RPC_METRICS: Lazy<RpcMetrics> = Lazy::new(RpcMetrics::new);
+
+struct RpcMetrics {
+    registry: Registry,
+    method_calls: IntCounterVec,
+    method_errors: IntCounterVec,
+    mining_shares_accepted: IntCounterVec,
+    mining_shares_rejected: IntCounterVec,
+    latest_block_height: IntGauge,
+}
+
+impl RpcMetrics {
+    fn new() -> Self {
+        let registry = Registry::new();
+        let method_calls = IntCounterVec::new(
+            prometheus::Opts::new("zero_rpc_method_calls_total", "RPC method call count"),
+            &["method"],
+        )
+        .expect("method_calls metric");
+        let method_errors = IntCounterVec::new(
+            prometheus::Opts::new("zero_rpc_method_errors_total", "RPC method error count"),
+            &["method"],
+        )
+        .expect("method_errors metric");
+        let mining_shares_accepted = IntCounterVec::new(
+            prometheus::Opts::new("zero_mining_shares_accepted_total", "Accepted mining shares"),
+            &["source"],
+        )
+        .expect("mining_shares_accepted metric");
+        let mining_shares_rejected = IntCounterVec::new(
+            prometheus::Opts::new("zero_mining_shares_rejected_total", "Rejected mining shares"),
+            &["reason"],
+        )
+        .expect("mining_shares_rejected metric");
+        let latest_block_height = IntGauge::new(
+            "zero_latest_block_height",
+            "Latest block height observed by RPC",
+        )
+        .expect("latest_block_height metric");
+
+        registry
+            .register(Box::new(method_calls.clone()))
+            .expect("register method_calls");
+        registry
+            .register(Box::new(method_errors.clone()))
+            .expect("register method_errors");
+        registry
+            .register(Box::new(mining_shares_accepted.clone()))
+            .expect("register mining_shares_accepted");
+        registry
+            .register(Box::new(mining_shares_rejected.clone()))
+            .expect("register mining_shares_rejected");
+        registry
+            .register(Box::new(latest_block_height.clone()))
+            .expect("register latest_block_height");
+
+        Self {
+            registry,
+            method_calls,
+            method_errors,
+            mining_shares_accepted,
+            mining_shares_rejected,
+            latest_block_height,
+        }
+    }
+
+    fn render(&self) -> Result<String, RpcErrorObject> {
+        let families = self.registry.gather();
+        let mut out = Vec::new();
+        TextEncoder::new()
+            .encode(&families, &mut out)
+            .map_err(|e| RpcErrorObject::internal_error(format!("encode metrics failed: {e}")))?;
+        String::from_utf8(out)
+            .map_err(|e| RpcErrorObject::internal_error(format!("metrics utf8 failed: {e}")))
+    }
+}
 
 /// RPC configuration
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -297,6 +376,10 @@ impl RpcApi {
 
     /// Handle RPC request
     pub async fn handle_request(&self, request: JsonRpcRequest) -> JsonRpcResponse {
+        RPC_METRICS
+            .method_calls
+            .with_label_values(&[request.method.as_str()])
+            .inc();
         let result = self.dispatch_method(&request.method, request.params).await;
 
         match result {
@@ -306,12 +389,18 @@ impl RpcApi {
                 error: None,
                 id: request.id,
             },
-            Err(error) => JsonRpcResponse {
-                jsonrpc: "2.0".into(),
-                result: None,
-                error: Some(error),
-                id: request.id,
-            },
+            Err(error) => {
+                RPC_METRICS
+                    .method_errors
+                    .with_label_values(&[request.method.as_str()])
+                    .inc();
+                JsonRpcResponse {
+                    jsonrpc: "2.0".into(),
+                    result: None,
+                    error: Some(error),
+                    id: request.id,
+                }
+            }
         }
     }
 
@@ -364,6 +453,7 @@ impl RpcApi {
             "zero_submitWork" => self.zero_submit_work(params),
             "zero_getLatestBlock" => self.zero_get_latest_block(params),
             "zero_importBlock" => self.zero_import_block(params),
+            "zero_getMetrics" => self.zero_get_metrics(params),
 
             _ => Err(RpcErrorObject::method_not_found(method)),
         }
@@ -914,6 +1004,10 @@ impl RpcApi {
             .map_err(|e| RpcErrorObject::invalid_params(format!("invalid hash hex: {e}")))?;
         let leading = hash_bytes.iter().take_while(|b| **b == 0).count();
         if leading < work.target_leading_zero_bytes {
+            RPC_METRICS
+                .mining_shares_rejected
+                .with_label_values(&["low_difficulty_share"])
+                .inc();
             return Ok(serde_json::json!({
                 "accepted": false,
                 "reason": "low_difficulty_share"
@@ -927,6 +1021,10 @@ impl RpcApi {
         data.extend_from_slice(&req.nonce.to_be_bytes());
         let expected = zerocore::crypto::keccak256(&data);
         if expected.as_slice() != hash_bytes.as_slice() {
+            RPC_METRICS
+                .mining_shares_rejected
+                .with_label_values(&["invalid_pow_hash"])
+                .inc();
             return Ok(serde_json::json!({
                 "accepted": false,
                 "reason": "invalid_pow_hash"
@@ -937,6 +1035,10 @@ impl RpcApi {
             let mut counter = self.hashrate_counter.write();
             *counter = counter.saturating_add(1);
         }
+        RPC_METRICS
+            .mining_shares_accepted
+            .with_label_values(&["zero_submitWork"])
+            .inc();
 
         // Build and publish a synthetic block header into latest_block for MVP chain progress.
         let parent = self.latest_block.read().as_ref().map(|b| b.header.clone());
@@ -979,12 +1081,23 @@ impl RpcApi {
             uncles: Vec::new(),
         };
         *self.latest_block.write() = Some(block);
+        RPC_METRICS
+            .latest_block_height
+            .set(header.number.as_u64() as i64);
 
         Ok(serde_json::json!({
             "accepted": true,
             "block_hash": format!("0x{}", hex::encode(header.hash.as_bytes())),
             "height": header.number.as_u64(),
         }))
+    }
+
+    fn zero_get_metrics(
+        &self,
+        _params: Option<Vec<serde_json::Value>>,
+    ) -> Result<serde_json::Value, RpcErrorObject> {
+        let text = RPC_METRICS.render()?;
+        Ok(serde_json::json!({ "text": text }))
     }
 
     fn zero_get_latest_block(
@@ -1236,7 +1349,8 @@ impl RpcServer {
         if let Some(tx) = self.shutdown_tx.lock().take() {
             let _ = tx.send(());
         }
-        if let Some(task) = self.server_task.lock().take() {
+        let task = self.server_task.lock().take();
+        if let Some(task) = task {
             let _ = task.await;
         }
         Ok(())
@@ -2036,6 +2150,38 @@ mod tests {
             .expect("import call should return result");
         assert_eq!(bad_import["imported"].as_bool(), Some(false));
         assert_eq!(bad_import["reason"].as_str(), Some("parent_mismatch"));
+    }
+
+    #[test]
+    fn test_zero_get_metrics_contains_rpc_and_mining_counters() {
+        let api = build_test_api_with_persistent_compute();
+
+        let _ = futures::executor::block_on(api.handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "zero_getWork".to_string(),
+            params: Some(vec![]),
+            id: serde_json::json!(1),
+        }));
+        let _ = futures::executor::block_on(api.handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "zero_submitWork".to_string(),
+            params: Some(vec![serde_json::json!({
+                "work_id": "work-stale-2",
+                "nonce": 1,
+                "hash_hex": "0x00",
+                "miner": "metric-miner"
+            })]),
+            id: serde_json::json!(2),
+        }));
+
+        let metrics = api.zero_get_metrics(None).expect("metrics should render");
+        let text = metrics
+            .get("text")
+            .and_then(|v| v.as_str())
+            .expect("metrics text missing");
+
+        assert!(text.contains("zero_rpc_method_calls_total"));
+        assert!(text.contains("zero_rpc_method_errors_total"));
     }
 
     #[test]

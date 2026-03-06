@@ -33,6 +33,8 @@ tracing.workspace = true
 parking_lot.workspace = true
 hex.workspace = true
 bytes.workspace = true
+once_cell.workspace = true
+prometheus.workspace = true
 uuid = { version = "1.6", features = ["v4"] }
 
 # WebSocket

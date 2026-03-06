@@ -5,6 +5,9 @@
 use crate::commands::wallet::{WalletCommand, WalletScheme};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use opentelemetry::KeyValue;
+use opentelemetry_otlp::WithExportConfig;
+use tracing_opentelemetry::OpenTelemetryLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use zeroapi::rpc::{ComputeBackend, RpcConfig};
 use zeroapi::ApiConfig;
@@ -37,6 +40,14 @@ struct Cli {
     /// Optional node config file (JSON)
     #[arg(long)]
     config: Option<String>,
+
+    /// Enable OpenTelemetry tracing export (OTLP)
+    #[arg(long, default_value_t = false)]
+    otel_enabled: bool,
+
+    /// OTLP endpoint, e.g. http://127.0.0.1:4317
+    #[arg(long, default_value = "http://127.0.0.1:4317")]
+    otel_endpoint: String,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -237,19 +248,28 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let data_dir = expand_data_dir(&cli.data_dir);
 
-    // Initialize logging
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                format!(
-                    "info,zeroccore={},zeronet={},zeroapi={}",
-                    cli.log_level, cli.log_level, cli.log_level
-                )
-                .into()
-            }),
+    // Initialize logging / tracing
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        format!(
+            "info,zeroccore={},zeronet={},zeroapi={}",
+            cli.log_level, cli.log_level, cli.log_level
         )
-        .with(tracing_subscriber::fmt::layer())
-        .init();
+        .into()
+    });
+
+    if cli.otel_enabled {
+        let tracer = init_otel_tracer(&cli.otel_endpoint)?;
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(tracing_subscriber::fmt::layer())
+            .with(OpenTelemetryLayer::new(tracer))
+            .init();
+    } else {
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(tracing_subscriber::fmt::layer())
+            .init();
+    }
 
     match cli.command {
         Some(Commands::Run {
@@ -345,6 +365,25 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn init_otel_tracer(endpoint: &str) -> Result<opentelemetry_sdk::trace::Tracer> {
+    let exporter = opentelemetry_otlp::new_exporter()
+        .tonic()
+        .with_endpoint(endpoint.to_string());
+
+    let tracer = opentelemetry_otlp::new_pipeline()
+        .tracing()
+        .with_exporter(exporter)
+        .with_trace_config(
+            opentelemetry_sdk::trace::Config::default().with_resource(
+                opentelemetry_sdk::Resource::new(vec![KeyValue::new("service.name", "zerocchain")]),
+            ),
+        )
+        .install_batch(opentelemetry_sdk::runtime::Tokio)
+        .map_err(|e| anyhow::anyhow!("failed to init otel tracer: {e}"))?;
+
+    Ok(tracer)
 }
 
 fn expand_data_dir(input: &str) -> String {
