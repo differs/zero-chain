@@ -308,17 +308,12 @@ impl SignedTransaction {
     /// Verify transaction signature
     pub fn verify_signature(&self) -> Result<bool, TransactionError> {
         let signing_hash = self.tx.signing_hash();
-        self.signature
-            .verify(
-                signing_hash.as_bytes(),
-                &crate::crypto::PublicKey::from_bytes({
-                    let mut bytes = [0u8; 65];
-                    bytes[0] = 0x04;
-                    bytes
-                })
-                .unwrap(),
-            )
-            .map_err(|_| TransactionError::InvalidSignature)
+        let recovered = self
+            .signature
+            .recover(signing_hash.as_bytes())
+            .map_err(|_| TransactionError::InvalidSignature)?;
+        let recovered_addr = Address::from_public_key(&recovered);
+        Ok(recovered_addr == self.sender)
     }
 
     /// Validate transaction

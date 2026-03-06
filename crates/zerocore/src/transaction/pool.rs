@@ -510,7 +510,14 @@ impl TransactionPool {
             }
         }
         
-        let avg_gas_price = total_gas_price / U256::from(total as u64);
+        let avg_gas_price = {
+            let mut sum: u128 = 0;
+            for tx in transactions.values() {
+                sum = sum.saturating_add(tx.gas_price.as_u64() as u128);
+            }
+            let avg = if total == 0 { 0 } else { sum / total as u128 };
+            U256::from(avg as u64)
+        };
         
         *self.stats.write() = TxPoolStats {
             total_transactions: total,
@@ -565,7 +572,6 @@ mod tests {
     use crate::account::InMemoryAccountManager;
     
     #[tokio::test]
-    #[ignore = "Signature validation needs k256 library fix"]
     async fn test_add_transaction() {
         let config = TxPoolConfig::default();
         let manager = Arc::new(InMemoryAccountManager::new());
@@ -599,7 +605,6 @@ mod tests {
     }
     
     #[tokio::test]
-    #[ignore = "Signature validation needs k256 library fix"]
     async fn test_select_transactions() {
         let config = TxPoolConfig::default();
         let manager = Arc::new(InMemoryAccountManager::new());
@@ -609,7 +614,7 @@ mod tests {
         for i in 0..5 {
             let private_key = PrivateKey::random();
             let tx = UnsignedTransaction::new_legacy(
-                i,
+                0,
                 U256::from(1_000_000_000 + i * 100_000_000),
                 U256::from(21000),
                 Some(Address::from_bytes([1u8; 20])),
@@ -628,7 +633,6 @@ mod tests {
     }
     
     #[tokio::test]
-    #[ignore = "Signature validation needs k256 library fix"]
     async fn test_pool_stats() {
         let config = TxPoolConfig::default();
         let manager = Arc::new(InMemoryAccountManager::new());

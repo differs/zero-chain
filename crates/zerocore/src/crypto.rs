@@ -522,7 +522,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Signature verification requires k256 library version compatibility"]
     fn test_signature_roundtrip() {
         let private_key = PrivateKey::random();
         let public_key = private_key.public_key();
