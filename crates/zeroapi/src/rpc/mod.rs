@@ -1,10 +1,11 @@
 //! JSON-RPC Server Implementation
 
-use axum::{extract::State, routing::post, Json, Router};
+use axum::{extract::DefaultBodyLimit, extract::State, routing::post, Json, Router};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::oneshot;
 use tower_http::cors::{Any, CorsLayer};
 use zerocore::account::{InMemoryAccountManager, U256};
 use zerocore::block::{Block, BlockHeader};
@@ -1044,6 +1045,8 @@ fn compute_error_to_json(err: &zerocore::compute::ComputeError) -> serde_json::V
 pub struct RpcServer {
     config: RpcConfig,
     api: Option<Arc<RpcApi>>,
+    server_task: parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    shutdown_tx: parking_lot::Mutex<Option<oneshot::Sender<()>>>,
 }
 
 impl RpcServer {
@@ -1052,7 +1055,12 @@ impl RpcServer {
         config.validate().map_err(crate::ApiError::InvalidRequest)?;
 
         let api = Some(Arc::new(build_default_rpc_api(config.clone())));
-        Ok(Self { config, api })
+        Ok(Self {
+            config,
+            api,
+            server_task: parking_lot::Mutex::new(None),
+            shutdown_tx: parking_lot::Mutex::new(None),
+        })
     }
 
     pub fn new(config: RpcConfig) -> Self {
@@ -1071,6 +1079,8 @@ impl RpcServer {
         Self {
             config,
             api: Some(api),
+            server_task: parking_lot::Mutex::new(None),
+            shutdown_tx: parking_lot::Mutex::new(None),
         }
     }
 
@@ -1080,13 +1090,60 @@ impl RpcServer {
     }
 
     pub async fn start(&self) -> Result<(), crate::ApiError> {
-        // Would start HTTP server
+        if self.server_task.lock().is_some() {
+            return Ok(());
+        }
+
+        let api = self
+            .api
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| crate::ApiError::Internal("RPC API not initialized".to_string()))?;
+
+        let app = Router::new()
+            .route("/", post(handle_rpc_request))
+            .layer(DefaultBodyLimit::max(self.config.max_request_size))
+            .layer(CorsLayer::new().allow_origin(Any).allow_headers(Any).allow_methods(Any))
+            .with_state(api);
+
+        let bind_addr = format!("{}:{}", self.config.address, self.config.port);
+        let listener = tokio::net::TcpListener::bind(&bind_addr)
+            .await
+            .map_err(|e| crate::ApiError::IO(std::io::Error::new(std::io::ErrorKind::AddrInUse, e)))?;
+
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        *self.shutdown_tx.lock() = Some(shutdown_tx);
+
+        let task = tokio::spawn(async move {
+            let server = axum::serve(listener, app).with_graceful_shutdown(async {
+                let _ = shutdown_rx.await;
+            });
+
+            if let Err(err) = server.await {
+                tracing::error!("RPC server exited with error: {}", err);
+            }
+        });
+
+        *self.server_task.lock() = Some(task);
         Ok(())
     }
 
     pub async fn stop(&self) -> Result<(), crate::ApiError> {
+        if let Some(tx) = self.shutdown_tx.lock().take() {
+            let _ = tx.send(());
+        }
+        if let Some(task) = self.server_task.lock().take() {
+            let _ = task.await;
+        }
         Ok(())
     }
+}
+
+async fn handle_rpc_request(
+    State(api): State<Arc<RpcApi>>,
+    Json(request): Json<JsonRpcRequest>,
+) -> Json<JsonRpcResponse> {
+    Json(api.handle_request(request).await)
 }
 
 fn build_default_rpc_api(config: RpcConfig) -> RpcApi {

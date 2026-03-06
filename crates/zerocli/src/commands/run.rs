@@ -101,7 +101,7 @@ pub async fn run_node(
     println!("✅ Node started successfully!");
     println!("   Press Ctrl+C to stop");
 
-    if let Some(mut cfg) = rpc_config {
+    let _api_service = if let Some(mut cfg) = rpc_config {
         cfg.port = http_port;
         let mut api_cfg = ApiConfig {
             http_rpc: cfg,
@@ -116,7 +116,10 @@ pub async fn run_node(
             .await
             .map_err(|e| anyhow::anyhow!("failed to start API service: {e}"))?;
         println!("   HTTP RPC service started on port {}", http_port);
-    }
+        Some(api)
+    } else {
+        None
+    };
 
     // Keep running
     loop {
