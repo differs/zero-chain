@@ -1,5 +1,5 @@
 //! Account management module
-//! 
+//!
 //! ZeroChain uses a hybrid account model combining:
 //! - Balance-based model (Ethereum compatible)
 //! - UTXO model (for privacy and parallel execution)

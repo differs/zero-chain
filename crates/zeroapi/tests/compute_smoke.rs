@@ -1,5 +1,8 @@
 use zeroapi::rpc::{ComputeBackend, JsonRpcRequest, RpcConfig, RpcServer};
-use zerocore::compute::{Command, ComputeTx, DomainId, ObjectKind, ObjectReadRef, ObjectId, OutputId, OutputProposal, Ownership, TxId, TxSignature, TxWitness, Version};
+use zerocore::compute::{
+    Command, ComputeTx, DomainId, ObjectId, ObjectKind, ObjectReadRef, OutputId, OutputProposal,
+    Ownership, TxId, TxSignature, TxWitness, Version,
+};
 use zerocore::crypto::{Hash, Signature};
 
 fn parse_result(resp: &zeroapi::rpc::JsonRpcResponse) -> serde_json::Value {
@@ -49,10 +52,7 @@ async fn compute_submit_result_output_smoke() {
     let tx_id = format!("0x{}", tx.tx_id.0.to_hex());
     let output_id = format!("0x{}", hex::encode([0xB2u8; 32]));
     let object_id = format!("0x{}", hex::encode([0xB3u8; 32]));
-    let sig_hex = format!(
-        "0x{}",
-        hex::encode(&tx.witness.signatures[0].bytes)
-    );
+    let sig_hex = format!("0x{}", hex::encode(&tx.witness.signatures[0].bytes));
 
     let submit_req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
@@ -85,7 +85,10 @@ async fn compute_submit_result_output_smoke() {
 
     let submit_resp = api.handle_request(submit_req).await;
     let submit_result = parse_result(&submit_resp);
-    assert_eq!(submit_result.get("ok").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(
+        submit_result.get("ok").and_then(|v| v.as_bool()),
+        Some(true)
+    );
 
     let result_req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),

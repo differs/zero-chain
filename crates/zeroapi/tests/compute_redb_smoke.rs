@@ -1,7 +1,10 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use zeroapi::rpc::{ComputeBackend, JsonRpcRequest, RpcConfig, RpcServer};
-use zerocore::compute::{Command, ComputeTx, DomainId, ObjectKind, ObjectReadRef, ObjectId, OutputId, OutputProposal, Ownership, TxId, TxSignature, TxWitness, Version};
+use zerocore::compute::{
+    Command, ComputeTx, DomainId, ObjectId, ObjectKind, ObjectReadRef, OutputId, OutputProposal,
+    Ownership, TxId, TxSignature, TxWitness, Version,
+};
 use zerocore::crypto::{Hash, Signature};
 
 fn parse_result(resp: &zeroapi::rpc::JsonRpcResponse) -> serde_json::Value {
@@ -90,7 +93,10 @@ async fn compute_submit_result_output_smoke_redb_backend() {
 
     let submit_resp = api.handle_request(submit_req).await;
     let submit_result = parse_result(&submit_resp);
-    assert_eq!(submit_result.get("ok").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(
+        submit_result.get("ok").and_then(|v| v.as_bool()),
+        Some(true)
+    );
 
     let query_resp = api
         .handle_request(JsonRpcRequest {

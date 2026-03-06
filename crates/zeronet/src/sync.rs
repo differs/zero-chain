@@ -1,8 +1,8 @@
 //! Sync module - Placeholder
 
-use std::sync::Arc;
+use crate::{NetworkError, Result};
 use parking_lot::RwLock;
-use crate::{Result, NetworkError};
+use std::sync::Arc;
 
 /// Sync state
 #[derive(Clone, Debug, PartialEq)]
@@ -34,7 +34,10 @@ impl SyncManager {
     }
 
     pub async fn start(&self, _target: u64) -> Result<()> {
-        *self.state.write() = SyncState::Syncing { current: 0, target: _target };
+        *self.state.write() = SyncState::Syncing {
+            current: 0,
+            target: _target,
+        };
         Ok(())
     }
 

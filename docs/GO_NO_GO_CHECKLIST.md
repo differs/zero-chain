@@ -97,6 +97,16 @@
 6. 无异常再逐步全量。  
 7. 发布后 24 小时重点值守。
 
+自动化门禁建议：
+
+- 使用 `scripts/run_tests.sh` 作为统一 release gate 入口。
+- CI 执行并上传 `artifacts/release-gate/go-no-go-report.md`。
+- 该自动化门禁覆盖：
+  - `cargo fmt --all --check`
+  - `cargo check --workspace`
+  - `cargo test --workspace`
+  - `cargo test --workspace -- --ignored`（信息项）
+
 ---
 
 ## 5. Go/No-Go 结论模板

@@ -1,19 +1,19 @@
 //! WebSocket Server Core Implementation
 
-use super::{WsConfig, SubscriptionManager, SubscriptionType, LogsFilter, WsNotification, WsError};
-use crate::{Result, ApiError};
+use super::{LogsFilter, SubscriptionManager, SubscriptionType, WsConfig, WsError, WsNotification};
+use crate::{ApiError, Result};
 use axum::{
-    extract::ws::{WebSocket, WebSocketUpgrade, Message, CloseFrame},
+    extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade},
     extract::State,
     response::IntoResponse,
     Json,
 };
 use futures_util::{SinkExt, StreamExt};
-use tokio::sync::broadcast;
-use std::sync::Arc;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn, error};
+use std::sync::Arc;
+use tokio::sync::broadcast;
+use tracing::{error, info, warn};
 
 /// WebSocket server
 pub struct WsServer {
@@ -32,38 +32,38 @@ impl WsServer {
             shutdown_signal: RwLock::new(None),
         }
     }
-    
+
     /// Get subscription manager
     pub fn manager(&self) -> Arc<SubscriptionManager> {
         self.manager.clone()
     }
-    
+
     /// Start server
     pub async fn start(&self) -> Result<()> {
         let addr = format!("{}:{}", self.config.address, self.config.port);
-        
+
         info!("Starting WebSocket server on {}", addr);
-        
+
         // Create shutdown channel
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::broadcast::channel(1);
         *self.shutdown_signal.write() = Some(shutdown_tx);
-        
+
         // Would start actual WebSocket server here
         // For now, just simulate
-        
+
         Ok(())
     }
-    
+
     /// Stop server
     pub async fn stop(&self) -> Result<()> {
         if let Some(tx) = &*self.shutdown_signal.read() {
             let _ = tx.send(());
             info!("WebSocket server stopping");
         }
-        
+
         Ok(())
     }
-    
+
     /// Handle WebSocket upgrade
     pub fn handle_ws(&self) -> impl IntoResponse + '_ {
         axum::response::IntoResponse::into_response("WebSocket not fully implemented")
@@ -71,7 +71,7 @@ impl WsServer {
     /// Handle WebSocket connection
     async fn handle_socket(&self, socket: WebSocket) {
         let (mut sender, mut receiver) = socket.split();
-        
+
         // Check connection limit
         if !self.manager.add_connection() {
             warn!("Connection limit reached");
@@ -83,15 +83,15 @@ impl WsServer {
                 .await;
             return;
         }
-        
+
         info!("New WebSocket connection");
-        
+
         // Subscribe to broadcast channels
         let channels = self.manager.get_channels();
         let mut new_heads_rx = channels.new_heads.subscribe();
         let mut new_pending_txs_rx = channels.new_pending_txs.subscribe();
         let mut logs_rx = channels.logs.subscribe();
-        
+
         // Spawn task to handle incoming messages
         let manager = self.manager.clone();
         let handle_incoming = tokio::spawn(async move {
@@ -113,7 +113,7 @@ impl WsServer {
                 }
             }
         });
-        
+
         // Spawn task to broadcast messages
         let handle_broadcast = tokio::spawn(async move {
             loop {
@@ -147,13 +147,13 @@ impl WsServer {
                 }
             }
         });
-        
+
         // Wait for either task to complete
         tokio::select! {
             _ = handle_incoming => {},
             _ = handle_broadcast => {},
         }
-        
+
         // Cleanup
         self.manager.remove_connection();
         info!("WebSocket connection closed");
@@ -196,18 +196,16 @@ async fn handle_incoming_message(
     sender: &mut tokio::sync::mpsc::Sender<Message>,
 ) -> Result<()> {
     // Parse request
-    let request: WsRequest = serde_json::from_str(text)
-        .map_err(|e| ApiError::Serialization(e.to_string()))?;
-    
+    let request: WsRequest =
+        serde_json::from_str(text).map_err(|e| ApiError::Serialization(e.to_string()))?;
+
     // Handle method
     let response = match request.method.as_str() {
         "eth_subscribe" => handle_subscribe(&request, manager),
         "eth_unsubscribe" => handle_unsubscribe(&request, manager),
-        _ => {
-            Err(ApiError::Rpc("Method not supported".into()))
-        }
+        _ => Err(ApiError::Rpc("Method not supported".into())),
     };
-    
+
     // Send response
     let ws_response = match response {
         Ok(result) => WsResponse {
@@ -227,28 +225,37 @@ async fn handle_incoming_message(
             id: request.id,
         },
     };
-    
+
     let response_text = serde_json::to_string(&ws_response).unwrap();
-    sender.send(Message::Text(response_text)).await
+    sender
+        .send(Message::Text(response_text))
+        .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
-    
+
     Ok(())
 }
 
 /// Handle eth_subscribe
-fn handle_subscribe(request: &WsRequest, manager: &Arc<SubscriptionManager>) -> Result<serde_json::Value> {
-    let params = request.params.as_ref()
+fn handle_subscribe(
+    request: &WsRequest,
+    manager: &Arc<SubscriptionManager>,
+) -> Result<serde_json::Value> {
+    let params = request
+        .params
+        .as_ref()
         .ok_or_else(|| ApiError::Rpc("Missing params".into()))?;
-    
-    let sub_type_str = params.get(0)
+
+    let sub_type_str = params
+        .get(0)
         .and_then(|v| v.as_str())
         .ok_or_else(|| ApiError::Rpc("Missing subscription type".into()))?;
-    
+
     let sub_type = match sub_type_str {
         "newHeads" => SubscriptionType::NewHeads,
         "newPendingTransactions" => SubscriptionType::NewPendingTransactions,
         "logs" => {
-            let filter = params.get(1)
+            let filter = params
+                .get(1)
                 .and_then(|v| serde_json::from_value::<LogsFilter>(v.clone()).ok())
                 .unwrap_or_default();
             SubscriptionType::Logs(filter)
@@ -256,50 +263,56 @@ fn handle_subscribe(request: &WsRequest, manager: &Arc<SubscriptionManager>) -> 
         "syncing" => SubscriptionType::Syncing,
         _ => return Err(ApiError::Rpc("Invalid subscription type".into())),
     };
-    
+
     // Create subscription
     let id = manager.create_subscription(sub_type);
-    
+
     Ok(serde_json::json!(id))
 }
 
 /// Handle eth_unsubscribe
-fn handle_unsubscribe(request: &WsRequest, manager: &Arc<SubscriptionManager>) -> Result<serde_json::Value> {
-    let params = request.params.as_ref()
+fn handle_unsubscribe(
+    request: &WsRequest,
+    manager: &Arc<SubscriptionManager>,
+) -> Result<serde_json::Value> {
+    let params = request
+        .params
+        .as_ref()
         .ok_or_else(|| ApiError::Rpc("Missing params".into()))?;
-    
-    let id = params.get(0)
+
+    let id = params
+        .get(0)
         .and_then(|v| v.as_str())
         .ok_or_else(|| ApiError::Rpc("Missing subscription id".into()))?;
-    
+
     let removed = manager.remove_subscription(id);
-    
+
     Ok(serde_json::json!(removed))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_subscribe_request() {
         let manager = Arc::new(SubscriptionManager::new(10));
-        
+
         let request = WsRequest {
             jsonrpc: "2.0".to_string(),
             method: "eth_subscribe".to_string(),
             params: Some(vec![serde_json::json!("newHeads")]),
             id: serde_json::json!(1),
         };
-        
+
         let result = handle_subscribe(&request, &manager);
         assert!(result.is_ok());
     }
-    
+
     #[test]
     fn test_unsubscribe_request() {
         let manager = Arc::new(SubscriptionManager::new(10));
-        
+
         // Create subscription first
         let sub_request = WsRequest {
             jsonrpc: "2.0".to_string(),
@@ -307,9 +320,9 @@ mod tests {
             params: Some(vec![serde_json::json!("newHeads")]),
             id: serde_json::json!(1),
         };
-        
+
         let sub_id = handle_subscribe(&sub_request, &manager).unwrap();
-        
+
         // Unsubscribe
         let unsub_request = WsRequest {
             jsonrpc: "2.0".to_string(),
@@ -317,7 +330,7 @@ mod tests {
             params: Some(vec![sub_id.clone()]),
             id: serde_json::json!(2),
         };
-        
+
         let result = handle_unsubscribe(&unsub_request, &manager);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), serde_json::json!(true));

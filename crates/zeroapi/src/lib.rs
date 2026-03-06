@@ -1,5 +1,5 @@
 //! ZeroChain API Services
-//! 
+//!
 //! Provides:
 //! - JSON-RPC server (Ethereum compatible)
 //! - REST API
@@ -9,14 +9,14 @@
 #![allow(rustdoc::missing_crate_level_docs)]
 #![allow(unused)]
 
-pub mod rpc;
 pub mod rest;
-pub mod ws;
+pub mod rpc;
 pub mod subscription;
+pub mod ws;
 
-pub use rpc::{RpcServer, RpcConfig, RpcApi};
-pub use rest::{RestServer, RestConfig};
-pub use ws::{WsServer, WsConfig, SubscriptionManager};
+pub use rest::{RestConfig, RestServer};
+pub use rpc::{RpcApi, RpcConfig, RpcServer};
+pub use ws::{SubscriptionManager, WsConfig, WsServer};
 
 use std::sync::Arc;
 use thiserror::Error;
@@ -41,8 +41,7 @@ pub enum ApiError {
 pub type Result<T> = std::result::Result<T, ApiError>;
 
 /// API configuration
-#[derive(Clone, Debug)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ApiConfig {
     /// HTTP RPC config
     pub http_rpc: RpcConfig,
@@ -88,24 +87,26 @@ impl ApiService {
     /// Returns an error when configuration is invalid.
     pub fn try_new(config: ApiConfig) -> Result<Self> {
         let rpc_server = if config.enable_http_rpc {
-            Some(RpcServer::try_new(config.http_rpc.clone())
-                .map_err(|e| ApiError::Rpc(e.to_string()))?)
+            Some(
+                RpcServer::try_new(config.http_rpc.clone())
+                    .map_err(|e| ApiError::Rpc(e.to_string()))?,
+            )
         } else {
             None
         };
-        
+
         let ws_server = if config.enable_ws {
             Some(WsServer::new(config.ws.clone()))
         } else {
             None
         };
-        
+
         let rest_server = if config.enable_rest {
             Some(RestServer::new(config.rest.clone()))
         } else {
             None
         };
-        
+
         Ok(Self {
             config,
             rpc_server,
@@ -124,41 +125,41 @@ impl ApiService {
             }
         }
     }
-    
+
     /// Start API service
     pub async fn start(&self) -> Result<()> {
         if let Some(rpc) = &self.rpc_server {
             rpc.start().await?;
             tracing::info!("HTTP RPC started on {}", self.config.http_rpc.address);
         }
-        
+
         if let Some(ws) = &self.ws_server {
             ws.start().await?;
             tracing::info!("WebSocket started on {}", self.config.ws.address);
         }
-        
+
         if let Some(rest) = &self.rest_server {
             rest.start().await?;
             tracing::info!("REST API started on {}", self.config.rest.address);
         }
-        
+
         Ok(())
     }
-    
+
     /// Stop API service
     pub async fn stop(&self) -> Result<()> {
         if let Some(rpc) = &self.rpc_server {
             rpc.stop().await?;
         }
-        
+
         if let Some(ws) = &self.ws_server {
             ws.stop().await?;
         }
-        
+
         if let Some(rest) = &self.rest_server {
             rest.stop().await?;
         }
-        
+
         Ok(())
     }
 }

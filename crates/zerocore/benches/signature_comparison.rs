@@ -1,15 +1,15 @@
 //! 签名算法性能对比基准测试
-//! 
+//!
 //! 对比 secp256k1 (ECDSA) vs ed25519
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use zerocore::crypto::PrivateKey;
-use zerocore::account::U256;
-use zerocore::transaction::UnsignedTransaction;
-use ed25519_dalek::{SigningKey, VerifyingKey, Signer, Verifier, SecretKey};
+use ed25519_dalek::{SecretKey, Signer, SigningKey, Verifier, VerifyingKey};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use std::time::Duration;
+use zerocore::account::U256;
+use zerocore::crypto::PrivateKey;
+use zerocore::transaction::UnsignedTransaction;
 
 /// 创建 secp256k1 交易并签名
 fn create_secp256k1_tx(nonce: u64) -> (UnsignedTransaction, PrivateKey) {
@@ -34,13 +34,13 @@ fn create_ed25519_tx(nonce: u64) -> (Vec<u8>, SigningKey, VerifyingKey) {
     let secret_key = secret_bytes.into();
     let signing_key = SigningKey::from_bytes(&secret_key);
     let verifying_key = VerifyingKey::from(&signing_key);
-    
+
     // 模拟交易数据
     let mut tx_data = Vec::new();
     tx_data.extend_from_slice(&nonce.to_be_bytes());
     tx_data.extend_from_slice(&[1u8; 32]);
     tx_data.extend_from_slice(&[2u8; 32]);
-    
+
     (tx_data, signing_key, verifying_key)
 }
 
@@ -49,10 +49,10 @@ fn bench_secp256k1_sign(c: &mut Criterion) {
     let mut group = c.benchmark_group("secp256k1_sign");
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(30));
-    
+
     for count in [100, 500, 1000].iter() {
         let txs: Vec<_> = (0..*count).map(|i| create_secp256k1_tx(i)).collect();
-        
+
         group.throughput(Throughput::Elements(*count as u64));
         group.bench_with_input(
             BenchmarkId::from_parameter(format!("{}_txs", count)),
@@ -66,7 +66,7 @@ fn bench_secp256k1_sign(c: &mut Criterion) {
             },
         );
     }
-    
+
     group.finish();
 }
 
@@ -75,14 +75,14 @@ fn bench_secp256k1_verify(c: &mut Criterion) {
     let mut group = c.benchmark_group("secp256k1_verify");
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(30));
-    
+
     let signed_txs: Vec<_> = (0..1000)
         .map(|i| {
             let (tx, private_key) = create_secp256k1_tx(i);
             tx.sign(&private_key)
         })
         .collect();
-    
+
     for count in [100, 500, 1000].iter() {
         group.throughput(Throughput::Elements(*count as u64));
         group.bench_with_input(
@@ -97,7 +97,7 @@ fn bench_secp256k1_verify(c: &mut Criterion) {
             },
         );
     }
-    
+
     group.finish();
 }
 
@@ -106,10 +106,10 @@ fn bench_ed25519_sign(c: &mut Criterion) {
     let mut group = c.benchmark_group("ed25519_sign");
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(30));
-    
+
     for count in [100, 500, 1000].iter() {
         let txs: Vec<_> = (0..*count).map(|i| create_ed25519_tx(i)).collect();
-        
+
         group.throughput(Throughput::Elements(*count as u64));
         group.bench_with_input(
             BenchmarkId::from_parameter(format!("{}_txs", count)),
@@ -123,7 +123,7 @@ fn bench_ed25519_sign(c: &mut Criterion) {
             },
         );
     }
-    
+
     group.finish();
 }
 
@@ -132,7 +132,7 @@ fn bench_ed25519_verify(c: &mut Criterion) {
     let mut group = c.benchmark_group("ed25519_verify");
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(30));
-    
+
     let signed_txs: Vec<_> = (0..1000)
         .map(|i| {
             let (tx_data, signing_key, verifying_key) = create_ed25519_tx(i);
@@ -140,7 +140,7 @@ fn bench_ed25519_verify(c: &mut Criterion) {
             (tx_data, signature, verifying_key)
         })
         .collect();
-    
+
     for count in [100, 500, 1000].iter() {
         group.throughput(Throughput::Elements(*count as u64));
         group.bench_with_input(
@@ -155,14 +155,14 @@ fn bench_ed25519_verify(c: &mut Criterion) {
             },
         );
     }
-    
+
     group.finish();
 }
 
 criterion_group!(
     name = benches;
     config = Criterion::default().noise_threshold(0.1);
-    targets = bench_secp256k1_sign, bench_secp256k1_verify, 
+    targets = bench_secp256k1_sign, bench_secp256k1_verify,
               bench_ed25519_sign, bench_ed25519_verify
 );
 criterion_main!(benches);

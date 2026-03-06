@@ -1,9 +1,9 @@
 //! 并行执行性能基准测试
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use std::time::Duration;
 use zerocore::account::U256;
 use zerocore::transaction::UnsignedTransaction;
-use std::time::Duration;
 
 /// 创建测试交易
 fn create_test_transactions(count: usize) -> Vec<UnsignedTransaction> {
@@ -35,10 +35,10 @@ fn bench_serial_execution(c: &mut Criterion) {
     let mut group = c.benchmark_group("serial_execution");
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(30));
-    
+
     for tx_count in [1000, 2000, 3000].iter() {
         let txs = create_test_transactions(*tx_count);
-        
+
         group.throughput(Throughput::Elements(*tx_count as u64));
         group.bench_with_input(
             BenchmarkId::from_parameter(format!("{}_txs_serial", tx_count)),
@@ -52,7 +52,7 @@ fn bench_serial_execution(c: &mut Criterion) {
             },
         );
     }
-    
+
     group.finish();
 }
 

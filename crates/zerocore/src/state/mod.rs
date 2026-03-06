@@ -209,13 +209,14 @@ mod tests {
 ///
 /// ### 使用示例
 ///
-/// ```rust,ignore
-/// use zerocore::state::StateDb;
+/// ```rust,no_run
+/// use zerocore::crypto::{Address, Hash};
 /// use zerocore::evm::StateDb as EvmStateDb;
+/// use zerocore::state::StateDb;
 ///
-/// let mut state = StateDb::new(Hash::zero());
-/// // 现在可以作为 EVM 的状态数据库使用
-/// evm.execute(&tx, &mut state);
+/// let state = StateDb::new(Hash::zero());
+/// // 现在可以作为 EVM 的状态数据库使用（示例展示 trait 调用）
+/// let _nonce = EvmStateDb::get_nonce(&state, &Address::zero());
 /// ```
 ///
 /// ### 性能特征

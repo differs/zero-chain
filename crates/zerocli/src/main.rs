@@ -2,13 +2,12 @@
 
 #![allow(unused)]
 
+use crate::commands::wallet::{WalletCommand, WalletScheme};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use zeroapi::rpc::{ComputeBackend, RpcConfig};
 use zeroapi::ApiConfig;
-use crate::commands::wallet::{WalletCommand, WalletScheme};
-
 
 mod commands;
 
@@ -22,11 +21,11 @@ struct Cli {
     /// Log level
     #[arg(short, long, default_value = "info")]
     log_level: String,
-    
+
     /// Data directory
     #[arg(short, long, default_value = "~/.zerocchain")]
     data_dir: String,
-    
+
     /// Network ID
     #[arg(short, long, default_value = "10086")]
     network_id: u64,
@@ -38,7 +37,7 @@ struct Cli {
     /// Optional node config file (JSON)
     #[arg(long)]
     config: Option<String>,
-    
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -50,15 +49,15 @@ enum Commands {
         /// Enable mining
         #[arg(long)]
         mine: bool,
-        
+
         /// Coinbase address
         #[arg(long)]
         coinbase: Option<String>,
-        
+
         /// HTTP RPC port
         #[arg(long, default_value = "8545")]
         http_port: u16,
-        
+
         /// WebSocket RPC port
         #[arg(long, default_value = "8546")]
         ws_port: u16,
@@ -83,31 +82,31 @@ enum Commands {
         #[arg(long)]
         rpc_coinbase: Option<String>,
     },
-    
+
     /// Initialize data directory
     Init,
-    
+
     /// Account management
     Account {
         #[command(subcommand)]
         action: AccountAction,
     },
-    
+
     /// Transaction commands
     Transaction {
         #[command(subcommand)]
         action: TransactionAction,
     },
-    
+
     /// Block commands
     Block {
         #[command(subcommand)]
         action: BlockAction,
     },
-    
+
     /// Console/REPL mode
     Console,
-    
+
     /// Version information
     Version,
 
@@ -128,6 +127,9 @@ enum WalletAction {
         /// Signature scheme: ed25519 (native) | secp256k1 (evm)
         #[arg(long, default_value = "ed25519")]
         scheme: String,
+        /// Passphrase for encrypting private key (required)
+        #[arg(long)]
+        passphrase: String,
     },
     /// List wallet accounts
     List,
@@ -142,6 +144,9 @@ enum WalletAction {
         name: String,
         #[arg(long)]
         message: String,
+        /// Passphrase used to decrypt key material (optional if unlocked)
+        #[arg(long)]
+        passphrase: Option<String>,
     },
     /// Verify signature with wallet account public key
     Verify {
@@ -157,10 +162,35 @@ enum WalletAction {
         #[arg(long)]
         name: String,
     },
+
+    /// Re-encrypt account with a new passphrase
+    RotatePassphrase {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        old_passphrase: String,
+        #[arg(long)]
+        new_passphrase: String,
+    },
+
+    /// Unlock account for a temporary signing session
+    Unlock {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        passphrase: String,
+        #[arg(long, default_value_t = 600)]
+        ttl_secs: u64,
+    },
+
+    /// Migrate legacy wallet v1 (plaintext key) to encrypted v2 format
+    MigrateV1 {
+        #[arg(long)]
+        passphrase: String,
+    },
 }
 
-#[derive(Subcommand)]
-#[derive(Debug)]
+#[derive(Subcommand, Debug)]
 enum AccountAction {
     /// Create new account
     New,
@@ -173,8 +203,7 @@ enum AccountAction {
     },
 }
 
-#[derive(Subcommand)]
-#[derive(Debug)]
+#[derive(Subcommand, Debug)]
 enum TransactionAction {
     /// Send transaction
     Send {
@@ -192,8 +221,7 @@ enum TransactionAction {
     },
 }
 
-#[derive(Subcommand)]
-#[derive(Debug)]
+#[derive(Subcommand, Debug)]
 enum BlockAction {
     /// Get latest block
     Latest,
@@ -207,17 +235,22 @@ enum BlockAction {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    
+    let data_dir = expand_data_dir(&cli.data_dir);
+
     // Initialize logging
     tracing_subscriber::registry()
         .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| format!("info,zeroccore={},zeronet={},zeroapi={}", 
-                    cli.log_level, cli.log_level, cli.log_level).into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                format!(
+                    "info,zeroccore={},zeronet={},zeroapi={}",
+                    cli.log_level, cli.log_level, cli.log_level
+                )
+                .into()
+            }),
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
-    
+
     match cli.command {
         Some(Commands::Run {
             mine,
@@ -237,7 +270,7 @@ async fn main() -> Result<()> {
             };
 
             let profile = NetworkProfile::parse(&cli.network)?;
-            profile.apply_defaults(&mut api_config, &cli.data_dir);
+            profile.apply_defaults(&mut api_config, &data_dir);
 
             // CLI flags override config file.
             let backend = parse_compute_backend(&compute_backend)?;
@@ -264,13 +297,24 @@ async fn main() -> Result<()> {
             println!("   chain_id: {}", api_config.http_rpc.chain_id);
             println!("   network_id: {}", api_config.http_rpc.network_id);
             println!("   coinbase: {}", api_config.http_rpc.coinbase);
-            println!("   rpc: {}:{}", api_config.http_rpc.address, api_config.http_rpc.port);
+            println!(
+                "   rpc: {}:{}",
+                api_config.http_rpc.address, api_config.http_rpc.port
+            );
 
-            commands::run::run_node(mine, coinbase, http_port, ws_port, &cli.data_dir, Some(api_config.http_rpc.clone())).await?;
+            commands::run::run_node(
+                mine,
+                coinbase,
+                http_port,
+                ws_port,
+                &data_dir,
+                Some(api_config.http_rpc.clone()),
+            )
+            .await?;
         }
         Some(Commands::Init) => {
-            commands::init::init_data_dir(&cli.data_dir)?;
-            let cfg_path = format!("{}/api-config.json", &cli.data_dir);
+            commands::init::init_data_dir(&data_dir)?;
+            let cfg_path = format!("{}/api-config.json", &data_dir);
             commands::init::write_default_api_config(&cfg_path)?;
             println!("Default API config written to {}", cfg_path);
         }
@@ -291,7 +335,7 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Wallet { action }) => {
             let cmd = map_wallet_action(action)?;
-            commands::wallet::handle_wallet(&cli.data_dir, cmd).await?;
+            commands::wallet::handle_wallet(&data_dir, cmd).await?;
         }
         None => {
             // Default: show help
@@ -299,8 +343,20 @@ async fn main() -> Result<()> {
             println!("Use --help for usage information");
         }
     }
-    
+
     Ok(())
+}
+
+fn expand_data_dir(input: &str) -> String {
+    if input == "~" {
+        return std::env::var("HOME").unwrap_or_else(|_| input.to_string());
+    }
+    if let Some(rest) = input.strip_prefix("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return format!("{home}/{rest}");
+        }
+    }
+    input.to_string()
 }
 
 fn parse_wallet_scheme(value: &str) -> Result<WalletScheme> {
@@ -313,13 +369,26 @@ fn parse_wallet_scheme(value: &str) -> Result<WalletScheme> {
 
 fn map_wallet_action(action: WalletAction) -> Result<WalletCommand> {
     let cmd = match action {
-        WalletAction::New { name, scheme } => WalletCommand::New {
+        WalletAction::New {
+            name,
+            scheme,
+            passphrase,
+        } => WalletCommand::New {
             name,
             scheme: parse_wallet_scheme(&scheme)?,
+            passphrase,
         },
         WalletAction::List => WalletCommand::List,
         WalletAction::Show { name } => WalletCommand::Show { name },
-        WalletAction::Sign { name, message } => WalletCommand::Sign { name, message },
+        WalletAction::Sign {
+            name,
+            message,
+            passphrase,
+        } => WalletCommand::Sign {
+            name,
+            message,
+            passphrase,
+        },
         WalletAction::Verify {
             name,
             message,
@@ -330,6 +399,25 @@ fn map_wallet_action(action: WalletAction) -> Result<WalletCommand> {
             signature_hex: signature,
         },
         WalletAction::Delete { name } => WalletCommand::Delete { name },
+        WalletAction::RotatePassphrase {
+            name,
+            old_passphrase,
+            new_passphrase,
+        } => WalletCommand::RotatePassphrase {
+            name,
+            old_passphrase,
+            new_passphrase,
+        },
+        WalletAction::Unlock {
+            name,
+            passphrase,
+            ttl_secs,
+        } => WalletCommand::Unlock {
+            name,
+            passphrase,
+            ttl_secs,
+        },
+        WalletAction::MigrateV1 { passphrase } => WalletCommand::MigrateV1 { passphrase },
     };
     Ok(cmd)
 }

@@ -1,30 +1,29 @@
 //! JSON-RPC Server Implementation
 
-use zerocore::crypto::{Address, Hash};
+use axum::{extract::State, routing::post, Json, Router};
+use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::Arc;
+use tower_http::cors::{Any, CorsLayer};
 use zerocore::account::{InMemoryAccountManager, U256};
-use zerocore::transaction::{pool::TxPoolConfig, SignedTransaction, TransactionPool};
 use zerocore::block::{Block, BlockHeader};
-use zerocore::state::StateDb;
+use zerocore::compute::domain::DomainRegistry;
 use zerocore::compute::{
     BasicTxExecutor, Command, ComputeTx, DefaultAuthorizationPolicy, DomainConfig, DomainId,
     InMemoryDomainRegistry, InMemoryObjectStore, NoopResourcePolicy, ObjectId, ObjectKind,
     ObjectOutput, ObjectStore, OutputId, OutputProposal, Ownership, SignatureScheme, TxSignature,
     TxWitness, Version,
 };
-use zerocore::compute::domain::DomainRegistry;
+use zerocore::crypto::{Address, Hash};
 use zerocore::crypto::{PrivateKey, Signature};
-use zerostore::ComputeStore;
+use zerocore::state::StateDb;
+use zerocore::transaction::{pool::TxPoolConfig, SignedTransaction, TransactionPool};
 use zerostore::db::{KeyValueDB, MemDatabase, RedbDatabase, RocksDb};
-use std::collections::HashMap;
-use std::sync::Arc;
-use parking_lot::RwLock;
-use serde::{Deserialize, Serialize};
-use axum::{Router, routing::post, Json, extract::State};
-use tower_http::cors::{CorsLayer, Any};
+use zerostore::ComputeStore;
 
 /// RPC configuration
-#[derive(Clone, Debug)]
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RpcConfig {
     /// Listen address
@@ -50,8 +49,7 @@ pub struct RpcConfig {
 }
 
 /// Persistent backend for compute storage.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ComputeBackend {
     /// In-memory backend.
@@ -85,7 +83,7 @@ impl Default for RpcConfig {
             address: "127.0.0.1".to_string(),
             port: 8545,
             max_connections: 100,
-            max_request_size: 15 * 1024 * 1024,  // 15MB
+            max_request_size: 15 * 1024 * 1024, // 15MB
             modules: vec!["eth".into(), "net".into(), "web3".into()],
             compute_backend: ComputeBackend::Mem,
             compute_db_path: "./data/compute-db".to_string(),
@@ -113,8 +111,8 @@ impl RpcConfig {
             ComputeBackend::RocksDb | ComputeBackend::Redb => {
                 if self.compute_db_path.trim().is_empty() {
                     return Err(format!(
-                        "compute_db_path cannot be empty when compute_backend={}"
-                        ,self.compute_backend.as_str()
+                        "compute_db_path cannot be empty when compute_backend={}",
+                        self.compute_backend.as_str()
                     ));
                 }
                 Ok(())
@@ -161,7 +159,7 @@ impl RpcErrorObject {
             data: None,
         }
     }
-    
+
     pub fn invalid_request() -> Self {
         Self {
             code: -32600,
@@ -169,7 +167,7 @@ impl RpcErrorObject {
             data: None,
         }
     }
-    
+
     pub fn method_not_found(method: &str) -> Self {
         Self {
             code: -32601,
@@ -177,7 +175,7 @@ impl RpcErrorObject {
             data: None,
         }
     }
-    
+
     pub fn invalid_params(message: String) -> Self {
         Self {
             code: -32602,
@@ -185,7 +183,7 @@ impl RpcErrorObject {
             data: Some(serde_json::Value::String(message)),
         }
     }
-    
+
     pub fn internal_error(message: String) -> Self {
         Self {
             code: -32603,
@@ -216,11 +214,7 @@ pub struct RpcApi {
 }
 
 impl RpcApi {
-    pub fn new(
-        config: RpcConfig,
-        state_db: Arc<StateDb>,
-        tx_pool: Arc<TransactionPool>,
-    ) -> Self {
+    pub fn new(config: RpcConfig, state_db: Arc<StateDb>, tx_pool: Arc<TransactionPool>) -> Self {
         let domain_registry = Arc::new(InMemoryDomainRegistry::new());
         domain_registry.upsert_domain(DomainConfig {
             domain_id: DomainId(0),
@@ -280,11 +274,11 @@ impl RpcApi {
             persistent_compute_store: Some(compute_store),
         }
     }
-    
+
     /// Handle RPC request
     pub async fn handle_request(&self, request: JsonRpcRequest) -> JsonRpcResponse {
         let result = self.dispatch_method(&request.method, request.params).await;
-        
+
         match result {
             Ok(value) => JsonRpcResponse {
                 jsonrpc: "2.0".into(),
@@ -300,7 +294,7 @@ impl RpcApi {
             },
         }
     }
-    
+
     /// Dispatch method call
     async fn dispatch_method(
         &self,
@@ -311,12 +305,12 @@ impl RpcApi {
             // web3_* methods
             "web3_clientVersion" => self.web3_client_version(params),
             "web3_sha3" => self.web3_sha3(params),
-            
+
             // net_* methods
             "net_version" => self.net_version(params),
             "net_peerCount" => self.net_peer_count(params),
             "net_listening" => self.net_listening(params),
-            
+
             // eth_* methods
             "eth_protocolVersion" => self.eth_protocol_version(params),
             "eth_blockNumber" => self.eth_block_number(params),
@@ -336,7 +330,7 @@ impl RpcApi {
             "eth_mining" => self.eth_mining(params),
             "eth_hashrate" => self.eth_hashrate(params),
             "eth_accounts" => self.eth_accounts(params),
-            
+
             // ZeroChain extensions
             "zero_getAccount" => self.zero_get_account(params),
             "zero_getUtxos" => self.zero_get_utxos(params),
@@ -346,186 +340,276 @@ impl RpcApi {
             "zero_simulateComputeTx" => self.zero_simulate_compute_tx(params),
             "zero_submitComputeTx" => self.zero_submit_compute_tx(params),
             "zero_getComputeTxResult" => self.zero_get_compute_tx_result(params),
-            
+
             _ => Err(RpcErrorObject::method_not_found(method)),
         }
     }
-    
+
     // ============ web3_* methods ============
-    
-    fn web3_client_version(&self, _params: Option<Vec<serde_json::Value>>) -> Result<serde_json::Value, RpcErrorObject> {
+
+    fn web3_client_version(
+        &self,
+        _params: Option<Vec<serde_json::Value>>,
+    ) -> Result<serde_json::Value, RpcErrorObject> {
         Ok(serde_json::json!("ZeroChain/v0.1.0"))
     }
-    
-    fn web3_sha3(&self, params: Option<Vec<serde_json::Value>>) -> Result<serde_json::Value, RpcErrorObject> {
+
+    fn web3_sha3(
+        &self,
+        params: Option<Vec<serde_json::Value>>,
+    ) -> Result<serde_json::Value, RpcErrorObject> {
         let params = params.ok_or(RpcErrorObject::invalid_params("Missing params".to_string()))?;
-        let data = params.get(0)
+        let data = params
+            .get(0)
             .ok_or_else(|| RpcErrorObject::invalid_params("Missing data".to_string()))?
             .as_str()
             .ok_or_else(|| RpcErrorObject::invalid_params("Data must be string".to_string()))?;
-        
+
         let bytes = hex::decode(data.strip_prefix("0x").unwrap_or(data))
             .map_err(|e| RpcErrorObject::invalid_params(format!("Invalid hex: {}", e)))?;
-        
+
         let hash = zerocore::crypto::keccak256(&bytes);
-        
+
         Ok(serde_json::json!(format!("0x{}", hex::encode(hash))))
     }
-    
+
     // ============ net_* methods ============
-    
-    fn net_version(&self, _params: Option<Vec<serde_json::Value>>) -> Result<serde_json::Value, RpcErrorObject> {
+
+    fn net_version(
+        &self,
+        _params: Option<Vec<serde_json::Value>>,
+    ) -> Result<serde_json::Value, RpcErrorObject> {
         Ok(serde_json::json!(self.config.network_id.to_string()))
     }
-    
-    fn net_peer_count(&self, _params: Option<Vec<serde_json::Value>>) -> Result<serde_json::Value, RpcErrorObject> {
+
+    fn net_peer_count(
+        &self,
+        _params: Option<Vec<serde_json::Value>>,
+    ) -> Result<serde_json::Value, RpcErrorObject> {
         Ok(serde_json::json!("0x0"))
     }
-    
-    fn net_listening(&self, _params: Option<Vec<serde_json::Value>>) -> Result<serde_json::Value, RpcErrorObject> {
+
+    fn net_listening(
+        &self,
+        _params: Option<Vec<serde_json::Value>>,
+    ) -> Result<serde_json::Value, RpcErrorObject> {
         Ok(serde_json::json!(true))
     }
-    
+
     // ============ eth_* methods ============
-    
-    fn eth_protocol_version(&self, _params: Option<Vec<serde_json::Value>>) -> Result<serde_json::Value, RpcErrorObject> {
+
+    fn eth_protocol_version(
+        &self,
+        _params: Option<Vec<serde_json::Value>>,
+    ) -> Result<serde_json::Value, RpcErrorObject> {
         Ok(serde_json::json!("1"))
     }
-    
-    fn eth_block_number(&self, _params: Option<Vec<serde_json::Value>>) -> Result<serde_json::Value, RpcErrorObject> {
+
+    fn eth_block_number(
+        &self,
+        _params: Option<Vec<serde_json::Value>>,
+    ) -> Result<serde_json::Value, RpcErrorObject> {
         let block = self.latest_block.read();
-        let number = block.as_ref().map(|b| b.header.number).unwrap_or(U256::zero());
+        let number = block
+            .as_ref()
+            .map(|b| b.header.number)
+            .unwrap_or(U256::zero());
         Ok(serde_json::json!(format!("0x{:x}", number.as_u64())))
     }
-    
-    fn eth_get_balance(&self, params: Option<Vec<serde_json::Value>>) -> Result<serde_json::Value, RpcErrorObject> {
+
+    fn eth_get_balance(
+        &self,
+        params: Option<Vec<serde_json::Value>>,
+    ) -> Result<serde_json::Value, RpcErrorObject> {
         let params = params.ok_or(RpcErrorObject::invalid_params("Missing params".to_string()))?;
-        
-        let address_str = params.get(0)
+
+        let address_str = params
+            .get(0)
             .ok_or_else(|| RpcErrorObject::invalid_params("Missing address".to_string()))?
             .as_str()
             .ok_or_else(|| RpcErrorObject::invalid_params("Address must be string".to_string()))?;
-        
+
         let address = parse_address(address_str)?;
-        
+
         let balance = self.state_db.get_balance(&address);
-        
+
         Ok(serde_json::json!(format!("0x{:x}", balance.as_u64())))
     }
-    
-    fn eth_get_storage_at(&self, params: Option<Vec<serde_json::Value>>) -> Result<serde_json::Value, RpcErrorObject> {
+
+    fn eth_get_storage_at(
+        &self,
+        params: Option<Vec<serde_json::Value>>,
+    ) -> Result<serde_json::Value, RpcErrorObject> {
         let params = params.ok_or(RpcErrorObject::invalid_params("Missing params".to_string()))?;
-        
-        let address_str = params.get(0)
+
+        let address_str = params
+            .get(0)
             .ok_or_else(|| RpcErrorObject::invalid_params("Missing address".to_string()))?
             .as_str()
             .ok_or_else(|| RpcErrorObject::invalid_params("Address must be string".to_string()))?;
-        
-        let position_str = params.get(1)
+
+        let position_str = params
+            .get(1)
             .ok_or_else(|| RpcErrorObject::invalid_params("Missing position".to_string()))?
             .as_str()
             .ok_or_else(|| RpcErrorObject::invalid_params("Position must be string".to_string()))?;
-        
+
         let address = parse_address(address_str)?;
         let position = parse_hash(position_str)?;
-        
+
         let value = self.state_db.get_storage(&address, &position);
-        
-        Ok(serde_json::json!(format!("0x{}", hex::encode(value.as_bytes()))))
+
+        Ok(serde_json::json!(format!(
+            "0x{}",
+            hex::encode(value.as_bytes())
+        )))
     }
-    
-    fn eth_get_transaction_count(&self, params: Option<Vec<serde_json::Value>>) -> Result<serde_json::Value, RpcErrorObject> {
+
+    fn eth_get_transaction_count(
+        &self,
+        params: Option<Vec<serde_json::Value>>,
+    ) -> Result<serde_json::Value, RpcErrorObject> {
         let params = params.ok_or(RpcErrorObject::invalid_params("Missing params".to_string()))?;
-        
-        let address_str = params.get(0)
+
+        let address_str = params
+            .get(0)
             .ok_or_else(|| RpcErrorObject::invalid_params("Missing address".to_string()))?
             .as_str()
             .ok_or_else(|| RpcErrorObject::invalid_params("Address must be string".to_string()))?;
-        
+
         let address = parse_address(address_str)?;
         let nonce = self.state_db.get_nonce(&address);
-        
+
         Ok(serde_json::json!(format!("0x{:x}", nonce)))
     }
-    
-    fn eth_gas_price(&self, _params: Option<Vec<serde_json::Value>>) -> Result<serde_json::Value, RpcErrorObject> {
-        Ok(serde_json::json!("0x3b9aca00"))  // 1 Gwei
+
+    fn eth_gas_price(
+        &self,
+        _params: Option<Vec<serde_json::Value>>,
+    ) -> Result<serde_json::Value, RpcErrorObject> {
+        Ok(serde_json::json!("0x3b9aca00")) // 1 Gwei
     }
-    
-    fn eth_chain_id(&self, _params: Option<Vec<serde_json::Value>>) -> Result<serde_json::Value, RpcErrorObject> {
+
+    fn eth_chain_id(
+        &self,
+        _params: Option<Vec<serde_json::Value>>,
+    ) -> Result<serde_json::Value, RpcErrorObject> {
         Ok(serde_json::json!(format!("0x{:x}", self.config.chain_id)))
     }
-    
-    fn eth_syncing(&self, _params: Option<Vec<serde_json::Value>>) -> Result<serde_json::Value, RpcErrorObject> {
+
+    fn eth_syncing(
+        &self,
+        _params: Option<Vec<serde_json::Value>>,
+    ) -> Result<serde_json::Value, RpcErrorObject> {
         Ok(serde_json::json!(false))
     }
-    
-    fn eth_coinbase(&self, _params: Option<Vec<serde_json::Value>>) -> Result<serde_json::Value, RpcErrorObject> {
+
+    fn eth_coinbase(
+        &self,
+        _params: Option<Vec<serde_json::Value>>,
+    ) -> Result<serde_json::Value, RpcErrorObject> {
         Ok(serde_json::json!(self.config.coinbase.clone()))
     }
-    
-    fn eth_mining(&self, _params: Option<Vec<serde_json::Value>>) -> Result<serde_json::Value, RpcErrorObject> {
+
+    fn eth_mining(
+        &self,
+        _params: Option<Vec<serde_json::Value>>,
+    ) -> Result<serde_json::Value, RpcErrorObject> {
         Ok(serde_json::json!(false))
     }
-    
-    fn eth_hashrate(&self, _params: Option<Vec<serde_json::Value>>) -> Result<serde_json::Value, RpcErrorObject> {
+
+    fn eth_hashrate(
+        &self,
+        _params: Option<Vec<serde_json::Value>>,
+    ) -> Result<serde_json::Value, RpcErrorObject> {
         Ok(serde_json::json!("0x0"))
     }
-    
-    fn eth_accounts(&self, _params: Option<Vec<serde_json::Value>>) -> Result<serde_json::Value, RpcErrorObject> {
+
+    fn eth_accounts(
+        &self,
+        _params: Option<Vec<serde_json::Value>>,
+    ) -> Result<serde_json::Value, RpcErrorObject> {
         Ok(serde_json::json!([]))
     }
-    
-    fn eth_get_block_by_number(&self, params: Option<Vec<serde_json::Value>>) -> Result<serde_json::Value, RpcErrorObject> {
+
+    fn eth_get_block_by_number(
+        &self,
+        params: Option<Vec<serde_json::Value>>,
+    ) -> Result<serde_json::Value, RpcErrorObject> {
         // Simplified - would fetch from blockchain
         Ok(serde_json::json!(null))
     }
-    
-    fn eth_get_block_by_hash(&self, params: Option<Vec<serde_json::Value>>) -> Result<serde_json::Value, RpcErrorObject> {
+
+    fn eth_get_block_by_hash(
+        &self,
+        params: Option<Vec<serde_json::Value>>,
+    ) -> Result<serde_json::Value, RpcErrorObject> {
         Ok(serde_json::json!(null))
     }
-    
-    fn eth_get_transaction_by_hash(&self, params: Option<Vec<serde_json::Value>>) -> Result<serde_json::Value, RpcErrorObject> {
+
+    fn eth_get_transaction_by_hash(
+        &self,
+        params: Option<Vec<serde_json::Value>>,
+    ) -> Result<serde_json::Value, RpcErrorObject> {
         Ok(serde_json::json!(null))
     }
-    
-    fn eth_send_raw_transaction(&self, params: Option<Vec<serde_json::Value>>) -> Result<serde_json::Value, RpcErrorObject> {
+
+    fn eth_send_raw_transaction(
+        &self,
+        params: Option<Vec<serde_json::Value>>,
+    ) -> Result<serde_json::Value, RpcErrorObject> {
         let params = params.ok_or(RpcErrorObject::invalid_params("Missing params".to_string()))?;
-        
-        let tx_data = params.get(0)
+
+        let tx_data = params
+            .get(0)
             .ok_or_else(|| RpcErrorObject::invalid_params("Missing transaction data".to_string()))?
             .as_str()
-            .ok_or_else(|| RpcErrorObject::invalid_params("Transaction data must be string".to_string()))?;
-        
+            .ok_or_else(|| {
+                RpcErrorObject::invalid_params("Transaction data must be string".to_string())
+            })?;
+
         let tx_bytes = hex::decode(tx_data.strip_prefix("0x").unwrap_or(tx_data))
             .map_err(|e| RpcErrorObject::invalid_params(format!("Invalid hex: {}", e)))?;
-        
+
         // Decode and add to pool
         let tx_hash = Hash::from_bytes(zerocore::crypto::keccak256(&tx_bytes));
-        
-        Ok(serde_json::json!(format!("0x{}", hex::encode(tx_hash.as_bytes()))))
+
+        Ok(serde_json::json!(format!(
+            "0x{}",
+            hex::encode(tx_hash.as_bytes())
+        )))
     }
-    
-    fn eth_call(&self, params: Option<Vec<serde_json::Value>>) -> Result<serde_json::Value, RpcErrorObject> {
+
+    fn eth_call(
+        &self,
+        params: Option<Vec<serde_json::Value>>,
+    ) -> Result<serde_json::Value, RpcErrorObject> {
         Ok(serde_json::json!("0x"))
     }
-    
-    fn eth_estimate_gas(&self, params: Option<Vec<serde_json::Value>>) -> Result<serde_json::Value, RpcErrorObject> {
-        Ok(serde_json::json!("0x5208"))  // 21000
+
+    fn eth_estimate_gas(
+        &self,
+        params: Option<Vec<serde_json::Value>>,
+    ) -> Result<serde_json::Value, RpcErrorObject> {
+        Ok(serde_json::json!("0x5208")) // 21000
     }
-    
+
     // ============ ZeroChain extensions ============
-    
-    fn zero_get_account(&self, params: Option<Vec<serde_json::Value>>) -> Result<serde_json::Value, RpcErrorObject> {
+
+    fn zero_get_account(
+        &self,
+        params: Option<Vec<serde_json::Value>>,
+    ) -> Result<serde_json::Value, RpcErrorObject> {
         let params = params.ok_or(RpcErrorObject::invalid_params("Missing params".to_string()))?;
-        
-        let address_str = params.get(0)
+
+        let address_str = params
+            .get(0)
             .ok_or_else(|| RpcErrorObject::invalid_params("Missing address".to_string()))?
             .as_str()
             .ok_or_else(|| RpcErrorObject::invalid_params("Address must be string".to_string()))?;
-        
+
         let address = parse_address(address_str)?;
-        
+
         // Would get full account info
         Ok(serde_json::json!({
             "address": address_str,
@@ -533,38 +617,54 @@ impl RpcApi {
             "nonce": format!("0x{:x}", self.state_db.get_nonce(&address)),
         }))
     }
-    
-    fn zero_get_utxos(&self, params: Option<Vec<serde_json::Value>>) -> Result<serde_json::Value, RpcErrorObject> {
+
+    fn zero_get_utxos(
+        &self,
+        params: Option<Vec<serde_json::Value>>,
+    ) -> Result<serde_json::Value, RpcErrorObject> {
         Ok(serde_json::json!([]))
     }
 
-    fn zero_get_object(&self, params: Option<Vec<serde_json::Value>>) -> Result<serde_json::Value, RpcErrorObject> {
+    fn zero_get_object(
+        &self,
+        params: Option<Vec<serde_json::Value>>,
+    ) -> Result<serde_json::Value, RpcErrorObject> {
         let params = params.ok_or(RpcErrorObject::invalid_params("Missing params".to_string()))?;
         let object_id = params
             .get(0)
             .ok_or_else(|| RpcErrorObject::invalid_params("Missing object_id".to_string()))?
             .as_str()
-            .ok_or_else(|| RpcErrorObject::invalid_params("object_id must be string".to_string()))?;
+            .ok_or_else(|| {
+                RpcErrorObject::invalid_params("object_id must be string".to_string())
+            })?;
 
         let object_id = parse_object_id(object_id)?;
         let maybe_output = self.compute_store.get_latest_output_by_object(object_id);
         Ok(serde_json::json!(maybe_output.map(object_output_to_json)))
     }
 
-    fn zero_get_output(&self, params: Option<Vec<serde_json::Value>>) -> Result<serde_json::Value, RpcErrorObject> {
+    fn zero_get_output(
+        &self,
+        params: Option<Vec<serde_json::Value>>,
+    ) -> Result<serde_json::Value, RpcErrorObject> {
         let params = params.ok_or(RpcErrorObject::invalid_params("Missing params".to_string()))?;
         let output_id = params
             .get(0)
             .ok_or_else(|| RpcErrorObject::invalid_params("Missing output_id".to_string()))?
             .as_str()
-            .ok_or_else(|| RpcErrorObject::invalid_params("output_id must be string".to_string()))?;
+            .ok_or_else(|| {
+                RpcErrorObject::invalid_params("output_id must be string".to_string())
+            })?;
 
         let output_id = parse_output_id(output_id)?;
         let maybe_output = self.compute_store.get_output(output_id);
         Ok(serde_json::json!(maybe_output.map(object_output_to_json)))
     }
 
-    fn zero_get_domain(&self, params: Option<Vec<serde_json::Value>>) -> Result<serde_json::Value, RpcErrorObject> {
+    fn zero_get_domain(
+        &self,
+        params: Option<Vec<serde_json::Value>>,
+    ) -> Result<serde_json::Value, RpcErrorObject> {
         let params = params.ok_or(RpcErrorObject::invalid_params("Missing params".to_string()))?;
         let id = params
             .get(0)
@@ -650,7 +750,12 @@ impl RpcApi {
             }
         }
 
-        if let Some(existing) = self.submitted_compute_results.read().get(&tx.tx_id.0).cloned() {
+        if let Some(existing) = self
+            .submitted_compute_results
+            .read()
+            .get(&tx.tx_id.0)
+            .cloned()
+        {
             return Ok(serde_json::json!({
                 "ok": true,
                 "duplicate": true,
@@ -678,11 +783,14 @@ impl RpcApi {
         });
 
         if let Some(persistent) = &self.persistent_compute_store {
-            let serialized = serde_json::to_string(&result)
-                .map_err(|e| RpcErrorObject::internal_error(format!("serialize result failed: {e}")))?;
+            let serialized = serde_json::to_string(&result).map_err(|e| {
+                RpcErrorObject::internal_error(format!("serialize result failed: {e}"))
+            })?;
             persistent
                 .put_tx_result(tx.tx_id, &serialized)
-                .map_err(|e| RpcErrorObject::internal_error(format!("persist result failed: {e}")))?;
+                .map_err(|e| {
+                    RpcErrorObject::internal_error(format!("persist result failed: {e}"))
+                })?;
         }
 
         self.submitted_compute_results
@@ -709,12 +817,13 @@ impl RpcApi {
         }
 
         if let Some(persistent) = &self.persistent_compute_store {
-            let maybe = persistent
-                .get_tx_result(tx_id)
-                .map_err(|e| RpcErrorObject::internal_error(format!("load tx result failed: {e}")))?;
+            let maybe = persistent.get_tx_result(tx_id).map_err(|e| {
+                RpcErrorObject::internal_error(format!("load tx result failed: {e}"))
+            })?;
             if let Some(raw) = maybe {
-                let value = serde_json::from_str::<serde_json::Value>(&raw)
-                    .map_err(|e| RpcErrorObject::internal_error(format!("decode tx result failed: {e}")))?;
+                let value = serde_json::from_str::<serde_json::Value>(&raw).map_err(|e| {
+                    RpcErrorObject::internal_error(format!("decode tx result failed: {e}"))
+                })?;
                 return Ok(value);
             }
         }
@@ -727,9 +836,13 @@ fn compute_error_to_json(err: &zerocore::compute::ComputeError) -> serde_json::V
     let (numeric_code, code, category) = match err {
         zerocore::compute::ComputeError::DomainNotRegistered(_)
         | zerocore::compute::ComputeError::DomainNotPublic(_)
-        | zerocore::compute::ComputeError::DomainMismatch { .. } => (1001, "domain_error", "domain"),
+        | zerocore::compute::ComputeError::DomainMismatch { .. } => {
+            (1001, "domain_error", "domain")
+        }
         zerocore::compute::ComputeError::ReadVersionMismatch { .. }
-        | zerocore::compute::ComputeError::ReadSetValidationFailed => (2001, "readset_error", "readset"),
+        | zerocore::compute::ComputeError::ReadSetValidationFailed => {
+            (2001, "readset_error", "readset")
+        }
         zerocore::compute::ComputeError::AuthorizationDenied => {
             (3001, "authorization_error", "authorization")
         }
@@ -742,9 +855,7 @@ fn compute_error_to_json(err: &zerocore::compute::ComputeError) -> serde_json::V
         zerocore::compute::ComputeError::SignatureOwnerMismatch => {
             (3004, "signature_owner_mismatch", "authorization")
         }
-        zerocore::compute::ComputeError::TxIdMismatch => {
-            (3005, "tx_id_mismatch", "authorization")
-        }
+        zerocore::compute::ComputeError::TxIdMismatch => (3005, "tx_id_mismatch", "authorization"),
         zerocore::compute::ComputeError::UnsupportedSignatureScheme => {
             (3006, "unsupported_signature_scheme", "authorization")
         }
@@ -752,9 +863,13 @@ fn compute_error_to_json(err: &zerocore::compute::ComputeError) -> serde_json::V
         | zerocore::compute::ComputeError::InvalidVersionProgression
         | zerocore::compute::ComputeError::DuplicateOutputId
         | zerocore::compute::ComputeError::ObjectNotFound(_) => (4001, "state_error", "state"),
-        zerocore::compute::ComputeError::ResourcePolicyViolation => (5001, "resource_error", "resource"),
+        zerocore::compute::ComputeError::ResourcePolicyViolation => {
+            (5001, "resource_error", "resource")
+        }
         zerocore::compute::ComputeError::InvalidObjectKind
-        | zerocore::compute::ComputeError::InvalidTransaction(_) => (6001, "tx_error", "transaction"),
+        | zerocore::compute::ComputeError::InvalidTransaction(_) => {
+            (6001, "tx_error", "transaction")
+        }
     };
 
     serde_json::json!({
@@ -774,15 +889,10 @@ pub struct RpcServer {
 impl RpcServer {
     /// Creates server with validation and returns detailed error on invalid config.
     pub fn try_new(config: RpcConfig) -> Result<Self, crate::ApiError> {
-        config
-            .validate()
-            .map_err(crate::ApiError::InvalidRequest)?;
+        config.validate().map_err(crate::ApiError::InvalidRequest)?;
 
         let api = Some(Arc::new(build_default_rpc_api(config.clone())));
-        Ok(Self {
-            config,
-            api,
-        })
+        Ok(Self { config, api })
     }
 
     pub fn new(config: RpcConfig) -> Self {
@@ -791,8 +901,7 @@ impl RpcServer {
             Err(err) => {
                 tracing::warn!("invalid rpc config, fallback to default: {}", err);
                 // Keep backward compatibility for callers expecting infallible constructor.
-                Self::try_new(RpcConfig::default())
-                    .expect("default RpcConfig must be valid")
+                Self::try_new(RpcConfig::default()).expect("default RpcConfig must be valid")
             }
         }
     }
@@ -809,12 +918,12 @@ impl RpcServer {
     pub fn api(&self) -> Option<Arc<RpcApi>> {
         self.api.clone()
     }
-    
+
     pub async fn start(&self) -> Result<(), crate::ApiError> {
         // Would start HTTP server
         Ok(())
     }
-    
+
     pub async fn stop(&self) -> Result<(), crate::ApiError> {
         Ok(())
     }
@@ -822,7 +931,10 @@ impl RpcServer {
 
 fn build_default_rpc_api(config: RpcConfig) -> RpcApi {
     let account_manager = Arc::new(InMemoryAccountManager::new());
-    let tx_pool = Arc::new(TransactionPool::new(TxPoolConfig::default(), account_manager));
+    let tx_pool = Arc::new(TransactionPool::new(
+        TxPoolConfig::default(),
+        account_manager,
+    ));
     let state_db = Arc::new(StateDb::new(Hash::zero()));
 
     let persistent_db = build_compute_kv_backend(&config);
@@ -870,22 +982,26 @@ fn build_compute_kv_backend(config: &RpcConfig) -> Arc<dyn KeyValueDB> {
 fn parse_address(s: &str) -> Result<Address, RpcErrorObject> {
     let bytes = hex::decode(s.strip_prefix("0x").unwrap_or(s))
         .map_err(|e| RpcErrorObject::invalid_params(format!("Invalid address: {}", e)))?;
-    
+
     if bytes.len() != 20 {
-        return Err(RpcErrorObject::invalid_params("Address must be 20 bytes".into()));
+        return Err(RpcErrorObject::invalid_params(
+            "Address must be 20 bytes".into(),
+        ));
     }
-    
+
     Ok(Address::from_slice(&bytes).unwrap())
 }
 
 fn parse_hash(s: &str) -> Result<Hash, RpcErrorObject> {
     let bytes = hex::decode(s.strip_prefix("0x").unwrap_or(s))
         .map_err(|e| RpcErrorObject::invalid_params(format!("Invalid hash: {}", e)))?;
-    
+
     if bytes.len() != 32 {
-        return Err(RpcErrorObject::invalid_params("Hash must be 32 bytes".into()));
+        return Err(RpcErrorObject::invalid_params(
+            "Hash must be 32 bytes".into(),
+        ));
     }
-    
+
     Ok(Hash::from_slice(&bytes).unwrap())
 }
 
@@ -918,11 +1034,10 @@ fn parse_compute_tx(value: serde_json::Value) -> Result<ComputeTx, RpcErrorObjec
 
     let tx_id = parse_hash_field(obj, "tx_id").map(zerocore::compute::TxId)?;
     let domain_id = DomainId(parse_u32_field(obj, "domain_id")?);
-    let command = parse_command(
-        obj.get("command")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| RpcErrorObject::invalid_params("command must be string".to_string()))?,
-    )?;
+    let command =
+        parse_command(obj.get("command").and_then(|v| v.as_str()).ok_or_else(|| {
+            RpcErrorObject::invalid_params("command must be string".to_string())
+        })?)?;
 
     let input_set = parse_hash_array_field(obj, "input_set")?
         .into_iter()
@@ -966,51 +1081,67 @@ fn parse_witness(v: Option<&serde_json::Value>) -> Result<TxWitness, RpcErrorObj
     let sig_arr = obj
         .get("signatures")
         .and_then(|x| x.as_array())
-        .ok_or_else(|| RpcErrorObject::invalid_params("witness.signatures must be array".to_string()))?;
+        .ok_or_else(|| {
+            RpcErrorObject::invalid_params("witness.signatures must be array".to_string())
+        })?;
 
     let mut signatures = Vec::with_capacity(sig_arr.len());
     for raw in sig_arr {
         if let Some(s) = raw.as_str() {
-            let bytes = hex::decode(s.strip_prefix("0x").unwrap_or(s))
-                .map_err(|e| RpcErrorObject::invalid_params(format!("invalid signature hex: {e}")))?;
-            let sig = Signature::from_bytes(&bytes)
-                .map_err(|e| RpcErrorObject::invalid_params(format!("invalid signature bytes: {e}")))?;
+            let bytes = hex::decode(s.strip_prefix("0x").unwrap_or(s)).map_err(|e| {
+                RpcErrorObject::invalid_params(format!("invalid signature hex: {e}"))
+            })?;
+            let sig = Signature::from_bytes(&bytes).map_err(|e| {
+                RpcErrorObject::invalid_params(format!("invalid signature bytes: {e}"))
+            })?;
             signatures.push(TxSignature::secp256k1(sig));
             continue;
         }
 
-        let obj = raw
-            .as_object()
-            .ok_or_else(|| RpcErrorObject::invalid_params("signature must be string or object".to_string()))?;
-        let scheme = obj
-            .get("scheme")
-            .and_then(|x| x.as_str())
-            .ok_or_else(|| RpcErrorObject::invalid_params("signature.scheme must be string".to_string()))?;
+        let obj = raw.as_object().ok_or_else(|| {
+            RpcErrorObject::invalid_params("signature must be string or object".to_string())
+        })?;
+        let scheme = obj.get("scheme").and_then(|x| x.as_str()).ok_or_else(|| {
+            RpcErrorObject::invalid_params("signature.scheme must be string".to_string())
+        })?;
         let sig_hex = obj
             .get("signature")
             .and_then(|x| x.as_str())
-            .ok_or_else(|| RpcErrorObject::invalid_params("signature.signature must be string".to_string()))?;
+            .ok_or_else(|| {
+                RpcErrorObject::invalid_params("signature.signature must be string".to_string())
+            })?;
         let sig_bytes = hex::decode(sig_hex.strip_prefix("0x").unwrap_or(sig_hex))
             .map_err(|e| RpcErrorObject::invalid_params(format!("invalid signature hex: {e}")))?;
 
         match scheme {
             "secp256k1" => {
-                let sig = Signature::from_bytes(&sig_bytes)
-                    .map_err(|e| RpcErrorObject::invalid_params(format!("invalid signature bytes: {e}")))?;
+                let sig = Signature::from_bytes(&sig_bytes).map_err(|e| {
+                    RpcErrorObject::invalid_params(format!("invalid signature bytes: {e}"))
+                })?;
                 signatures.push(TxSignature::secp256k1(sig));
             }
             "ed25519" => {
-                let pubkey_hex = obj
-                    .get("public_key")
-                    .and_then(|x| x.as_str())
-                    .ok_or_else(|| RpcErrorObject::invalid_params("ed25519 signature requires public_key".to_string()))?;
+                let pubkey_hex =
+                    obj.get("public_key")
+                        .and_then(|x| x.as_str())
+                        .ok_or_else(|| {
+                            RpcErrorObject::invalid_params(
+                                "ed25519 signature requires public_key".to_string(),
+                            )
+                        })?;
                 let pubkey = hex::decode(pubkey_hex.strip_prefix("0x").unwrap_or(pubkey_hex))
-                    .map_err(|e| RpcErrorObject::invalid_params(format!("invalid public_key hex: {e}")))?;
+                    .map_err(|e| {
+                        RpcErrorObject::invalid_params(format!("invalid public_key hex: {e}"))
+                    })?;
                 if sig_bytes.len() != 64 {
-                    return Err(RpcErrorObject::invalid_params("ed25519 signature must be 64 bytes".to_string()));
+                    return Err(RpcErrorObject::invalid_params(
+                        "ed25519 signature must be 64 bytes".to_string(),
+                    ));
                 }
                 if pubkey.len() != 32 {
-                    return Err(RpcErrorObject::invalid_params("ed25519 public_key must be 32 bytes".to_string()));
+                    return Err(RpcErrorObject::invalid_params(
+                        "ed25519 public_key must be 32 bytes".to_string(),
+                    ));
                 }
                 signatures.push(TxSignature {
                     scheme: SignatureScheme::Ed25519,
@@ -1029,11 +1160,12 @@ fn parse_witness(v: Option<&serde_json::Value>) -> Result<TxWitness, RpcErrorObj
     let threshold = match obj.get("threshold") {
         None | Some(serde_json::Value::Null) => None,
         Some(raw) => {
-            let v = raw
-                .as_u64()
-                .ok_or_else(|| RpcErrorObject::invalid_params("witness.threshold must be u64".to_string()))?;
-            Some(u16::try_from(v)
-                .map_err(|_| RpcErrorObject::invalid_params("witness.threshold overflow".to_string()))?)
+            let v = raw.as_u64().ok_or_else(|| {
+                RpcErrorObject::invalid_params("witness.threshold must be u64".to_string())
+            })?;
+            Some(u16::try_from(v).map_err(|_| {
+                RpcErrorObject::invalid_params("witness.threshold overflow".to_string())
+            })?)
         }
     };
 
@@ -1052,7 +1184,9 @@ fn parse_command(s: &str) -> Result<Command, RpcErrorObject> {
         "Anchor" => Ok(Command::Anchor),
         "Reveal" => Ok(Command::Reveal),
         "AgentTick" => Ok(Command::AgentTick),
-        _ => Err(RpcErrorObject::invalid_params(format!("unsupported command: {s}"))),
+        _ => Err(RpcErrorObject::invalid_params(format!(
+            "unsupported command: {s}"
+        ))),
     }
 }
 
@@ -1065,7 +1199,9 @@ fn parse_object_kind(s: &str) -> Result<ObjectKind, RpcErrorObject> {
         "Agent" => Ok(ObjectKind::Agent),
         "Anchor" => Ok(ObjectKind::Anchor),
         "Ticket" => Ok(ObjectKind::Ticket),
-        _ => Err(RpcErrorObject::invalid_params(format!("unsupported object kind: {s}"))),
+        _ => Err(RpcErrorObject::invalid_params(format!(
+            "unsupported object kind: {s}"
+        ))),
     }
 }
 
@@ -1083,26 +1219,27 @@ fn parse_ownership(v: Option<&serde_json::Value>) -> Result<Ownership, RpcErrorO
     match typ {
         "Shared" => Ok(Ownership::Shared),
         "Address" => {
-            let addr = obj
-                .get("address")
-                .and_then(|x| x.as_str())
-                .ok_or_else(|| RpcErrorObject::invalid_params("owner.address missing".to_string()))?;
+            let addr = obj.get("address").and_then(|x| x.as_str()).ok_or_else(|| {
+                RpcErrorObject::invalid_params("owner.address missing".to_string())
+            })?;
             Ok(Ownership::Address(parse_address(addr)?))
         }
         "Program" => {
-            let addr = obj
-                .get("address")
-                .and_then(|x| x.as_str())
-                .ok_or_else(|| RpcErrorObject::invalid_params("owner.address missing".to_string()))?;
+            let addr = obj.get("address").and_then(|x| x.as_str()).ok_or_else(|| {
+                RpcErrorObject::invalid_params("owner.address missing".to_string())
+            })?;
             Ok(Ownership::Program(parse_address(addr)?))
         }
         "NativeEd25519" => {
             let pubkey = obj
                 .get("public_key")
                 .and_then(|x| x.as_str())
-                .ok_or_else(|| RpcErrorObject::invalid_params("owner.public_key missing".to_string()))?;
-            let bytes = hex::decode(pubkey.strip_prefix("0x").unwrap_or(pubkey))
-                .map_err(|e| RpcErrorObject::invalid_params(format!("invalid owner.public_key hex: {e}")))?;
+                .ok_or_else(|| {
+                    RpcErrorObject::invalid_params("owner.public_key missing".to_string())
+                })?;
+            let bytes = hex::decode(pubkey.strip_prefix("0x").unwrap_or(pubkey)).map_err(|e| {
+                RpcErrorObject::invalid_params(format!("invalid owner.public_key hex: {e}"))
+            })?;
             if bytes.len() != 32 {
                 return Err(RpcErrorObject::invalid_params(
                     "owner.public_key must be 32 bytes".to_string(),
@@ -1112,11 +1249,15 @@ fn parse_ownership(v: Option<&serde_json::Value>) -> Result<Ownership, RpcErrorO
             arr.copy_from_slice(&bytes);
             Ok(Ownership::NativeEd25519(arr))
         }
-        _ => Err(RpcErrorObject::invalid_params(format!("unsupported owner type: {typ}"))),
+        _ => Err(RpcErrorObject::invalid_params(format!(
+            "unsupported owner type: {typ}"
+        ))),
     }
 }
 
-fn parse_read_set(v: Option<&serde_json::Value>) -> Result<Vec<zerocore::compute::ObjectReadRef>, RpcErrorObject> {
+fn parse_read_set(
+    v: Option<&serde_json::Value>,
+) -> Result<Vec<zerocore::compute::ObjectReadRef>, RpcErrorObject> {
     let Some(v) = v else {
         return Ok(vec![]);
     };
@@ -1126,15 +1267,17 @@ fn parse_read_set(v: Option<&serde_json::Value>) -> Result<Vec<zerocore::compute
 
     let mut out = Vec::with_capacity(arr.len());
     for item in arr {
-        let obj = item
-            .as_object()
-            .ok_or_else(|| RpcErrorObject::invalid_params("read_set item must be object".to_string()))?;
+        let obj = item.as_object().ok_or_else(|| {
+            RpcErrorObject::invalid_params("read_set item must be object".to_string())
+        })?;
         let output_id = parse_hash_field(obj, "output_id").map(OutputId)?;
         let domain_id = DomainId(parse_u32_field(obj, "domain_id")?);
         let expected_version = Version(
             obj.get("expected_version")
                 .and_then(|x| x.as_u64())
-                .ok_or_else(|| RpcErrorObject::invalid_params("expected_version missing".to_string()))?,
+                .ok_or_else(|| {
+                    RpcErrorObject::invalid_params("expected_version missing".to_string())
+                })?,
         );
         out.push(zerocore::compute::ObjectReadRef {
             output_id,
@@ -1145,19 +1288,21 @@ fn parse_read_set(v: Option<&serde_json::Value>) -> Result<Vec<zerocore::compute
     Ok(out)
 }
 
-fn parse_output_proposals(v: Option<&serde_json::Value>) -> Result<Vec<OutputProposal>, RpcErrorObject> {
+fn parse_output_proposals(
+    v: Option<&serde_json::Value>,
+) -> Result<Vec<OutputProposal>, RpcErrorObject> {
     let Some(v) = v else {
         return Ok(vec![]);
     };
-    let arr = v
-        .as_array()
-        .ok_or_else(|| RpcErrorObject::invalid_params("output_proposals must be array".to_string()))?;
+    let arr = v.as_array().ok_or_else(|| {
+        RpcErrorObject::invalid_params("output_proposals must be array".to_string())
+    })?;
 
     let mut out = Vec::with_capacity(arr.len());
     for item in arr {
-        let obj = item
-            .as_object()
-            .ok_or_else(|| RpcErrorObject::invalid_params("output proposal must be object".to_string()))?;
+        let obj = item.as_object().ok_or_else(|| {
+            RpcErrorObject::invalid_params("output proposal must be object".to_string())
+        })?;
         let output_id = parse_hash_field(obj, "output_id").map(OutputId)?;
         let object_id = parse_hash_field(obj, "object_id").map(ObjectId)?;
         let domain_id = DomainId(parse_u32_field(obj, "domain_id")?);
@@ -1211,9 +1356,9 @@ fn parse_hash_array_field(
         .ok_or_else(|| RpcErrorObject::invalid_params(format!("{key} must be array")))?;
     let mut out = Vec::with_capacity(arr.len());
     for item in arr {
-        let s = item
-            .as_str()
-            .ok_or_else(|| RpcErrorObject::invalid_params(format!("{key} items must be hex string")))?;
+        let s = item.as_str().ok_or_else(|| {
+            RpcErrorObject::invalid_params(format!("{key} items must be hex string"))
+        })?;
         out.push(parse_hash(s)?);
     }
     Ok(out)
@@ -1238,8 +1383,7 @@ fn parse_u32_field(
         .get(key)
         .and_then(|v| v.as_u64())
         .ok_or_else(|| RpcErrorObject::invalid_params(format!("{key} missing")))?;
-    u32::try_from(v)
-        .map_err(|_| RpcErrorObject::invalid_params(format!("{key} overflow")))
+    u32::try_from(v).map_err(|_| RpcErrorObject::invalid_params(format!("{key} overflow")))
 }
 
 fn parse_bytes_hex_opt(v: Option<&serde_json::Value>) -> Result<Option<Vec<u8>>, RpcErrorObject> {
@@ -1266,7 +1410,10 @@ mod tests {
 
     fn build_test_api_with_compute() -> RpcApi {
         let account_manager = Arc::new(InMemoryAccountManager::new());
-        let tx_pool = Arc::new(TransactionPool::new(TxPoolConfig::default(), account_manager));
+        let tx_pool = Arc::new(TransactionPool::new(
+            TxPoolConfig::default(),
+            account_manager,
+        ));
         let state_db = Arc::new(StateDb::new(Hash::zero()));
 
         let store = Arc::new(InMemoryObjectStore::new());
@@ -1283,7 +1430,10 @@ mod tests {
 
     fn build_test_api_with_persistent_compute() -> RpcApi {
         let account_manager = Arc::new(InMemoryAccountManager::new());
-        let tx_pool = Arc::new(TransactionPool::new(TxPoolConfig::default(), account_manager));
+        let tx_pool = Arc::new(TransactionPool::new(
+            TxPoolConfig::default(),
+            account_manager,
+        ));
         let state_db = Arc::new(StateDb::new(Hash::zero()));
         let db = Arc::new(MemDatabase::new());
         let persistent_store = Arc::new(ComputeStore::new(db));
@@ -1352,18 +1502,22 @@ mod tests {
 
         let parsed = parse_compute_tx(tx).expect("ed25519 tx should parse");
         assert_eq!(parsed.witness.signatures.len(), 1);
-        assert_eq!(parsed.witness.signatures[0].scheme, SignatureScheme::Ed25519);
+        assert_eq!(
+            parsed.witness.signatures[0].scheme,
+            SignatureScheme::Ed25519
+        );
     }
-    
+
     #[test]
     fn test_parse_address() {
         let addr = parse_address("0x0000000000000000000000000000000000000001").unwrap();
         assert!(!addr.is_zero());
     }
-    
+
     #[test]
     fn test_parse_hash() {
-        let hash = parse_hash("0x0000000000000000000000000000000000000000000000000000000000000001").unwrap();
+        let hash = parse_hash("0x0000000000000000000000000000000000000000000000000000000000000001")
+            .unwrap();
         assert!(!hash.is_zero());
     }
 
@@ -1402,14 +1556,20 @@ mod tests {
         let domain_value = api
             .zero_get_domain(Some(vec![serde_json::Value::from(0u64)]))
             .unwrap();
-        assert_eq!(domain_value.get("domain_id").and_then(|v| v.as_u64()), Some(0));
+        assert_eq!(
+            domain_value.get("domain_id").and_then(|v| v.as_u64()),
+            Some(0)
+        );
     }
 
     #[test]
     fn test_zero_simulate_and_submit_compute_tx() {
         let api = build_test_api_with_compute();
 
-        let witness_sig = format!("0x{}", hex::encode(Signature::new([1; 32], [2; 32], 27).as_bytes()));
+        let witness_sig = format!(
+            "0x{}",
+            hex::encode(Signature::new([1; 32], [2; 32], 27).as_bytes())
+        );
 
         let tx = canonicalize_compute_tx_id(serde_json::json!({
             "tx_id": format!("0x{}", hex::encode([0x55u8; 32])),
@@ -1544,7 +1704,9 @@ mod tests {
             version: Version(1),
             domain_id: DomainId(0),
             kind: ObjectKind::Asset,
-            owner: Ownership::Address(Address::from_hex("0x1111111111111111111111111111111111111111").unwrap()),
+            owner: Ownership::Address(
+                Address::from_hex("0x1111111111111111111111111111111111111111").unwrap(),
+            ),
             predecessor: None,
             state: vec![1],
             logic: None,
@@ -1582,7 +1744,9 @@ mod tests {
             version: Version(1),
             domain_id: DomainId(0),
             kind: ObjectKind::Asset,
-            owner: Ownership::Address(Address::from_hex("0x2222222222222222222222222222222222222222").unwrap()),
+            owner: Ownership::Address(
+                Address::from_hex("0x2222222222222222222222222222222222222222").unwrap(),
+            ),
             predecessor: None,
             state: vec![1],
             logic: None,
@@ -1617,10 +1781,8 @@ mod tests {
 
         let parsed = parse_compute_tx(tx.clone()).expect("tx should parse");
         let sig = signer.sign(&parsed.signing_preimage());
-        tx["witness"]["signatures"] = serde_json::json!([format!(
-            "0x{}",
-            hex::encode(sig.as_bytes())
-        )]);
+        tx["witness"]["signatures"] =
+            serde_json::json!([format!("0x{}", hex::encode(sig.as_bytes()))]);
         let tx = canonicalize_compute_tx_id(tx);
 
         let sim = api
@@ -1688,10 +1850,8 @@ mod tests {
 
         let parsed = parse_compute_tx(tx.clone()).expect("tx should parse");
         let sig = owner_key.sign(&parsed.signing_preimage());
-        tx["witness"]["signatures"] = serde_json::json!([format!(
-            "0x{}",
-            hex::encode(sig.as_bytes())
-        )]);
+        tx["witness"]["signatures"] =
+            serde_json::json!([format!("0x{}", hex::encode(sig.as_bytes()))]);
 
         let sim = api
             .zero_simulate_compute_tx(Some(vec![tx]))

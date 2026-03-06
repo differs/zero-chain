@@ -1,0 +1,31 @@
+name: Release Gate
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run release gate
+        run: bash scripts/run_tests.sh
+
+      - name: Upload Go/No-Go report
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-no-go-report
+          path: artifacts/release-gate/go-no-go-report.md

@@ -1,5 +1,5 @@
 //! WebSocket Server Implementation
-//! 
+//!
 //! Provides real-time subscriptions for:
 //! - New block headers
 //! - New pending transactions
@@ -11,12 +11,12 @@ mod subscription;
 pub use server::*;
 pub use subscription::*;
 
-use tokio_tungstenite::tungstenite::Message;
-use tokio::sync::broadcast;
-use std::sync::Arc;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use thiserror::Error;
+use tokio::sync::broadcast;
+use tokio_tungstenite::tungstenite::Message;
 
 /// WebSocket error types
 #[derive(Error, Debug, Clone)]
@@ -34,8 +34,7 @@ pub enum WsError {
 pub type Result<T> = std::result::Result<T, WsError>;
 
 /// WebSocket configuration
-#[derive(Clone, Debug)]
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WsConfig {
     /// Listen address
     pub address: String,
@@ -136,7 +135,7 @@ impl BroadcastChannels {
         let (new_pending_txs_tx, _) = broadcast::channel(1000);
         let (logs_tx, _) = broadcast::channel(100);
         let (syncing_tx, _) = broadcast::channel(10);
-        
+
         Self {
             new_heads: new_heads_tx,
             new_pending_txs: new_pending_txs_tx,
@@ -173,27 +172,27 @@ impl SubscriptionManager {
             max_connections,
         }
     }
-    
+
     /// Create new subscription
     pub fn create_subscription(&self, sub_type: SubscriptionType) -> String {
         use uuid::Uuid;
         let id = Uuid::new_v4().to_string();
-        
+
         self.subscriptions.write().insert(id.clone(), sub_type);
-        
+
         id
     }
-    
+
     /// Remove subscription
     pub fn remove_subscription(&self, id: &str) -> bool {
         self.subscriptions.write().remove(id).is_some()
     }
-    
+
     /// Get subscription type
     pub fn get_subscription(&self, id: &str) -> Option<SubscriptionType> {
         self.subscriptions.read().get(id).cloned()
     }
-    
+
     /// Get all subscriptions
     pub fn get_all_subscriptions(&self) -> Vec<(String, SubscriptionType)> {
         self.subscriptions
@@ -202,35 +201,35 @@ impl SubscriptionManager {
             .map(|(id, ty)| (id.clone(), ty.clone()))
             .collect()
     }
-    
+
     /// Get broadcast channel
     pub fn get_channels(&self) -> Arc<BroadcastChannels> {
         self.channels.clone()
     }
-    
+
     /// Increment connection count
     pub fn add_connection(&self) -> bool {
         let mut count = self.connection_count.write();
-        
+
         if *count >= self.max_connections {
             return false;
         }
-        
+
         *count += 1;
         true
     }
-    
+
     /// Decrement connection count
     pub fn remove_connection(&self) {
         let mut count = self.connection_count.write();
         *count = count.saturating_sub(1);
     }
-    
+
     /// Get connection count
     pub fn connection_count(&self) -> usize {
         *self.connection_count.read()
     }
-    
+
     /// Broadcast new block header
     pub fn broadcast_new_head(&self, header: serde_json::Value) -> Result<()> {
         self.channels
@@ -239,7 +238,7 @@ impl SubscriptionManager {
             .map_err(|_| WsError::Channel)?;
         Ok(())
     }
-    
+
     /// Broadcast new pending transaction
     pub fn broadcast_new_pending_tx(&self, tx_hash: serde_json::Value) -> Result<()> {
         self.channels
@@ -248,7 +247,7 @@ impl SubscriptionManager {
             .map_err(|_| WsError::Channel)?;
         Ok(())
     }
-    
+
     /// Broadcast log
     pub fn broadcast_log(&self, filter: &LogsFilter, log: serde_json::Value) -> Result<()> {
         self.channels
@@ -257,7 +256,7 @@ impl SubscriptionManager {
             .map_err(|_| WsError::Channel)?;
         Ok(())
     }
-    
+
     /// Broadcast syncing status
     pub fn broadcast_syncing(&self, status: serde_json::Value) -> Result<()> {
         self.channels
@@ -277,33 +276,33 @@ impl Default for SubscriptionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_subscription_manager() {
         let manager = SubscriptionManager::new(10);
-        
+
         // Create subscription
         let id = manager.create_subscription(SubscriptionType::NewHeads);
         assert!(!id.is_empty());
-        
+
         // Get subscription
         let sub = manager.get_subscription(&id);
         assert_eq!(sub, Some(SubscriptionType::NewHeads));
-        
+
         // Remove subscription
         assert!(manager.remove_subscription(&id));
         assert!(!manager.remove_subscription(&id));
     }
-    
+
     #[test]
     fn test_connection_limit() {
         let manager = SubscriptionManager::new(2);
-        
+
         assert!(manager.add_connection());
         assert!(manager.add_connection());
-        assert!(!manager.add_connection());  // Should fail
-        
+        assert!(!manager.add_connection()); // Should fail
+
         manager.remove_connection();
-        assert!(manager.add_connection());  // Should succeed now
+        assert!(manager.add_connection()); // Should succeed now
     }
 }

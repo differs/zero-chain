@@ -1,12 +1,11 @@
 //! REST API module - Placeholder
 
-use axum::{Router, extract::State, response::Json};
+use axum::{extract::State, response::Json, Router};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 /// REST server configuration
-#[derive(Clone, Debug)]
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RestConfig {
     pub address: String,
     pub port: u16,
@@ -33,7 +32,11 @@ impl RestServer {
 
     pub async fn start(&self) -> crate::Result<()> {
         // Placeholder implementation
-        tracing::info!("REST API server would start on {}:{}", self.config.address, self.config.port);
+        tracing::info!(
+            "REST API server would start on {}:{}",
+            self.config.address,
+            self.config.port
+        );
         Ok(())
     }
 
@@ -51,8 +54,7 @@ pub struct HealthResponse {
 
 /// Create REST router
 pub fn create_router() -> Router<Arc<()>> {
-    Router::new()
-        .route("/health", axum::routing::get(health_check))
+    Router::new().route("/health", axum::routing::get(health_check))
 }
 
 /// Health check endpoint

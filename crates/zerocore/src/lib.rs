@@ -1,5 +1,5 @@
 //! ZeroChain Core Protocol Implementation
-//! 
+//!
 //! This crate provides the core blockchain protocol components including:
 //! - Account management (hybrid balance + UTXO model)
 //! - EVM execution engine
@@ -26,14 +26,14 @@ pub mod state;
 pub mod transaction;
 
 // Re-export commonly used types
-pub use account::{Account, AccountType, AccountManager};
+pub use account::{Account, AccountManager, AccountType};
 pub use block::{Block, BlockHeader};
 pub use compute::{ComputeTx, ObjectId, ObjectOutput, OutputId, TxId};
 pub use consensus::{Consensus, PowAlgorithm};
-pub use crypto::{Address, Hash, PublicKey, PrivateKey, Signature};
+pub use crypto::{Address, Hash, PrivateKey, PublicKey, Signature};
 pub use evm::EvmEngine;
 pub use state::StateDb;
-pub use transaction::{UnsignedTransaction as Transaction, SignedTransaction};
+pub use transaction::{SignedTransaction, UnsignedTransaction as Transaction};
 
 /// ZeroChain protocol version
 pub const PROTOCOL_VERSION: u32 = 1;
