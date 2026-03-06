@@ -136,7 +136,7 @@ impl Consensus for PowConsensus {
             reward = U256::from_u128(reward.as_u128() / 2);
         }
 
-        reward.max(U256::from_u128(2_000_000_000_000_000_000u128))
+        reward
     }
 
     fn verify_pow(&self, header: &BlockHeader) -> Result<(), ConsensusError> {
@@ -179,7 +179,9 @@ mod tests {
 
         let reward_0 = consensus.calculate_reward(U256::zero());
         let reward_after_halving = consensus.calculate_reward(U256::from(2_100_000));
+        let reward_after_many_halvings = consensus.calculate_reward(U256::from(2_100_000_u64 * 8));
 
         assert_eq!(reward_after_halving.as_u128(), reward_0.as_u128() / 2);
+        assert!(reward_after_many_halvings < reward_after_halving);
     }
 }

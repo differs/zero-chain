@@ -206,6 +206,24 @@ pub struct RpcApi {
     domain_registry: Arc<InMemoryDomainRegistry>,
     submitted_compute_results: RwLock<HashMap<Hash, serde_json::Value>>,
     persistent_compute_store: Option<Arc<ComputeStore>>,
+    mining_jobs: RwLock<HashMap<String, MiningWork>>,
+    hashrate_counter: RwLock<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct MiningWork {
+    work_id: String,
+    prev_hash: Hash,
+    height: u64,
+    target_leading_zero_bytes: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SubmitWorkRequest {
+    work_id: String,
+    nonce: u64,
+    hash_hex: String,
+    miner: Option<String>,
 }
 
 impl RpcApi {
@@ -227,6 +245,8 @@ impl RpcApi {
             domain_registry,
             submitted_compute_results: RwLock::new(HashMap::new()),
             persistent_compute_store: None,
+            mining_jobs: RwLock::new(HashMap::new()),
+            hashrate_counter: RwLock::new(0),
         }
     }
 
@@ -247,6 +267,8 @@ impl RpcApi {
             domain_registry,
             submitted_compute_results: RwLock::new(HashMap::new()),
             persistent_compute_store: None,
+            mining_jobs: RwLock::new(HashMap::new()),
+            hashrate_counter: RwLock::new(0),
         }
     }
 
@@ -267,6 +289,8 @@ impl RpcApi {
             domain_registry,
             submitted_compute_results: RwLock::new(HashMap::new()),
             persistent_compute_store: Some(compute_store),
+            mining_jobs: RwLock::new(HashMap::new()),
+            hashrate_counter: RwLock::new(0),
         }
     }
 
@@ -335,6 +359,8 @@ impl RpcApi {
             "zero_simulateComputeTx" => self.zero_simulate_compute_tx(params),
             "zero_submitComputeTx" => self.zero_submit_compute_tx(params),
             "zero_getComputeTxResult" => self.zero_get_compute_tx_result(params),
+            "zero_getWork" => self.zero_get_work(params),
+            "zero_submitWork" => self.zero_submit_work(params),
 
             _ => Err(RpcErrorObject::method_not_found(method)),
         }
@@ -510,14 +536,17 @@ impl RpcApi {
         &self,
         _params: Option<Vec<serde_json::Value>>,
     ) -> Result<serde_json::Value, RpcErrorObject> {
-        Ok(serde_json::json!(false))
+        Ok(serde_json::json!(true))
     }
 
     fn eth_hashrate(
         &self,
         _params: Option<Vec<serde_json::Value>>,
     ) -> Result<serde_json::Value, RpcErrorObject> {
-        Ok(serde_json::json!("0x0"))
+        Ok(serde_json::json!(format!(
+            "0x{:x}",
+            *self.hashrate_counter.read()
+        )))
     }
 
     fn eth_accounts(
@@ -825,6 +854,142 @@ impl RpcApi {
 
         Ok(serde_json::Value::Null)
     }
+
+    fn zero_get_work(
+        &self,
+        _params: Option<Vec<serde_json::Value>>,
+    ) -> Result<serde_json::Value, RpcErrorObject> {
+        let latest = self.latest_block.read();
+        let (prev_hash, height) = match latest.as_ref() {
+            Some(b) => (b.header.hash, b.header.number.as_u64().saturating_add(1)),
+            None => (Hash::zero(), 1),
+        };
+
+        let work_id = format!("work-{}-{}", height, current_unix_secs());
+        let work = MiningWork {
+            work_id: work_id.clone(),
+            prev_hash,
+            height,
+            target_leading_zero_bytes: 2,
+        };
+        self.mining_jobs
+            .write()
+            .insert(work_id.clone(), work.clone());
+
+        Ok(serde_json::json!({
+            "work_id": work.work_id,
+            "prev_hash": format!("0x{}", hex::encode(work.prev_hash.as_bytes())),
+            "height": work.height,
+            "target_leading_zero_bytes": work.target_leading_zero_bytes,
+            "coinbase": self.config.coinbase,
+        }))
+    }
+
+    fn zero_submit_work(
+        &self,
+        params: Option<Vec<serde_json::Value>>,
+    ) -> Result<serde_json::Value, RpcErrorObject> {
+        let params = params.ok_or(RpcErrorObject::invalid_params("Missing params".to_string()))?;
+        let req_value = params
+            .first()
+            .ok_or_else(|| RpcErrorObject::invalid_params("Missing work payload".to_string()))?
+            .clone();
+        let req: SubmitWorkRequest = serde_json::from_value(req_value).map_err(|e| {
+            RpcErrorObject::invalid_params(format!("invalid submit work payload: {e}"))
+        })?;
+
+        let work = self
+            .mining_jobs
+            .read()
+            .get(&req.work_id)
+            .cloned()
+            .ok_or_else(|| {
+                RpcErrorObject::invalid_params("unknown or stale work_id".to_string())
+            })?;
+
+        let hash_bytes = hex::decode(req.hash_hex.strip_prefix("0x").unwrap_or(&req.hash_hex))
+            .map_err(|e| RpcErrorObject::invalid_params(format!("invalid hash hex: {e}")))?;
+        let leading = hash_bytes.iter().take_while(|b| **b == 0).count();
+        if leading < work.target_leading_zero_bytes {
+            return Ok(serde_json::json!({
+                "accepted": false,
+                "reason": "low_difficulty_share"
+            }));
+        }
+
+        // Minimal consistency check with node-side work template.
+        let mut data = Vec::new();
+        data.extend_from_slice(work.prev_hash.as_bytes());
+        data.extend_from_slice(&work.height.to_be_bytes());
+        data.extend_from_slice(&req.nonce.to_be_bytes());
+        let expected = zerocore::crypto::keccak256(&data);
+        if expected.as_slice() != hash_bytes.as_slice() {
+            return Ok(serde_json::json!({
+                "accepted": false,
+                "reason": "invalid_pow_hash"
+            }));
+        }
+
+        {
+            let mut counter = self.hashrate_counter.write();
+            *counter = counter.saturating_add(1);
+        }
+
+        // Build and publish a synthetic block header into latest_block for MVP chain progress.
+        let parent = self.latest_block.read().as_ref().map(|b| b.header.clone());
+        let parent_hash = parent.as_ref().map(|h| h.hash).unwrap_or(Hash::zero());
+        let parent_number = parent.as_ref().map(|h| h.number).unwrap_or(U256::zero());
+        let difficulty = parent
+            .as_ref()
+            .map(|h| h.difficulty)
+            .unwrap_or(U256::from_u128(1_000_000));
+        let timestamp = current_unix_secs();
+
+        let mut header = BlockHeader {
+            version: 1,
+            parent_hash,
+            uncle_hashes: Vec::new(),
+            coinbase: Address::from_hex(&self.config.coinbase)
+                .map_err(|e| RpcErrorObject::internal_error(format!("invalid coinbase: {e:?}")))?,
+            state_root: Hash::zero(),
+            transactions_root: Hash::zero(),
+            receipts_root: Hash::zero(),
+            number: parent_number + U256::one(),
+            gas_limit: 30_000_000,
+            gas_used: 0,
+            timestamp,
+            difficulty,
+            nonce: req.nonce,
+            extra_data: req
+                .miner
+                .unwrap_or_else(|| "zero-miner".to_string())
+                .into_bytes(),
+            mix_hash: Hash::from_bytes(expected),
+            base_fee_per_gas: U256::from(1_000_000_000u64),
+            hash: Hash::zero(),
+        };
+        header.hash = header.compute_hash();
+
+        let block = Block {
+            header: header.clone(),
+            transactions: Vec::new(),
+            uncles: Vec::new(),
+        };
+        *self.latest_block.write() = Some(block);
+
+        Ok(serde_json::json!({
+            "accepted": true,
+            "block_hash": format!("0x{}", hex::encode(header.hash.as_bytes())),
+            "height": header.number.as_u64(),
+        }))
+    }
+}
+
+fn current_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 fn compute_error_to_json(err: &zerocore::compute::ComputeError) -> serde_json::Value {
@@ -1500,6 +1665,97 @@ mod tests {
         assert_eq!(
             parsed.witness.signatures[0].scheme,
             SignatureScheme::Ed25519
+        );
+    }
+
+    #[test]
+    fn test_zero_get_work_returns_work_payload() {
+        let api = build_test_api_with_persistent_compute();
+        let work = api
+            .zero_get_work(None)
+            .expect("zero_getWork should succeed");
+        assert!(work.get("work_id").and_then(|v| v.as_str()).is_some());
+        assert!(work.get("height").and_then(|v| v.as_u64()).is_some());
+        assert_eq!(
+            work.get("target_leading_zero_bytes")
+                .and_then(|v| v.as_u64()),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn test_zero_submit_work_accepts_valid_share() {
+        let api = build_test_api_with_persistent_compute();
+        let work = api.zero_get_work(None).expect("work should be available");
+        let work_id = work
+            .get("work_id")
+            .and_then(|v| v.as_str())
+            .expect("work_id missing")
+            .to_string();
+        let prev_hash = work
+            .get("prev_hash")
+            .and_then(|v| v.as_str())
+            .expect("prev_hash missing")
+            .to_string();
+        let height = work
+            .get("height")
+            .and_then(|v| v.as_u64())
+            .expect("height missing");
+
+        {
+            let mut jobs = api.mining_jobs.write();
+            if let Some(job) = jobs.get_mut(&work_id) {
+                job.target_leading_zero_bytes = 0;
+            }
+        }
+
+        let prev_hash_bytes =
+            hex::decode(prev_hash.strip_prefix("0x").unwrap_or(&prev_hash)).expect("prev hash hex");
+        let nonce = 42u64;
+        let mut data = Vec::new();
+        data.extend_from_slice(&prev_hash_bytes);
+        data.extend_from_slice(&height.to_be_bytes());
+        data.extend_from_slice(&nonce.to_be_bytes());
+        let digest = zerocore::crypto::keccak256(&data);
+        let hash_hex = format!("0x{}", hex::encode(digest));
+        let submit = api
+            .zero_submit_work(Some(vec![serde_json::json!({
+                "work_id": work_id,
+                "nonce": nonce,
+                "hash_hex": hash_hex,
+                "miner": "test-miner"
+            })]))
+            .expect("submit should succeed");
+
+        assert_eq!(submit.get("accepted").and_then(|v| v.as_bool()), Some(true));
+        assert!(submit.get("block_hash").and_then(|v| v.as_str()).is_some());
+    }
+
+    #[test]
+    fn test_zero_submit_work_rejects_low_difficulty_share() {
+        let api = build_test_api_with_persistent_compute();
+        let work = api.zero_get_work(None).expect("work should be available");
+        let work_id = work
+            .get("work_id")
+            .and_then(|v| v.as_str())
+            .expect("work_id missing");
+
+        let submit = api
+            .zero_submit_work(Some(vec![serde_json::json!({
+                "work_id": work_id,
+                "nonce": 1,
+                "hash_hex": "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                "miner": "test-miner"
+            })]))
+            .expect("submit should return result");
+
+        assert_eq!(
+            submit.get("accepted").and_then(|v| v.as_bool()),
+            Some(false)
+        );
+        assert_eq!(
+            submit.get("reason").and_then(|v| v.as_str()),
+            Some("low_difficulty_share")
         );
     }
 

@@ -369,6 +369,84 @@ curl -X POST http://localhost:8545 \
 }
 ```
 
+### zero_getWork
+
+获取节点当前挖矿工作模板（MVP）。
+
+```bash
+curl -X POST http://localhost:8545 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc":"2.0",
+    "method":"zero_getWork",
+    "params":[],
+    "id":1
+  }'
+```
+
+响应示例：
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "work_id": "work-42-1710000000",
+    "prev_hash": "0x...",
+    "height": 42,
+    "target_leading_zero_bytes": 2,
+    "coinbase": "0x0000000000000000000000000000000000000000"
+  }
+}
+```
+
+### zero_submitWork
+
+提交矿工计算结果（share/work）。
+
+```bash
+curl -X POST http://localhost:8545 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc":"2.0",
+    "method":"zero_submitWork",
+    "params":[{
+      "work_id":"work-42-1710000000",
+      "nonce":123456,
+      "hash_hex":"0x...",
+      "miner":"miner-local-1"
+    }],
+    "id":1
+  }'
+```
+
+成功响应示例：
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "accepted": true,
+    "block_hash": "0x...",
+    "height": 42
+  }
+}
+```
+
+失败响应示例：
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "accepted": false,
+    "reason": "low_difficulty_share"
+  }
+}
+```
+
 ## WebSocket 订阅
 
 ### 订阅新区块
