@@ -1973,6 +1973,72 @@ mod tests {
     }
 
     #[test]
+    fn test_zero_submit_work_rejects_stale_work_id() {
+        let api = build_test_api_with_persistent_compute();
+        let submit = api
+            .zero_submit_work(Some(vec![serde_json::json!({
+                "work_id": "work-stale-1",
+                "nonce": 1,
+                "hash_hex": "0x00",
+                "miner": "test-miner"
+            })]));
+        let err = submit.expect_err("stale work id should error");
+        assert_eq!(err.code, -32602);
+        assert_eq!(err.message, "Invalid params");
+    }
+
+    #[test]
+    fn test_zero_import_block_rejects_parent_mismatch() {
+        let api = build_test_api_with_persistent_compute();
+
+        // Mine one block first.
+        let first = api.zero_get_work(None).expect("get work");
+        let work_id = first["work_id"].as_str().unwrap().to_string();
+        let prev_hash = first["prev_hash"].as_str().unwrap().to_string();
+        let height = first["height"].as_u64().unwrap();
+        {
+            let mut jobs = api.mining_jobs.write();
+            if let Some(job) = jobs.get_mut(&work_id) {
+                job.target_leading_zero_bytes = 0;
+            }
+        }
+        let prev_hash_bytes = hex::decode(prev_hash.strip_prefix("0x").unwrap_or(&prev_hash)).unwrap();
+        let nonce = 9u64;
+        let mut data = Vec::new();
+        data.extend_from_slice(&prev_hash_bytes);
+        data.extend_from_slice(&height.to_be_bytes());
+        data.extend_from_slice(&nonce.to_be_bytes());
+        let digest = zerocore::crypto::keccak256(&data);
+        let mined = api
+            .zero_submit_work(Some(vec![serde_json::json!({
+                "work_id": work_id,
+                "nonce": nonce,
+                "hash_hex": format!("0x{}", hex::encode(digest)),
+                "miner": "test-miner"
+            })]))
+            .expect("submit work");
+        assert_eq!(mined["accepted"].as_bool(), Some(true));
+
+        // Import block with wrong parent hash should be rejected.
+        let latest = api.zero_get_latest_block(None).expect("latest block");
+        let bad_import = api
+            .zero_import_block(Some(vec![serde_json::json!({
+                "hash": "0x1111111111111111111111111111111111111111111111111111111111111111",
+                "parent_hash": "0x2222222222222222222222222222222222222222222222222222222222222222",
+                "number": "0x2",
+                "timestamp": latest["timestamp"].as_u64().unwrap_or(1) + 1,
+                "difficulty": latest["difficulty"].as_str().unwrap_or("0x1"),
+                "nonce": 1,
+                "coinbase": latest["coinbase"].as_str().unwrap_or("0x0000000000000000000000000000000000000000"),
+                "mix_hash": latest["mix_hash"].as_str().unwrap_or("0x0000000000000000000000000000000000000000000000000000000000000000"),
+                "extra_data": "0x"
+            })]))
+            .expect("import call should return result");
+        assert_eq!(bad_import["imported"].as_bool(), Some(false));
+        assert_eq!(bad_import["reason"].as_str(), Some("parent_mismatch"));
+    }
+
+    #[test]
     fn test_parse_address() {
         let addr = parse_address("0x0000000000000000000000000000000000000001").unwrap();
         assert!(!addr.is_zero());
