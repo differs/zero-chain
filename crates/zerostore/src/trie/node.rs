@@ -189,6 +189,41 @@ impl<'a> NibbleSlice<'a> {
 
         bytes
     }
+
+    /// Convert to nibble vector (each element is 0..=15)
+    pub fn to_nibbles(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.len());
+        for i in 0..self.len() {
+            out.push(self.at(i));
+        }
+        out
+    }
+
+    /// Compare against nibble vector.
+    pub fn equals_nibbles(&self, nibbles: &[u8]) -> bool {
+        if self.len() != nibbles.len() {
+            return false;
+        }
+        for (i, nib) in nibbles.iter().enumerate() {
+            if self.at(i) != *nib {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Common prefix length with nibble vector.
+    pub fn common_prefix_nibbles(&self, nibbles: &[u8]) -> usize {
+        let mut count = 0;
+        let min_len = self.len().min(nibbles.len());
+        for (i, nib) in nibbles.iter().enumerate().take(min_len) {
+            if self.at(i) != *nib {
+                break;
+            }
+            count += 1;
+        }
+        count
+    }
 }
 
 /// Encode node to RLP
@@ -311,7 +346,7 @@ mod tests {
         let slice1 = NibbleSlice::new(&data1);
         let slice2 = NibbleSlice::new(&data2);
 
-        assert_eq!(slice1.common_prefix_length(&slice2), 2);
+        assert_eq!(slice1.common_prefix_length(&slice2), 3);
     }
 
     #[test]

@@ -115,8 +115,8 @@ impl MerklePatriciaTrie {
             TrieNode::Empty => Ok(None),
 
             TrieNode::Leaf(leaf) => {
-                let leaf_nibbles = NibbleSlice::new(&leaf.key_suffix);
-                if key.slice_from(depth).to_bytes() == leaf_nibbles.to_bytes() {
+                let key_suffix = key.slice_from(depth);
+                if key_suffix.equals_nibbles(&leaf.key_suffix) {
                     Ok(Some(leaf.value.clone()))
                 } else {
                     Ok(None)
@@ -124,8 +124,8 @@ impl MerklePatriciaTrie {
             }
 
             TrieNode::Extension(ext) => {
-                let ext_nibbles = NibbleSlice::new(&ext.prefix);
-                let common = key.slice_from(depth).common_prefix_length(&ext_nibbles);
+                let key_suffix = key.slice_from(depth);
+                let common = key_suffix.common_prefix_nibbles(&ext.prefix);
 
                 if common == ext.prefix.len() {
                     let child = self.get_node_by_hash(&ext.child)?;
@@ -160,7 +160,7 @@ impl MerklePatriciaTrie {
         let new_root = match *self.root.read() {
             None => {
                 // Create new leaf node
-                let leaf = TrieNode::Leaf(LeafNode::new(nibbles.to_bytes(), value));
+                let leaf = TrieNode::Leaf(LeafNode::new(nibbles.to_nibbles(), value));
                 self.save_node(leaf)?
             }
             Some(root_hash) => {
@@ -185,15 +185,15 @@ impl MerklePatriciaTrie {
     ) -> Result<NodeHash> {
         match node {
             TrieNode::Empty => {
-                let leaf = TrieNode::Leaf(LeafNode::new(key.slice_from(depth).to_bytes(), value));
+                let leaf = TrieNode::Leaf(LeafNode::new(key.slice_from(depth).to_nibbles(), value));
                 self.save_node(leaf)
             }
 
             TrieNode::Leaf(leaf) => {
-                let leaf_nibbles = NibbleSlice::new(&leaf.key_suffix);
-                let common = key.slice_from(depth).common_prefix_length(&leaf_nibbles);
+                let key_suffix = key.slice_from(depth);
+                let common = key_suffix.common_prefix_nibbles(&leaf.key_suffix);
 
-                if common == leaf_nibbles.len() && common == key.len() - depth {
+                if common == leaf.key_suffix.len() && common == key_suffix.len() {
                     // Update existing leaf
                     let new_leaf = TrieNode::Leaf(LeafNode::new(leaf.key_suffix.clone(), value));
                     self.save_node(new_leaf)
@@ -204,8 +204,8 @@ impl MerklePatriciaTrie {
             }
 
             TrieNode::Extension(ext) => {
-                let ext_nibbles = NibbleSlice::new(&ext.prefix);
-                let common = key.slice_from(depth).common_prefix_length(&ext_nibbles);
+                let key_suffix = key.slice_from(depth);
+                let common = key_suffix.common_prefix_nibbles(&ext.prefix);
 
                 if common == ext.prefix.len() {
                     // Continue down the extension
@@ -240,7 +240,7 @@ impl MerklePatriciaTrie {
                         }
                         None => {
                             let leaf = TrieNode::Leaf(LeafNode::new(
-                                key.slice_from(depth + 1).to_bytes(),
+                                key.slice_from(depth + 1).to_nibbles(),
                                 value,
                             ));
                             self.save_node(leaf)?
@@ -263,25 +263,23 @@ impl MerklePatriciaTrie {
         common: usize,
         value: Vec<u8>,
     ) -> Result<NodeHash> {
-        let leaf_nibbles = NibbleSlice::new(&leaf.key_suffix);
-
         // Create new leaf for existing value
         let existing_leaf = TrieNode::Leaf(LeafNode::new(
-            leaf_nibbles.slice_from(common).to_bytes(),
+            leaf.key_suffix[common + 1..].to_vec(),
             leaf.value.clone(),
         ));
         let existing_hash = self.save_node(existing_leaf)?;
 
         // Create new leaf for new value
         let new_leaf = TrieNode::Leaf(LeafNode::new(
-            key.slice_from(depth + common + 1).to_bytes(),
+            key.slice_from(depth + common + 1).to_nibbles(),
             value,
         ));
         let new_hash = self.save_node(new_leaf)?;
 
         // Create branch node
         let mut branch = BranchNode::new();
-        branch.children[leaf_nibbles.at(common) as usize] = Some(existing_hash);
+        branch.children[leaf.key_suffix[common] as usize] = Some(existing_hash);
         branch.children[key.at(depth + common) as usize] = Some(new_hash);
 
         let branch_hash = self.save_node(TrieNode::Branch(branch))?;
@@ -289,11 +287,7 @@ impl MerklePatriciaTrie {
         // Create extension if there's a common prefix
         if common > 0 {
             let ext = TrieNode::Extension(ExtensionNode::new(
-                NibbleSlice::new(&leaf_nibbles.to_bytes())
-                    .slice_from(0)
-                    .slice_from(0)
-                    .to_bytes()[..common]
-                    .to_vec(),
+                leaf.key_suffix[..common].to_vec(),
                 branch_hash,
             ));
             self.save_node(ext)
@@ -311,21 +305,57 @@ impl MerklePatriciaTrie {
         common: usize,
         value: Vec<u8>,
     ) -> Result<NodeHash> {
-        // Implementation similar to split_leaf
-        // Simplified for brevity
-        let child = self.get_node_by_hash(&ext.child)?;
-        let new_child = self.insert_recursive(&child, key, depth + common, value)?;
+        let mut branch = BranchNode::new();
 
-        let new_ext = TrieNode::Extension(ExtensionNode::new(ext.prefix.clone(), new_child));
-        self.save_node(new_ext)
+        // Old extension path becomes one branch arm.
+        let old_index = ext.prefix[common] as usize;
+        let old_remaining = if common + 1 < ext.prefix.len() {
+            ext.prefix[common + 1..].to_vec()
+        } else {
+            Vec::new()
+        };
+
+        let old_child_hash = if old_remaining.is_empty() {
+            ext.child
+        } else {
+            self.save_node(TrieNode::Extension(ExtensionNode::new(
+                old_remaining,
+                ext.child,
+            )))?
+        };
+        branch.children[old_index] = Some(old_child_hash);
+
+        // New key path becomes the other branch arm.
+        let new_index = key.at(depth + common) as usize;
+        let new_suffix = key.slice_from(depth + common + 1).to_nibbles();
+        if new_suffix.is_empty() {
+            branch.value = Some(value);
+        } else {
+            let new_leaf = TrieNode::Leaf(LeafNode::new(new_suffix, value));
+            let new_leaf_hash = self.save_node(new_leaf)?;
+            branch.children[new_index] = Some(new_leaf_hash);
+        }
+
+        let branch_hash = self.save_node(TrieNode::Branch(branch))?;
+
+        // Preserve common prefix (if any) as a new extension above branch.
+        if common > 0 {
+            self.save_node(TrieNode::Extension(ExtensionNode::new(
+                ext.prefix[..common].to_vec(),
+                branch_hash,
+            )))
+        } else {
+            Ok(branch_hash)
+        }
     }
 
     /// Remove key
     pub fn remove(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         let hashed_key = keccak256(key);
         let nibbles = NibbleSlice::new(&hashed_key);
+        let root = *self.root.read();
 
-        match *self.root.read() {
+        match root {
             None => Ok(None),
             Some(root_hash) => {
                 let root_node = self.get_node_by_hash(&root_hash)?;
@@ -352,8 +382,8 @@ impl MerklePatriciaTrie {
             TrieNode::Empty => Ok((None, None)),
 
             TrieNode::Leaf(leaf) => {
-                let leaf_nibbles = NibbleSlice::new(&leaf.key_suffix);
-                if key.slice_from(depth).to_bytes() == leaf_nibbles.to_bytes() {
+                let key_suffix = key.slice_from(depth);
+                if key_suffix.equals_nibbles(&leaf.key_suffix) {
                     Ok((None, Some(leaf.value.clone())))
                 } else {
                     Ok((None, None))
@@ -396,7 +426,50 @@ impl MerklePatriciaTrie {
             }
 
             // Extension and other cases simplified
-            _ => Ok((None, None)),
+            TrieNode::Extension(ext) => {
+                let key_suffix = key.slice_from(depth);
+                let common = key_suffix.common_prefix_nibbles(&ext.prefix);
+                if common != ext.prefix.len() {
+                    return Ok((
+                        Some(self.save_node(TrieNode::Extension(ext.clone()))?),
+                        None,
+                    ));
+                }
+
+                let child = self.get_node_by_hash(&ext.child)?;
+                let (new_child_opt, removed) =
+                    self.remove_recursive(&child, key, depth + ext.prefix.len())?;
+
+                let Some(new_child_hash) = new_child_opt else {
+                    return Ok((None, removed));
+                };
+
+                let new_child_node = self.get_node_by_hash(&new_child_hash)?;
+                match new_child_node {
+                    TrieNode::Extension(child_ext) => {
+                        let mut merged = ext.prefix.clone();
+                        merged.extend(child_ext.prefix);
+                        let merged_hash = self.save_node(TrieNode::Extension(
+                            ExtensionNode::new(merged, child_ext.child),
+                        ))?;
+                        Ok((Some(merged_hash), removed))
+                    }
+                    TrieNode::Leaf(child_leaf) => {
+                        let mut merged = ext.prefix.clone();
+                        merged.extend(child_leaf.key_suffix);
+                        let merged_hash = self
+                            .save_node(TrieNode::Leaf(LeafNode::new(merged, child_leaf.value)))?;
+                        Ok((Some(merged_hash), removed))
+                    }
+                    _ => {
+                        let hash = self.save_node(TrieNode::Extension(ExtensionNode::new(
+                            ext.prefix.clone(),
+                            new_child_hash,
+                        )))?;
+                        Ok((Some(hash), removed))
+                    }
+                }
+            }
         }
     }
 
