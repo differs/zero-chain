@@ -314,8 +314,8 @@ impl std::ops::BitAnd for U256 {
 
     fn bitand(self, other: Self) -> Self::Output {
         let mut result = [0u8; 32];
-        for i in 0..32 {
-            result[i] = self.0[i] & other.0[i];
+        for (i, slot) in result.iter_mut().enumerate() {
+            *slot = self.0[i] & other.0[i];
         }
         Self(result)
     }
@@ -326,8 +326,8 @@ impl std::ops::BitOr for U256 {
 
     fn bitor(self, other: Self) -> Self::Output {
         let mut result = [0u8; 32];
-        for i in 0..32 {
-            result[i] = self.0[i] | other.0[i];
+        for (i, slot) in result.iter_mut().enumerate() {
+            *slot = self.0[i] | other.0[i];
         }
         Self(result)
     }
@@ -338,8 +338,8 @@ impl std::ops::BitXor for U256 {
 
     fn bitxor(self, other: Self) -> Self::Output {
         let mut result = [0u8; 32];
-        for i in 0..32 {
-            result[i] = self.0[i] ^ other.0[i];
+        for (i, slot) in result.iter_mut().enumerate() {
+            *slot = self.0[i] ^ other.0[i];
         }
         Self(result)
     }
@@ -350,8 +350,8 @@ impl std::ops::Not for U256 {
 
     fn not(self) -> Self::Output {
         let mut result = [0u8; 32];
-        for i in 0..32 {
-            result[i] = !self.0[i];
+        for (i, slot) in result.iter_mut().enumerate() {
+            *slot = !self.0[i];
         }
         Self(result)
     }
@@ -411,11 +411,11 @@ impl std::ops::Shr<usize> for U256 {
         let byte_shift = shift / 8;
         let bit_shift = shift % 8;
 
-        for i in 0..32 {
+        for (i, slot) in result.iter_mut().enumerate() {
             if i + byte_shift < 32 {
-                result[i] = self.0[i + byte_shift] >> bit_shift;
+                *slot = self.0[i + byte_shift] >> bit_shift;
                 if bit_shift > 0 && i + byte_shift + 1 < 32 {
-                    result[i] |= self.0[i + byte_shift + 1] << (8 - bit_shift);
+                    *slot |= self.0[i + byte_shift + 1] << (8 - bit_shift);
                 }
             }
         }
@@ -489,9 +489,10 @@ impl I256 {
 }
 
 /// Account state machine states
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AccountState {
     /// Inactive (needs deposit to activate)
+    #[default]
     Inactive,
     /// Active
     Active,
@@ -499,12 +500,6 @@ pub enum AccountState {
     Frozen,
     /// Destroyed
     Destroyed,
-}
-
-impl Default for AccountState {
-    fn default() -> Self {
-        Self::Inactive
-    }
 }
 
 /// State machine events
@@ -571,20 +566,15 @@ pub enum AccountType {
 }
 
 /// Signature scheme
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SignatureScheme {
     /// ECDSA secp256k1
+    #[default]
     EcdsaSecp256k1,
     /// Ed25519
     Ed25519,
     /// BLS12-381
     Bls12_381,
-}
-
-impl Default for SignatureScheme {
-    fn default() -> Self {
-        Self::EcdsaSecp256k1
-    }
 }
 
 /// Social recovery configuration

@@ -3,7 +3,7 @@
 //! 对比 secp256k1 (ECDSA) vs ed25519
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use ed25519_dalek::{SecretKey, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use std::time::Duration;
@@ -31,8 +31,7 @@ fn create_ed25519_tx(nonce: u64) -> (Vec<u8>, SigningKey, VerifyingKey) {
     // 生成随机密钥
     let mut secret_bytes = [0u8; 32];
     OsRng.fill_bytes(&mut secret_bytes);
-    let secret_key = secret_bytes.into();
-    let signing_key = SigningKey::from_bytes(&secret_key);
+    let signing_key = SigningKey::from_bytes(&secret_bytes);
     let verifying_key = VerifyingKey::from(&signing_key);
 
     // 模拟交易数据
@@ -50,10 +49,10 @@ fn bench_secp256k1_sign(c: &mut Criterion) {
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(30));
 
-    for count in [100, 500, 1000].iter() {
-        let txs: Vec<_> = (0..*count).map(|i| create_secp256k1_tx(i)).collect();
+    for count in [100_u64, 500, 1000] {
+        let txs: Vec<_> = (0..count).map(create_secp256k1_tx).collect();
 
-        group.throughput(Throughput::Elements(*count as u64));
+        group.throughput(Throughput::Elements(count));
         group.bench_with_input(
             BenchmarkId::from_parameter(format!("{}_txs", count)),
             &txs,
@@ -83,11 +82,11 @@ fn bench_secp256k1_verify(c: &mut Criterion) {
         })
         .collect();
 
-    for count in [100, 500, 1000].iter() {
-        group.throughput(Throughput::Elements(*count as u64));
+    for count in [100_usize, 500, 1000] {
+        group.throughput(Throughput::Elements(count as u64));
         group.bench_with_input(
             BenchmarkId::from_parameter(format!("{}_txs", count)),
-            &signed_txs[..*count],
+            &signed_txs[..count],
             |b, txs| {
                 b.iter(|| {
                     for tx in txs {
@@ -107,10 +106,10 @@ fn bench_ed25519_sign(c: &mut Criterion) {
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(30));
 
-    for count in [100, 500, 1000].iter() {
-        let txs: Vec<_> = (0..*count).map(|i| create_ed25519_tx(i)).collect();
+    for count in [100_u64, 500, 1000] {
+        let txs: Vec<_> = (0..count).map(create_ed25519_tx).collect();
 
-        group.throughput(Throughput::Elements(*count as u64));
+        group.throughput(Throughput::Elements(count));
         group.bench_with_input(
             BenchmarkId::from_parameter(format!("{}_txs", count)),
             &txs,
@@ -141,11 +140,11 @@ fn bench_ed25519_verify(c: &mut Criterion) {
         })
         .collect();
 
-    for count in [100, 500, 1000].iter() {
-        group.throughput(Throughput::Elements(*count as u64));
+    for count in [100_usize, 500, 1000] {
+        group.throughput(Throughput::Elements(count as u64));
         group.bench_with_input(
             BenchmarkId::from_parameter(format!("{}_txs", count)),
-            &signed_txs[..*count],
+            &signed_txs[..count],
             |b, txs| {
                 b.iter(|| {
                     for (tx_data, signature, verifying_key) in txs {

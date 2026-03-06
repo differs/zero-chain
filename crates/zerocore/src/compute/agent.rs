@@ -41,6 +41,11 @@ pub trait AgentScheduler: Send + Sync {
     fn pop_next(&self) -> Option<AgentTask>;
     /// Current queue size.
     fn len(&self) -> usize;
+
+    /// Whether queue is empty.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 /// In-memory FIFO scheduler for scaffolding.

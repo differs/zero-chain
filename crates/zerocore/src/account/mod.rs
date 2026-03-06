@@ -5,6 +5,7 @@
 //! - UTXO model (for privacy and parallel execution)
 //! - Account abstraction (smart contract wallets)
 
+#[allow(clippy::module_inception)]
 mod account;
 mod manager;
 mod utxo;

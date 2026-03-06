@@ -23,8 +23,8 @@ pub const BATCH_TRANSFER_ADDRESS: u16 = 0x102;
 pub fn is_precompile(address: &Address) -> bool {
     let addr_bytes = address.as_bytes();
     let addr_u16 = u16::from_be_bytes([addr_bytes[18], addr_bytes[19]]);
-    addr_u16 >= 1 && addr_u16 <= 9
-        || addr_u16 >= ACCOUNT_VALIDATOR_ADDRESS && addr_u16 <= BATCH_TRANSFER_ADDRESS
+    (1..=9).contains(&addr_u16)
+        || (ACCOUNT_VALIDATOR_ADDRESS..=BATCH_TRANSFER_ADDRESS).contains(&addr_u16)
 }
 
 /// Get precompile gas cost
@@ -32,15 +32,15 @@ pub fn precompile_gas_cost(address: u16, input_size: usize) -> u64 {
     match address {
         ECRECOVER_ADDRESS => 3000,
         SHA256_ADDRESS => {
-            let words = ((input_size + 31) / 32) as u64;
+            let words = input_size.div_ceil(32) as u64;
             60 + 12 * words
         }
         RIPEMD160_ADDRESS => {
-            let words = ((input_size + 31) / 32) as u64;
+            let words = input_size.div_ceil(32) as u64;
             600 + 120 * words
         }
         IDENTITY_ADDRESS => {
-            let words = ((input_size + 31) / 32) as u64;
+            let words = input_size.div_ceil(32) as u64;
             15 + 3 * words
         }
         MODEXP_ADDRESS => {
@@ -291,7 +291,7 @@ mod tests {
         let ecrecover_addr = Address::from_bytes(
             [0u8; 18]
                 .into_iter()
-                .chain([0x00, 0x01].into_iter())
+                .chain([0x00, 0x01])
                 .collect::<Vec<_>>()
                 .try_into()
                 .unwrap(),

@@ -235,7 +235,7 @@ pub const OP_SELFDESTRUCT: u8 = 0xff;
 
 /// Get the number of bytes needed to push for a PUSH opcode
 pub fn push_bytes(opcode: u8) -> usize {
-    if opcode >= OP_PUSH1 && opcode <= OP_PUSH32 {
+    if (OP_PUSH1..=OP_PUSH32).contains(&opcode) {
         (opcode - OP_PUSH1 + 1) as usize
     } else {
         0
@@ -244,27 +244,27 @@ pub fn push_bytes(opcode: u8) -> usize {
 
 /// Check if opcode is a PUSH
 pub fn is_push(opcode: u8) -> bool {
-    opcode >= OP_PUSH1 && opcode <= OP_PUSH32
+    (OP_PUSH1..=OP_PUSH32).contains(&opcode)
 }
 
 /// Check if opcode is a DUP
 pub fn is_dup(opcode: u8) -> bool {
-    opcode >= OP_DUP1 && opcode <= OP_DUP16
+    (OP_DUP1..=OP_DUP16).contains(&opcode)
 }
 
 /// Check if opcode is a SWAP
 pub fn is_swap(opcode: u8) -> bool {
-    opcode >= OP_SWAP1 && opcode <= OP_SWAP16
+    (OP_SWAP1..=OP_SWAP16).contains(&opcode)
 }
 
 /// Check if opcode is a LOG
 pub fn is_log(opcode: u8) -> bool {
-    opcode >= OP_LOG0 && opcode <= OP_LOG4
+    (OP_LOG0..=OP_LOG4).contains(&opcode)
 }
 
 /// Get the number of topics for a LOG opcode
 pub fn log_topics(opcode: u8) -> usize {
-    if opcode >= OP_LOG0 && opcode <= OP_LOG4 {
+    if (OP_LOG0..=OP_LOG4).contains(&opcode) {
         (opcode - OP_LOG0) as usize
     } else {
         0

@@ -97,10 +97,7 @@ impl StateDb {
 
     pub fn set_storage(&self, address: Address, key: Hash, value: Hash) {
         let mut storage = self.storage.write();
-        storage
-            .entry(address)
-            .or_insert_with(std::collections::HashMap::new)
-            .insert(key, value);
+        storage.entry(address).or_default().insert(key, value);
     }
 
     pub fn set_balance(&self, address: Address, balance: U256) {
@@ -170,29 +167,6 @@ impl StateTransition {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::account::I256;
-
-    #[test]
-    fn test_state_db() {
-        let state = StateDb::new(Hash::zero());
-
-        let address = Address::from_bytes([1u8; 20]);
-        let account = Account {
-            address,
-            balance: U256::from(1000),
-            ..Default::default()
-        };
-
-        state.insert_account(address, account);
-
-        assert_eq!(state.get_balance(&address).as_u64(), 1000);
-        assert_eq!(state.get_nonce(&address), 0);
-    }
-}
-
 // ========================================
 // EVM StateDb Trait 实现文档
 // ========================================
@@ -256,17 +230,17 @@ impl crate::evm::StateDb for StateDb {
 
     /// 设置账户余额
     fn set_balance(&mut self, address: crate::crypto::Address, balance: crate::account::U256) {
-        self.set_balance(address, balance);
+        StateDb::set_balance(self, address, balance);
     }
 
     /// 设置账户 nonce
     fn set_nonce(&mut self, address: crate::crypto::Address, nonce: u64) {
-        self.set_nonce(address, nonce);
+        StateDb::set_nonce(self, address, nonce);
     }
 
     /// 设置合约代码
     fn set_code(&mut self, address: crate::crypto::Address, code: Vec<u8>) {
-        self.set_code(address, code);
+        StateDb::set_code(self, address, code);
     }
 
     /// 设置合约存储
@@ -276,6 +250,29 @@ impl crate::evm::StateDb for StateDb {
         key: crate::crypto::Hash,
         value: crate::crypto::Hash,
     ) {
-        self.set_storage(address, key, value);
+        StateDb::set_storage(self, address, key, value);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::account::I256;
+
+    #[test]
+    fn test_state_db() {
+        let state = StateDb::new(Hash::zero());
+
+        let address = Address::from_bytes([1u8; 20]);
+        let account = Account {
+            address,
+            balance: U256::from(1000),
+            ..Default::default()
+        };
+
+        state.insert_account(address, account);
+
+        assert_eq!(state.get_balance(&address).as_u64(), 1000);
+        assert_eq!(state.get_nonce(&address), 0);
     }
 }

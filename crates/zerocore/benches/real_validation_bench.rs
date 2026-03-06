@@ -97,7 +97,7 @@ fn bench_transaction_pool_full(c: &mut Criterion) {
                         TransactionPool::new(TxPoolConfig::default(), account_manager.clone());
 
                     for tx in txs {
-                        black_box(pool.add_transaction(tx.clone()));
+                        let _ = black_box(pool.add_transaction(tx.clone()));
                     }
                 });
             },

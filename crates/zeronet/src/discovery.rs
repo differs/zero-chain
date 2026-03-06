@@ -145,11 +145,7 @@ impl Discovery {
 
         // Collect from closest buckets
         for i in 0..256 {
-            let idx = if bucket_index >= i {
-                bucket_index - i
-            } else {
-                i - bucket_index
-            };
+            let idx = bucket_index.abs_diff(i);
 
             if idx < buckets.len() {
                 for node in &buckets[idx].nodes {
@@ -211,10 +207,10 @@ fn calculate_distance(id1: &str, id2: &str) -> Hash {
     let bytes2 = hex::decode(id2).unwrap_or_default();
 
     let mut distance = [0u8; 32];
-    for i in 0..32 {
+    for (i, slot) in distance.iter_mut().enumerate() {
         let b1 = bytes1.get(i).copied().unwrap_or(0);
         let b2 = bytes2.get(i).copied().unwrap_or(0);
-        distance[i] = b1 ^ b2;
+        *slot = b1 ^ b2;
     }
 
     Hash::from_bytes(distance)

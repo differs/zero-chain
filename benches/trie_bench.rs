@@ -26,7 +26,7 @@ fn bench_key_generation(c: &mut Criterion) {
     let mut group = c.benchmark_group("key_generation");
 
     group.bench_function("generate_random_key", |b| {
-        b.iter(|| generate_random_key());
+        b.iter(generate_random_key);
     });
 
     group.finish();
@@ -36,7 +36,7 @@ fn bench_value_generation(c: &mut Criterion) {
     let mut group = c.benchmark_group("value_generation");
 
     group.bench_function("generate_random_value", |b| {
-        b.iter(|| generate_random_value());
+        b.iter(generate_random_value);
     });
 
     group.finish();

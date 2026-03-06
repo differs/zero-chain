@@ -28,7 +28,7 @@ pub enum TrieNode {
     Empty,
 
     /// Branch node (16 children + optional value)
-    Branch(BranchNode),
+    Branch(Box<BranchNode>),
 
     /// Extension node (shared prefix + child)
     Extension(ExtensionNode),
@@ -38,21 +38,12 @@ pub enum TrieNode {
 }
 
 /// Branch node
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BranchNode {
     /// 16 children (indexed by nibble 0-15)
     pub children: [Option<NodeHash>; 16],
     /// Optional value stored at this node
     pub value: Option<Vec<u8>>,
-}
-
-impl Default for BranchNode {
-    fn default() -> Self {
-        Self {
-            children: Default::default(),
-            value: None,
-        }
-    }
 }
 
 impl BranchNode {
@@ -136,7 +127,7 @@ impl<'a> NibbleSlice<'a> {
         let pos = self.offset + index;
         if pos >= self.data.len() * 2 {
             0
-        } else if pos % 2 == 0 {
+        } else if pos.is_multiple_of(2) {
             self.data[pos / 2] >> 4
         } else {
             self.data[pos / 2] & 0x0F
@@ -175,7 +166,7 @@ impl<'a> NibbleSlice<'a> {
 
     /// Convert to bytes
     pub fn to_bytes(&self) -> Vec<u8> {
-        let len = (self.len() + 1) / 2;
+        let len = self.len().div_ceil(2);
         let mut bytes = vec![0u8; len];
 
         for i in 0..self.len() {
@@ -281,7 +272,7 @@ fn encode_hex_prefix(nibbles: &[u8], is_leaf: bool) -> Vec<u8> {
     let mut result = Vec::new();
     let flag = if is_leaf { 0x20 } else { 0x00 };
 
-    if nibbles.len() % 2 == 0 {
+    if nibbles.len().is_multiple_of(2) {
         // Even length
         result.push(flag);
         for i in (0..nibbles.len()).step_by(2) {

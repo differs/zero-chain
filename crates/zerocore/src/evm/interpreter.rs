@@ -229,16 +229,16 @@ impl<'a> EvmInterpreter<'a> {
             OP_JUMPDEST => self.op_jumpdest(),
 
             // Push operations
-            op if op >= OP_PUSH1 && op <= OP_PUSH32 => self.op_push(op),
+            op if (OP_PUSH1..=OP_PUSH32).contains(&op) => self.op_push(op),
 
             // Dup operations
-            op if op >= OP_DUP1 && op <= OP_DUP16 => self.op_dup(op),
+            op if (OP_DUP1..=OP_DUP16).contains(&op) => self.op_dup(op),
 
             // Swap operations
-            op if op >= OP_SWAP1 && op <= OP_SWAP16 => self.op_swap(op),
+            op if (OP_SWAP1..=OP_SWAP16).contains(&op) => self.op_swap(op),
 
             // Log operations
-            op if op >= OP_LOG0 && op <= OP_LOG4 => self.op_log(op),
+            op if (OP_LOG0..=OP_LOG4).contains(&op) => self.op_log(op),
 
             // System operations
             OP_CREATE => self.op_create(),
@@ -377,7 +377,7 @@ impl<'a> EvmInterpreter<'a> {
         let exp = self.stack.pop()?;
 
         // Gas cost for exponentiation
-        let exp_byte_cost = ((256 - exp.leading_zeros()) as u64 + 7) / 8 * 50;
+        let exp_byte_cost = ((256 - exp.leading_zeros()) as u64).div_ceil(8) * 50;
         consume_gas(&mut self.gas_left, exp_byte_cost)?;
 
         self.stack.push(base.overflowing_pow_u256(exp).0)?;
@@ -1269,9 +1269,9 @@ impl EvmMemory {
     pub fn read(&self, offset: usize, size: usize) -> Result<Vec<u8>, EvmError> {
         let mut data = vec![0u8; size];
 
-        for i in 0..size {
+        for (i, slot) in data.iter_mut().enumerate().take(size) {
             if offset + i < self.data.len() {
-                data[i] = self.data[offset + i];
+                *slot = self.data[offset + i];
             }
         }
 

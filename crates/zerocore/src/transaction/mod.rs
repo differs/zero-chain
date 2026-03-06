@@ -119,6 +119,7 @@ impl UnsignedTransaction {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     /// Create a new EIP-1559 transaction
     pub fn new_eip1559(
         nonce: u64,
@@ -412,6 +413,8 @@ pub struct Log {
     pub removed: bool,
 }
 
+pub use pool::TransactionPool;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -465,5 +468,3 @@ mod tests {
         assert_eq!(effective_price, U256::from(1_000_000_000));
     }
 }
-
-pub use pool::TransactionPool;

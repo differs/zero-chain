@@ -249,8 +249,8 @@ impl<'de> serde::Deserialize<'de> for PublicKey {
                 A: serde::de::SeqAccess<'de>,
             {
                 let mut bytes = [0u8; 65];
-                for i in 0..65 {
-                    bytes[i] = seq
+                for (i, slot) in bytes.iter_mut().enumerate() {
+                    *slot = seq
                         .next_element()?
                         .ok_or_else(|| serde::de::Error::invalid_length(i, &self))?;
                 }

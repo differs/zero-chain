@@ -18,7 +18,7 @@ pub enum ProtocolMessage {
     /// Transaction response
     Transactions(Vec<SignedTransaction>),
     /// Block response
-    Block(Block),
+    Block(Box<Block>),
 }
 
 /// Protocol trait

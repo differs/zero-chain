@@ -150,7 +150,7 @@ pub fn memory_cost(offset: usize, size: usize) -> Result<u64, EvmError> {
         .ok_or(EvmError::InvalidMemoryAccess)?;
 
     // Round up to nearest 32-byte word
-    let words = (end + 31) / 32;
+    let words = end.div_ceil(32);
 
     // Calculate memory cost using the formula:
     // cost = (words^2 / 512) + (3 * words)
@@ -175,7 +175,7 @@ pub fn memory_expansion_cost(
         .ok_or(EvmError::InvalidMemoryAccess)?;
 
     // Calculate new memory size in words (32 bytes)
-    let new_memory_size = ((end + 31) / 32) * 32;
+    let new_memory_size = end.div_ceil(32) * 32;
 
     if new_memory_size <= current_memory_size {
         return Ok(0);
@@ -198,25 +198,25 @@ pub fn exp_gas_cost(exponent: u64) -> u64 {
         return GAS_EXP;
     }
 
-    let bytes = ((64 - exponent.leading_zeros()) + 7) / 8;
+    let bytes = (64 - exponent.leading_zeros()).div_ceil(8);
     GAS_EXP + (GAS_EXP_PER_BYTE * bytes as u64)
 }
 
 /// Calculate gas cost for SHA3 operation
 pub fn sha3_gas_cost(size: usize) -> u64 {
-    let words = ((size + 31) / 32) as u64;
+    let words = size.div_ceil(32) as u64;
     GAS_SHA3 + (GAS_SHA3_PER_WORD * words)
 }
 
 /// Calculate gas cost for LOG operation
 pub fn log_gas_cost(size: usize, num_topics: usize) -> u64 {
-    let words = ((size + 31) / 32) as u64;
+    let words = size.div_ceil(32) as u64;
     GAS_LOG + (GAS_LOG_PER_TOPIC * num_topics as u64) + (GAS_LOG_PER_BYTE * words)
 }
 
 /// Calculate gas cost for copy operations (CALLDATACOPY, CODECOPY, etc.)
 pub fn copy_gas_cost(size: usize) -> u64 {
-    let words = ((size + 31) / 32) as u64;
+    let words = size.div_ceil(32) as u64;
     GAS_COPY_PER_WORD * words
 }
 
@@ -225,6 +225,6 @@ pub fn initial_memory_cost(size: usize) -> u64 {
     if size == 0 {
         return 0;
     }
-    let words = ((size + 31) / 32) as u64;
+    let words = size.div_ceil(32) as u64;
     (words * words) / MEMORY_EXPANSION_QUOTIENT + (3 * words)
 }

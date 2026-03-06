@@ -5,6 +5,7 @@
 
 mod node;
 mod proof;
+#[allow(clippy::module_inception)]
 mod trie;
 
 pub use node::*;

@@ -115,8 +115,7 @@ struct SessionFile {
 struct UnlockedSession {
     account_name: String,
     expires_unix_secs: u64,
-    encrypted_key_hex: String,
-    nonce_hex: String,
+    key_hash_hex: String,
 }
 
 pub async fn handle_wallet(data_dir: &str, cmd: WalletCommand) -> Result<()> {
@@ -299,7 +298,16 @@ pub async fn handle_wallet(data_dir: &str, cmd: WalletCommand) -> Result<()> {
             let account = find_account(&wallet, &name)?;
             let secret = decrypt_secret(&account.encrypted_private_key, &passphrase)?;
             save_unlocked_session(data_dir, &name, &secret, ttl_secs)?;
+            let env_name = format!(
+                "ZEROCHAIN_WALLET_UNLOCK_{}",
+                name.to_uppercase().replace('-', "_")
+            );
             println!("✅ account unlocked: {} (ttl={}s)", name, ttl_secs);
+            println!(
+                "Set shell session key to enable signing without passphrase:\n  export {}=0x{}",
+                env_name,
+                hex::encode(secret)
+            );
         }
         WalletCommand::MigrateV1 { .. } => unreachable!("handled before wallet load"),
     }
@@ -312,7 +320,7 @@ fn find_account<'a>(wallet: &'a WalletFile, name: &str) -> Result<&'a WalletAcco
         .accounts
         .iter()
         .find(|a| a.name == name)
-        .ok_or_else(|| anyhow::anyhow!("wallet account not found: {}", name).into())
+        .ok_or_else(|| anyhow::anyhow!("wallet account not found: {}", name))
 }
 
 fn ensure_passphrase_strength(passphrase: &str) -> Result<()> {
@@ -597,43 +605,31 @@ fn save_unlocked_session(
     let mut session_file = load_session_file(&path)?;
     prune_expired_sessions(&mut session_file);
 
-    let mut nonce = [0u8; 12];
-    OsRng.fill_bytes(&mut nonce);
-    let mut master = [0u8; 32];
-    OsRng.fill_bytes(&mut master);
-    let cipher = Aes256Gcm::new_from_slice(&master)
-        .map_err(|e| anyhow::anyhow!("failed to initialize session cipher: {e}"))?;
-    let nonce_ga = Nonce::from(nonce);
-    let ciphertext = cipher
-        .encrypt(&nonce_ga, secret.as_ref())
-        .map_err(|_| anyhow::anyhow!("failed to encrypt session secret"))?;
-
-    // Persist encrypted key using process-independent envelope key derived from data dir hash.
-    let envelope_key = derive_envelope_key(data_dir);
-    let mut wrap_nonce = [0u8; 12];
-    OsRng.fill_bytes(&mut wrap_nonce);
-    let wrap_cipher = Aes256Gcm::new_from_slice(&envelope_key)
-        .map_err(|e| anyhow::anyhow!("failed to initialize envelope cipher: {e}"))?;
-    let wrap_nonce_ga = Nonce::from(wrap_nonce);
-    let mut payload = Vec::with_capacity(32 + 12 + ciphertext.len());
-    payload.extend_from_slice(&master);
-    payload.extend_from_slice(&nonce);
-    payload.extend_from_slice(&ciphertext);
-    let wrapped = wrap_cipher
-        .encrypt(&wrap_nonce_ga, payload.as_ref())
-        .map_err(|_| anyhow::anyhow!("failed to wrap session secret"))?;
+    let key_hash_hex = hex::encode(keccak256(secret));
 
     session_file.sessions.retain(|s| s.account_name != name);
     session_file.sessions.push(UnlockedSession {
         account_name: name.to_string(),
         expires_unix_secs: now_unix_secs().saturating_add(ttl_secs),
-        encrypted_key_hex: format!("{}{}", hex::encode(wrap_nonce), hex::encode(wrapped)),
-        nonce_hex: String::new(),
+        key_hash_hex,
     });
     save_session_file(&path, &session_file)
 }
 
 fn load_unlocked_session(data_dir: &str, name: &str) -> Result<[u8; 32]> {
+    let env_name = format!(
+        "ZEROCHAIN_WALLET_UNLOCK_{}",
+        name.to_uppercase().replace('-', "_")
+    );
+    let env_secret = std::env::var(&env_name).map_err(|_| {
+        anyhow::anyhow!(
+            "account is locked; pass --passphrase, run wallet unlock in current shell, or export {}",
+            env_name
+        )
+    })?;
+    let secret = parse_fixed_32_hex(&env_secret)
+        .map_err(|_| anyhow::anyhow!("invalid unlocked session secret in env: {}", env_name))?;
+
     let path = session_file_path(data_dir);
     let mut session_file = load_session_file(&path)?;
     prune_expired_sessions(&mut session_file);
@@ -647,51 +643,13 @@ fn load_unlocked_session(data_dir: &str, name: &str) -> Result<[u8; 32]> {
         })?
         .clone();
 
-    let blob = parse_hex(sess.encrypted_key_hex)?;
-    if blob.len() < 12 {
-        anyhow::bail!("invalid session envelope");
+    let secret_hash = hex::encode(keccak256(&secret));
+    if secret_hash != sess.key_hash_hex {
+        anyhow::bail!("unlocked session key mismatch or stale env secret");
     }
-    let (wrap_nonce, wrapped) = blob.split_at(12);
-    let wrap_nonce_arr: [u8; 12] = wrap_nonce
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("invalid session envelope nonce"))?;
-    let envelope_key = derive_envelope_key(data_dir);
-    let wrap_cipher = Aes256Gcm::new_from_slice(&envelope_key)
-        .map_err(|e| anyhow::anyhow!("failed to initialize envelope cipher: {e}"))?;
-    let wrap_nonce_ga = Nonce::from(wrap_nonce_arr);
-    let payload = wrap_cipher
-        .decrypt(&wrap_nonce_ga, wrapped)
-        .map_err(|_| anyhow::anyhow!("failed to unwrap session payload"))?;
-    if payload.len() < 44 {
-        anyhow::bail!("invalid session payload");
-    }
-    let master = &payload[..32];
-    let nonce = &payload[32..44];
-    let ciphertext = &payload[44..];
-    let cipher = Aes256Gcm::new_from_slice(master)
-        .map_err(|e| anyhow::anyhow!("failed to initialize session cipher: {e}"))?;
-    let nonce_arr: [u8; 12] = nonce
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("invalid session nonce"))?;
-    let nonce_ga = Nonce::from(nonce_arr);
-    let plaintext = cipher
-        .decrypt(&nonce_ga, ciphertext)
-        .map_err(|_| anyhow::anyhow!("failed to decrypt unlocked session"))?;
-    if plaintext.len() != 32 {
-        anyhow::bail!("invalid unlocked session key length");
-    }
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&plaintext);
 
     save_session_file(&path, &session_file)?;
-    Ok(out)
-}
-
-fn derive_envelope_key(data_dir: &str) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(data_dir.as_bytes());
-    hasher.update(b"-zerochain-wallet-session-envelope-v1");
-    hasher.finalize().into()
+    Ok(secret)
 }
 
 fn prune_expired_sessions(session_file: &mut SessionFile) {
@@ -715,7 +673,7 @@ fn default_name(scheme: WalletScheme, idx: usize) -> String {
 
 fn parse_hex(s: String) -> Result<Vec<u8>> {
     let raw = s.trim().strip_prefix("0x").unwrap_or(s.trim());
-    hex::decode(raw).map_err(|e| anyhow::anyhow!("invalid hex: {}", e).into())
+    hex::decode(raw).map_err(|e| anyhow::anyhow!("invalid hex: {}", e))
 }
 
 fn parse_fixed_32_hex(s: &str) -> Result<[u8; 32]> {

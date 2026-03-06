@@ -75,7 +75,7 @@ pub async fn run_node(
                         println!(
                             "   ⛏️  Block #{} mined! Hash: 0x{}... Nonce: {}",
                             block_number,
-                            hex::encode(found_hash.as_bytes())[..16].to_string(),
+                            &hex::encode(found_hash.as_bytes())[..16],
                             nonce
                         );
                         last_hash = found_hash;
@@ -84,7 +84,7 @@ pub async fn run_node(
                     }
 
                     nonce += 1;
-                    if nonce % 50000 == 0 {
+                    if nonce.is_multiple_of(50000) {
                         println!(
                             "   Mining block #{}... nonce: {} (leading zeros: {})",
                             block_number, nonce, leading_zeros
@@ -103,8 +103,10 @@ pub async fn run_node(
 
     if let Some(mut cfg) = rpc_config {
         cfg.port = http_port;
-        let mut api_cfg = ApiConfig::default();
-        api_cfg.http_rpc = cfg;
+        let mut api_cfg = ApiConfig {
+            http_rpc: cfg,
+            ..ApiConfig::default()
+        };
         api_cfg.ws.port = ws_port;
         api_cfg.rest.port = http_port.saturating_add(10);
 

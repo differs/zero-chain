@@ -87,7 +87,7 @@ impl MerklePatriciaTrie {
 
     /// Get root hash
     pub fn root(&self) -> Hash {
-        self.root.read().clone().unwrap_or_else(empty_trie_root)
+        (*self.root.read()).unwrap_or_else(empty_trie_root)
     }
 
     /// Get value by key
@@ -225,13 +225,13 @@ impl MerklePatriciaTrie {
             TrieNode::Branch(branch) => {
                 if depth >= key.len() {
                     // Update value at branch
-                    let mut new_branch = branch.clone();
+                    let mut new_branch = (**branch).clone();
                     new_branch.value = Some(value);
-                    self.save_node(TrieNode::Branch(new_branch))
+                    self.save_node(TrieNode::Branch(Box::new(new_branch)))
                 } else {
                     // Insert into child
                     let index = key.at(depth) as usize;
-                    let mut new_branch = branch.clone();
+                    let mut new_branch = (**branch).clone();
 
                     let new_child = match &branch.children[index] {
                         Some(child_hash) => {
@@ -248,7 +248,7 @@ impl MerklePatriciaTrie {
                     };
 
                     new_branch.children[index] = Some(new_child);
-                    self.save_node(TrieNode::Branch(new_branch))
+                    self.save_node(TrieNode::Branch(Box::new(new_branch)))
                 }
             }
         }
@@ -282,7 +282,7 @@ impl MerklePatriciaTrie {
         branch.children[leaf.key_suffix[common] as usize] = Some(existing_hash);
         branch.children[key.at(depth + common) as usize] = Some(new_hash);
 
-        let branch_hash = self.save_node(TrieNode::Branch(branch))?;
+        let branch_hash = self.save_node(TrieNode::Branch(Box::new(branch)))?;
 
         // Create extension if there's a common prefix
         if common > 0 {
@@ -336,7 +336,7 @@ impl MerklePatriciaTrie {
             branch.children[new_index] = Some(new_leaf_hash);
         }
 
-        let branch_hash = self.save_node(TrieNode::Branch(branch))?;
+        let branch_hash = self.save_node(TrieNode::Branch(Box::new(branch)))?;
 
         // Preserve common prefix (if any) as a new extension above branch.
         if common > 0 {
@@ -393,19 +393,19 @@ impl MerklePatriciaTrie {
             TrieNode::Branch(branch) => {
                 if depth >= key.len() {
                     // Remove value at branch
-                    let mut new_branch = branch.clone();
+                    let mut new_branch = (**branch).clone();
                     let removed = new_branch.value.take();
 
                     if !new_branch.has_children() && removed.is_some() {
                         Ok((None, removed))
                     } else {
-                        let hash = self.save_node(TrieNode::Branch(new_branch))?;
+                        let hash = self.save_node(TrieNode::Branch(Box::new(new_branch)))?;
                         Ok((Some(hash), removed))
                     }
                 } else {
                     // Remove from child
                     let index = key.at(depth) as usize;
-                    let mut new_branch = branch.clone();
+                    let mut new_branch = (**branch).clone();
 
                     if let Some(child_hash) = &branch.children[index] {
                         let child = self.get_node_by_hash(child_hash)?;
@@ -416,7 +416,7 @@ impl MerklePatriciaTrie {
                         if !new_branch.has_children() && new_branch.value.is_none() {
                             Ok((None, removed))
                         } else {
-                            let hash = self.save_node(TrieNode::Branch(new_branch))?;
+                            let hash = self.save_node(TrieNode::Branch(Box::new(new_branch)))?;
                             Ok((Some(hash), removed))
                         }
                     } else {
@@ -526,7 +526,7 @@ impl MerklePatriciaTrie {
     fn decode_node(&self, data: &[u8]) -> Result<TrieNode> {
         // Simplified RLP decoding
         // In production, use full RLP decoder
-        if data.is_empty() || data == &[0x80] {
+        if data.is_empty() || data == [0x80] {
             return Ok(TrieNode::Empty);
         }
 

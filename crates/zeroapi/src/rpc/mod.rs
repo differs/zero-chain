@@ -49,10 +49,11 @@ pub struct RpcConfig {
 }
 
 /// Persistent backend for compute storage.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ComputeBackend {
     /// In-memory backend.
+    #[default]
     Mem,
     /// RocksDB backend.
     RocksDb,
@@ -68,12 +69,6 @@ impl ComputeBackend {
             Self::RocksDb => "rocksdb",
             Self::Redb => "redb",
         }
-    }
-}
-
-impl Default for ComputeBackend {
-    fn default() -> Self {
-        Self::Mem
     }
 }
 
@@ -360,7 +355,7 @@ impl RpcApi {
     ) -> Result<serde_json::Value, RpcErrorObject> {
         let params = params.ok_or(RpcErrorObject::invalid_params("Missing params".to_string()))?;
         let data = params
-            .get(0)
+            .first()
             .ok_or_else(|| RpcErrorObject::invalid_params("Missing data".to_string()))?
             .as_str()
             .ok_or_else(|| RpcErrorObject::invalid_params("Data must be string".to_string()))?;
@@ -424,7 +419,7 @@ impl RpcApi {
         let params = params.ok_or(RpcErrorObject::invalid_params("Missing params".to_string()))?;
 
         let address_str = params
-            .get(0)
+            .first()
             .ok_or_else(|| RpcErrorObject::invalid_params("Missing address".to_string()))?
             .as_str()
             .ok_or_else(|| RpcErrorObject::invalid_params("Address must be string".to_string()))?;
@@ -443,7 +438,7 @@ impl RpcApi {
         let params = params.ok_or(RpcErrorObject::invalid_params("Missing params".to_string()))?;
 
         let address_str = params
-            .get(0)
+            .first()
             .ok_or_else(|| RpcErrorObject::invalid_params("Missing address".to_string()))?
             .as_str()
             .ok_or_else(|| RpcErrorObject::invalid_params("Address must be string".to_string()))?;
@@ -472,7 +467,7 @@ impl RpcApi {
         let params = params.ok_or(RpcErrorObject::invalid_params("Missing params".to_string()))?;
 
         let address_str = params
-            .get(0)
+            .first()
             .ok_or_else(|| RpcErrorObject::invalid_params("Missing address".to_string()))?
             .as_str()
             .ok_or_else(|| RpcErrorObject::invalid_params("Address must be string".to_string()))?;
@@ -561,7 +556,7 @@ impl RpcApi {
         let params = params.ok_or(RpcErrorObject::invalid_params("Missing params".to_string()))?;
 
         let tx_data = params
-            .get(0)
+            .first()
             .ok_or_else(|| RpcErrorObject::invalid_params("Missing transaction data".to_string()))?
             .as_str()
             .ok_or_else(|| {
@@ -603,7 +598,7 @@ impl RpcApi {
         let params = params.ok_or(RpcErrorObject::invalid_params("Missing params".to_string()))?;
 
         let address_str = params
-            .get(0)
+            .first()
             .ok_or_else(|| RpcErrorObject::invalid_params("Missing address".to_string()))?
             .as_str()
             .ok_or_else(|| RpcErrorObject::invalid_params("Address must be string".to_string()))?;
@@ -631,7 +626,7 @@ impl RpcApi {
     ) -> Result<serde_json::Value, RpcErrorObject> {
         let params = params.ok_or(RpcErrorObject::invalid_params("Missing params".to_string()))?;
         let object_id = params
-            .get(0)
+            .first()
             .ok_or_else(|| RpcErrorObject::invalid_params("Missing object_id".to_string()))?
             .as_str()
             .ok_or_else(|| {
@@ -649,7 +644,7 @@ impl RpcApi {
     ) -> Result<serde_json::Value, RpcErrorObject> {
         let params = params.ok_or(RpcErrorObject::invalid_params("Missing params".to_string()))?;
         let output_id = params
-            .get(0)
+            .first()
             .ok_or_else(|| RpcErrorObject::invalid_params("Missing output_id".to_string()))?
             .as_str()
             .ok_or_else(|| {
@@ -667,7 +662,7 @@ impl RpcApi {
     ) -> Result<serde_json::Value, RpcErrorObject> {
         let params = params.ok_or(RpcErrorObject::invalid_params("Missing params".to_string()))?;
         let id = params
-            .get(0)
+            .first()
             .ok_or_else(|| RpcErrorObject::invalid_params("Missing domain_id".to_string()))?
             .as_u64()
             .ok_or_else(|| RpcErrorObject::invalid_params("domain_id must be u64".to_string()))?;
@@ -692,7 +687,7 @@ impl RpcApi {
     ) -> Result<serde_json::Value, RpcErrorObject> {
         let params = params.ok_or(RpcErrorObject::invalid_params("Missing params".to_string()))?;
         let tx_value = params
-            .get(0)
+            .first()
             .ok_or_else(|| RpcErrorObject::invalid_params("Missing tx".to_string()))?
             .clone();
 
@@ -732,7 +727,7 @@ impl RpcApi {
     ) -> Result<serde_json::Value, RpcErrorObject> {
         let params = params.ok_or(RpcErrorObject::invalid_params("Missing params".to_string()))?;
         let tx_value = params
-            .get(0)
+            .first()
             .ok_or_else(|| RpcErrorObject::invalid_params("Missing tx".to_string()))?
             .clone();
 
@@ -806,7 +801,7 @@ impl RpcApi {
     ) -> Result<serde_json::Value, RpcErrorObject> {
         let params = params.ok_or(RpcErrorObject::invalid_params("Missing params".to_string()))?;
         let tx_id_s = params
-            .get(0)
+            .first()
             .ok_or_else(|| RpcErrorObject::invalid_params("Missing tx_id".to_string()))?
             .as_str()
             .ok_or_else(|| RpcErrorObject::invalid_params("tx_id must be string".to_string()))?;
@@ -1954,8 +1949,10 @@ mod tests {
 
     #[test]
     fn test_build_compute_backend_mem() {
-        let mut cfg = RpcConfig::default();
-        cfg.compute_backend = ComputeBackend::Mem;
+        let cfg = RpcConfig {
+            compute_backend: ComputeBackend::Mem,
+            ..RpcConfig::default()
+        };
         let db = build_compute_kv_backend(&cfg);
         db.put(b"k", b"v").unwrap();
         assert_eq!(db.get(b"k").unwrap(), Some(b"v".to_vec()));
@@ -1963,17 +1960,21 @@ mod tests {
 
     #[test]
     fn test_rpc_config_validate_rejects_empty_path_for_file_backend() {
-        let mut cfg = RpcConfig::default();
-        cfg.compute_backend = ComputeBackend::RocksDb;
-        cfg.compute_db_path = "   ".to_string();
+        let cfg = RpcConfig {
+            compute_backend: ComputeBackend::RocksDb,
+            compute_db_path: "   ".to_string(),
+            ..RpcConfig::default()
+        };
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn test_try_new_returns_error_for_invalid_config() {
-        let mut cfg = RpcConfig::default();
-        cfg.compute_backend = ComputeBackend::Redb;
-        cfg.compute_db_path = "".to_string();
+        let cfg = RpcConfig {
+            compute_backend: ComputeBackend::Redb,
+            compute_db_path: "".to_string(),
+            ..RpcConfig::default()
+        };
         let err = match RpcServer::try_new(cfg) {
             Ok(_) => panic!("invalid config should fail"),
             Err(err) => err,

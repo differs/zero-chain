@@ -295,7 +295,7 @@ impl TransactionPool {
         self.account_txs
             .write()
             .entry(sender)
-            .or_insert_with(HashSet::new)
+            .or_default()
             .insert(tx_hash);
 
         // Add to known transactions
@@ -472,7 +472,7 @@ impl TransactionPool {
         let mut all_txs: Vec<_> = self.all_transactions.read().values().cloned().collect();
 
         // Sort by priority (lowest first)
-        all_txs.sort_by(|a, b| a.cmp(b));
+        all_txs.sort();
 
         // Remove lowest priority transactions
         for tx in all_txs.into_iter().take(count) {

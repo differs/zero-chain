@@ -317,7 +317,7 @@ impl AccountManager for InMemoryAccountManager {
         key: Hash,
         value: Hash,
     ) -> Result<(), AccountError> {
-        let storage_map = self.storage.entry(*address).or_insert_with(DashMap::new);
+        let storage_map = self.storage.entry(*address).or_default();
         storage_map.insert(key, value);
 
         Ok(())

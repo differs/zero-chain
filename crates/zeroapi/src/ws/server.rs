@@ -246,7 +246,7 @@ fn handle_subscribe(
         .ok_or_else(|| ApiError::Rpc("Missing params".into()))?;
 
     let sub_type_str = params
-        .get(0)
+        .first()
         .and_then(|v| v.as_str())
         .ok_or_else(|| ApiError::Rpc("Missing subscription type".into()))?;
 
@@ -281,7 +281,7 @@ fn handle_unsubscribe(
         .ok_or_else(|| ApiError::Rpc("Missing params".into()))?;
 
     let id = params
-        .get(0)
+        .first()
         .and_then(|v| v.as_str())
         .ok_or_else(|| ApiError::Rpc("Missing subscription id".into()))?;
 

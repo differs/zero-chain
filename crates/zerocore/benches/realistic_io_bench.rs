@@ -34,7 +34,7 @@ fn setup_realistic_environment(
             ..Default::default()
         };
         // 写入数据库 (真实 I/O)
-        let _ = state_db.insert_account(address, account);
+        state_db.insert_account(address, account);
     }
 
     // 创建测试交易

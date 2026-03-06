@@ -3,6 +3,9 @@
 use crate::{Result, StorageError};
 use std::sync::Arc;
 
+/// Prefix iterator type used by key-value backends.
+pub type PrefixIterator<'a> = Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)> + 'a>;
+
 /// Key-value database trait
 pub trait KeyValueDB: Send + Sync {
     /// Get value by key
@@ -18,10 +21,7 @@ pub trait KeyValueDB: Send + Sync {
     /// Create batch
     fn batch(&self) -> Batch;
     /// Iterate over prefix
-    fn iter_prefix(
-        &self,
-        prefix: &[u8],
-    ) -> Result<Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)> + '_>>;
+    fn iter_prefix(&self, prefix: &[u8]) -> Result<PrefixIterator<'_>>;
 }
 
 /// Batch write operation
@@ -146,10 +146,7 @@ impl KeyValueDB for RocksDb {
         Batch::new()
     }
 
-    fn iter_prefix(
-        &self,
-        prefix: &[u8],
-    ) -> Result<Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)> + '_>> {
+    fn iter_prefix(&self, prefix: &[u8]) -> Result<PrefixIterator<'_>> {
         let iter = self.db.prefix_iterator(prefix);
 
         Ok(Box::new(iter.map(|item| {
@@ -198,10 +195,7 @@ impl KeyValueDB for RedbDatabase {
         Batch::new()
     }
 
-    fn iter_prefix(
-        &self,
-        _prefix: &[u8],
-    ) -> Result<Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)> + '_>> {
+    fn iter_prefix(&self, _prefix: &[u8]) -> Result<PrefixIterator<'_>> {
         Ok(Box::new(std::iter::empty()))
     }
 }
@@ -262,10 +256,7 @@ impl KeyValueDB for MemDatabase {
         Batch::new()
     }
 
-    fn iter_prefix(
-        &self,
-        prefix: &[u8],
-    ) -> Result<Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)> + '_>> {
+    fn iter_prefix(&self, prefix: &[u8]) -> Result<PrefixIterator<'_>> {
         let prefix = prefix.to_vec();
         let items: Vec<_> = self
             .data

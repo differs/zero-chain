@@ -3,7 +3,7 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use std::time::Duration;
 use zerocore::account::{Account, U256};
-use zerocore::crypto::{Address, Hash, PrivateKey, PublicKey};
+use zerocore::crypto::{Address, Hash, PrivateKey};
 use zerocore::evm::{EvmConfig, EvmEngine};
 use zerocore::state::StateDb;
 use zerocore::transaction::UnsignedTransaction;
@@ -34,7 +34,7 @@ fn bench_evm_simple_execution(c: &mut Criterion) {
     group.bench_function("simple_stop", |b| {
         b.iter(|| {
             let mut state_db = StateDb::new(Hash::zero());
-            let (private_key, address) = setup_test_account(&mut state_db);
+            let (private_key, _address) = setup_test_account(&mut state_db);
 
             // STOP 操作码
             let bytecode = vec![0x00];
@@ -73,7 +73,7 @@ fn bench_evm_arithmetic(c: &mut Criterion) {
     group.bench_function("add_numbers", |b| {
         b.iter(|| {
             let mut state_db = StateDb::new(Hash::zero());
-            let (private_key, address) = setup_test_account(&mut state_db);
+            let (private_key, _address) = setup_test_account(&mut state_db);
 
             // PUSH1 1, PUSH1 2, ADD, STOP
             let bytecode = vec![0x60, 0x01, 0x60, 0x02, 0x01, 0x00];

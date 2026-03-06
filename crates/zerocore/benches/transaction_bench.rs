@@ -3,7 +3,6 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use std::time::Duration;
 use zerocore::account::U256;
-use zerocore::crypto::PrivateKey;
 use zerocore::transaction::UnsignedTransaction;
 
 /// 创建已签名的测试交易

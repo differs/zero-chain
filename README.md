@@ -6,6 +6,7 @@ A next-generation blockchain with hybrid account model, EVM compatibility, and P
 
 - **Hybrid Account Model**: Combines balance-based and UTXO models for flexibility and privacy
 - **EVM Compatible**: Full Ethereum Virtual Machine compatibility with custom precompiles
+- **Dual Signature Model**: EVM path uses secp256k1; native compute path supports ed25519
 - **PoW Consensus**: ASIC-resistant mining with RandomX and ProgPoW algorithms
 - **Account Abstraction**: Built-in smart contract wallet support
 - **High Performance**: Parallel transaction execution and optimized state management
@@ -90,11 +91,20 @@ cargo test
 # Initialize data directory
 ./target/release/zerocchain init
 
-# Run a full node
-./target/release/zerocchain run
+# Run a local node (default profile)
+./target/release/zerocchain --network local run
+
+# Run testnet profile
+./target/release/zerocchain --network testnet run
+
+# Run mainnet profile
+./target/release/zerocchain --network mainnet run
 
 # Run a mining node
 ./target/release/zerocchain run --mine --coinbase 0xYourAddress
+
+# Override chain/network id at runtime
+./target/release/zerocchain --network mainnet run --chain-id 0x276e --rpc-network-id 10086
 ```
 
 ### CLI Commands
@@ -103,17 +113,27 @@ cargo test
 # Show help
 zerocchain --help
 
-# Create account
-zerocchain account new
+# Create encrypted native wallet (ed25519)
+zerocchain wallet new --name native-1 --scheme ed25519 --passphrase "StrongPassphrase123!"
 
-# List accounts
-zerocchain account list
+# Create encrypted EVM wallet (secp256k1)
+zerocchain wallet new --name evm-1 --scheme secp256k1 --passphrase "StrongPassphrase123!"
 
-# Check balance
-zerocchain account balance --address 0x...
+# List wallet accounts
+zerocchain wallet list
 
-# Send transaction
-zerocchain transaction send --from 0x... --to 0x... --amount 100
+# Sign with passphrase
+zerocchain wallet sign --name native-1 --message "hello" --passphrase "StrongPassphrase123!"
+
+# Unlock account for temporary session then sign without passphrase
+zerocchain wallet unlock --name native-1 --passphrase "StrongPassphrase123!" --ttl-secs 600
+zerocchain wallet sign --name native-1 --message "hello"
+
+# Rotate account passphrase
+zerocchain wallet rotate-passphrase --name native-1 --old-passphrase "StrongPassphrase123!" --new-passphrase "NewPassphrase123!"
+
+# Migrate legacy plaintext wallet to encrypted format
+zerocchain wallet migrate-v1 --passphrase "StrongPassphrase123!"
 
 # Get block info
 zerocchain block latest
@@ -174,6 +194,15 @@ cargo test -p zerocore
 
 # With output
 cargo test -- --nocapture
+
+# Release gate (fmt/check/test + go/no-go report)
+bash scripts/run_tests.sh
+```
+
+Release gate report path:
+
+```text
+artifacts/release-gate/go-no-go-report.md
 ```
 
 ### Benchmark
