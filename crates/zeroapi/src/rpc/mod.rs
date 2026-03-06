@@ -362,6 +362,8 @@ impl RpcApi {
             "zero_getComputeTxResult" => self.zero_get_compute_tx_result(params),
             "zero_getWork" => self.zero_get_work(params),
             "zero_submitWork" => self.zero_submit_work(params),
+            "zero_getLatestBlock" => self.zero_get_latest_block(params),
+            "zero_importBlock" => self.zero_import_block(params),
 
             _ => Err(RpcErrorObject::method_not_found(method)),
         }
@@ -984,6 +986,108 @@ impl RpcApi {
             "height": header.number.as_u64(),
         }))
     }
+
+    fn zero_get_latest_block(
+        &self,
+        _params: Option<Vec<serde_json::Value>>,
+    ) -> Result<serde_json::Value, RpcErrorObject> {
+        let latest = self.latest_block.read();
+        if let Some(block) = latest.as_ref() {
+            Ok(serde_json::json!({
+                "hash": format!("0x{}", hex::encode(block.header.hash.as_bytes())),
+                "parent_hash": format!("0x{}", hex::encode(block.header.parent_hash.as_bytes())),
+                "number": format!("0x{:x}", block.header.number.as_u64()),
+                "timestamp": block.header.timestamp,
+                "difficulty": format!("0x{:x}", block.header.difficulty.as_u64()),
+                "nonce": block.header.nonce,
+                "coinbase": block.header.coinbase.to_checksum_hex(),
+                "mix_hash": format!("0x{}", hex::encode(block.header.mix_hash.as_bytes())),
+                "extra_data": format!("0x{}", hex::encode(&block.header.extra_data)),
+            }))
+        } else {
+            Ok(serde_json::Value::Null)
+        }
+    }
+
+    fn zero_import_block(
+        &self,
+        params: Option<Vec<serde_json::Value>>,
+    ) -> Result<serde_json::Value, RpcErrorObject> {
+        let params = params.ok_or(RpcErrorObject::invalid_params("Missing params".to_string()))?;
+        let block = params
+            .first()
+            .ok_or_else(|| RpcErrorObject::invalid_params("Missing block".to_string()))?
+            .as_object()
+            .ok_or_else(|| RpcErrorObject::invalid_params("block must be object".to_string()))?;
+
+        let hash = parse_hash_field(block, "hash")?;
+        let parent_hash = parse_hash_field(block, "parent_hash")?;
+        let number = parse_u64_hex_field(block, "number")?;
+        let timestamp = block
+            .get("timestamp")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| RpcErrorObject::invalid_params("timestamp missing or invalid".to_string()))?;
+        let difficulty_u64 = parse_u64_hex_field(block, "difficulty")?;
+        let nonce = block
+            .get("nonce")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| RpcErrorObject::invalid_params("nonce missing or invalid".to_string()))?;
+        let coinbase = block
+            .get("coinbase")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcErrorObject::invalid_params("coinbase missing or invalid".to_string()))?;
+        let coinbase = parse_address(coinbase)?;
+        let mix_hash = parse_hash_field(block, "mix_hash")?;
+        let extra_data = parse_bytes_hex_opt(block.get("extra_data"))?.unwrap_or_default();
+
+        let mut latest = self.latest_block.write();
+        if let Some(current) = latest.as_ref() {
+            let current_num = current.header.number.as_u64();
+            if number <= current_num {
+                return Ok(serde_json::json!({
+                    "imported": false,
+                    "reason": "stale_or_duplicate"
+                }));
+            }
+            if number != current_num.saturating_add(1) || parent_hash != current.header.hash {
+                return Ok(serde_json::json!({
+                    "imported": false,
+                    "reason": "parent_mismatch"
+                }));
+            }
+        }
+
+        let header = BlockHeader {
+            version: 1,
+            parent_hash,
+            uncle_hashes: Vec::new(),
+            coinbase,
+            state_root: Hash::zero(),
+            transactions_root: Hash::zero(),
+            receipts_root: Hash::zero(),
+            number: U256::from(number),
+            gas_limit: 30_000_000,
+            gas_used: 0,
+            timestamp,
+            difficulty: U256::from(difficulty_u64),
+            nonce,
+            extra_data,
+            mix_hash,
+            base_fee_per_gas: U256::from(1_000_000_000u64),
+            hash,
+        };
+        *latest = Some(Block {
+            header: header.clone(),
+            transactions: Vec::new(),
+            uncles: Vec::new(),
+        });
+
+        Ok(serde_json::json!({
+            "imported": true,
+            "height": number,
+            "hash": format!("0x{}", hex::encode(header.hash.as_bytes())),
+        }))
+    }
 }
 
 fn current_unix_secs() -> u64 {
@@ -1592,6 +1696,19 @@ fn parse_hash_field(
     parse_hash(s)
 }
 
+fn parse_u64_hex_field(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Result<u64, RpcErrorObject> {
+    let raw = obj
+        .get(key)
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| RpcErrorObject::invalid_params(format!("{key} must be hex string")))?;
+    let s = raw.strip_prefix("0x").unwrap_or(raw);
+    u64::from_str_radix(s, 16)
+        .map_err(|e| RpcErrorObject::invalid_params(format!("invalid {key} hex: {e}")))
+}
+
 fn parse_u32_field(
     obj: &serde_json::Map<String, serde_json::Value>,
     key: &str,
@@ -1814,6 +1931,45 @@ mod tests {
             submit.get("reason").and_then(|v| v.as_str()),
             Some("low_difficulty_share")
         );
+    }
+
+    #[test]
+    fn test_zero_import_block_updates_latest_block() {
+        let api = build_test_api_with_persistent_compute();
+
+        let first = api.zero_get_work(None).expect("get work");
+        let work_id = first["work_id"].as_str().unwrap().to_string();
+        let prev_hash = first["prev_hash"].as_str().unwrap().to_string();
+        let height = first["height"].as_u64().unwrap();
+
+        {
+            let mut jobs = api.mining_jobs.write();
+            if let Some(job) = jobs.get_mut(&work_id) {
+                job.target_leading_zero_bytes = 0;
+            }
+        }
+
+        let prev_hash_bytes = hex::decode(prev_hash.strip_prefix("0x").unwrap_or(&prev_hash)).unwrap();
+        let nonce = 7u64;
+        let mut data = Vec::new();
+        data.extend_from_slice(&prev_hash_bytes);
+        data.extend_from_slice(&height.to_be_bytes());
+        data.extend_from_slice(&nonce.to_be_bytes());
+        let digest = zerocore::crypto::keccak256(&data);
+
+        let mined = api
+            .zero_submit_work(Some(vec![serde_json::json!({
+                "work_id": work_id,
+                "nonce": nonce,
+                "hash_hex": format!("0x{}", hex::encode(digest)),
+                "miner": "test-miner"
+            })]))
+            .expect("submit work");
+        assert_eq!(mined["accepted"].as_bool(), Some(true));
+
+        let latest = api.zero_get_latest_block(None).expect("latest block");
+        assert!(latest.get("hash").is_some());
+        assert_eq!(latest.get("number").and_then(|v| v.as_str()), Some("0x1"));
     }
 
     #[test]
