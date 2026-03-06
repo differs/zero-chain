@@ -25,6 +25,7 @@ use tower_http::cors::{CorsLayer, Any};
 /// RPC configuration
 #[derive(Clone, Debug)]
 #[derive(Serialize, Deserialize)]
+#[serde(default)]
 pub struct RpcConfig {
     /// Listen address
     pub address: String,
@@ -40,6 +41,12 @@ pub struct RpcConfig {
     pub compute_backend: ComputeBackend,
     /// Database path for file-based backends (rocksdb/redb)
     pub compute_db_path: String,
+    /// EVM chain id returned by eth_chainId.
+    pub chain_id: u64,
+    /// Network id returned by net_version.
+    pub network_id: u64,
+    /// Coinbase returned by eth_coinbase.
+    pub coinbase: String,
 }
 
 /// Persistent backend for compute storage.
@@ -82,6 +89,9 @@ impl Default for RpcConfig {
             modules: vec!["eth".into(), "net".into(), "web3".into()],
             compute_backend: ComputeBackend::Mem,
             compute_db_path: "./data/compute-db".to_string(),
+            chain_id: 10086,
+            network_id: 10086,
+            coinbase: "0x0000000000000000000000000000000000000000".to_string(),
         }
     }
 }
@@ -89,6 +99,15 @@ impl Default for RpcConfig {
 impl RpcConfig {
     /// Validates RPC configuration consistency.
     pub fn validate(&self) -> std::result::Result<(), String> {
+        if self.chain_id == 0 {
+            return Err("chain_id must be non-zero".to_string());
+        }
+        if self.network_id == 0 {
+            return Err("network_id must be non-zero".to_string());
+        }
+        if Address::from_hex(&self.coinbase).is_err() {
+            return Err("coinbase must be a valid 20-byte hex address".to_string());
+        }
         match self.compute_backend {
             ComputeBackend::Mem => Ok(()),
             ComputeBackend::RocksDb | ComputeBackend::Redb => {
@@ -356,7 +375,7 @@ impl RpcApi {
     // ============ net_* methods ============
     
     fn net_version(&self, _params: Option<Vec<serde_json::Value>>) -> Result<serde_json::Value, RpcErrorObject> {
-        Ok(serde_json::json!("10086"))
+        Ok(serde_json::json!(self.config.network_id.to_string()))
     }
     
     fn net_peer_count(&self, _params: Option<Vec<serde_json::Value>>) -> Result<serde_json::Value, RpcErrorObject> {
@@ -434,7 +453,7 @@ impl RpcApi {
     }
     
     fn eth_chain_id(&self, _params: Option<Vec<serde_json::Value>>) -> Result<serde_json::Value, RpcErrorObject> {
-        Ok(serde_json::json!("0x276e"))  // 10086
+        Ok(serde_json::json!(format!("0x{:x}", self.config.chain_id)))
     }
     
     fn eth_syncing(&self, _params: Option<Vec<serde_json::Value>>) -> Result<serde_json::Value, RpcErrorObject> {
@@ -442,7 +461,7 @@ impl RpcApi {
     }
     
     fn eth_coinbase(&self, _params: Option<Vec<serde_json::Value>>) -> Result<serde_json::Value, RpcErrorObject> {
-        Ok(serde_json::json!("0x0000000000000000000000000000000000000000"))
+        Ok(serde_json::json!(self.config.coinbase.clone()))
     }
     
     fn eth_mining(&self, _params: Option<Vec<serde_json::Value>>) -> Result<serde_json::Value, RpcErrorObject> {

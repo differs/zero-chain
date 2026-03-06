@@ -31,6 +31,10 @@ struct Cli {
     #[arg(short, long, default_value = "10086")]
     network_id: u64,
 
+    /// Network profile (mainnet|testnet|devnet|local)
+    #[arg(long, default_value = "local")]
+    network: String,
+
     /// Optional node config file (JSON)
     #[arg(long)]
     config: Option<String>,
@@ -66,6 +70,18 @@ enum Commands {
         /// Compute database path for rocksdb/redb
         #[arg(long, default_value = "./data/compute-db")]
         compute_db_path: String,
+
+        /// Optional chain id override (hex or decimal)
+        #[arg(long)]
+        chain_id: Option<String>,
+
+        /// Optional network id override (decimal)
+        #[arg(long)]
+        rpc_network_id: Option<u64>,
+
+        /// Optional coinbase override
+        #[arg(long)]
+        rpc_coinbase: Option<String>,
     },
     
     /// Initialize data directory
@@ -203,23 +219,52 @@ async fn main() -> Result<()> {
         .init();
     
     match cli.command {
-        Some(Commands::Run { mine, coinbase, http_port, ws_port, compute_backend, compute_db_path }) => {
+        Some(Commands::Run {
+            mine,
+            coinbase,
+            http_port,
+            ws_port,
+            compute_backend,
+            compute_db_path,
+            chain_id,
+            rpc_network_id,
+            rpc_coinbase,
+        }) => {
             let mut api_config = if let Some(path) = &cli.config {
                 commands::init::load_api_config(path)?
             } else {
                 ApiConfig::default()
             };
 
+            let profile = NetworkProfile::parse(&cli.network)?;
+            profile.apply_defaults(&mut api_config, &cli.data_dir);
+
             // CLI flags override config file.
             let backend = parse_compute_backend(&compute_backend)?;
+            let chain_id = match chain_id {
+                Some(value) => parse_u64_decimal_or_hex(&value)?,
+                None => api_config.http_rpc.chain_id,
+            };
+            let rpc_network_id = rpc_network_id.unwrap_or(api_config.http_rpc.network_id);
+            let rpc_coinbase = rpc_coinbase.unwrap_or(api_config.http_rpc.coinbase.clone());
+
             api_config.http_rpc = RpcConfig {
                 address: "127.0.0.1".to_string(),
                 port: http_port,
                 compute_backend: backend,
                 compute_db_path,
+                chain_id,
+                network_id: rpc_network_id,
+                coinbase: rpc_coinbase,
                 ..api_config.http_rpc
             };
             api_config.ws.port = ws_port;
+
+            println!("🌐 Network profile: {}", profile.as_str());
+            println!("   chain_id: {}", api_config.http_rpc.chain_id);
+            println!("   network_id: {}", api_config.http_rpc.network_id);
+            println!("   coinbase: {}", api_config.http_rpc.coinbase);
+            println!("   rpc: {}:{}", api_config.http_rpc.address, api_config.http_rpc.port);
 
             commands::run::run_node(mine, coinbase, http_port, ws_port, &cli.data_dir, Some(api_config.http_rpc.clone())).await?;
         }
@@ -295,5 +340,86 @@ fn parse_compute_backend(value: &str) -> Result<ComputeBackend> {
         "rocksdb" => Ok(ComputeBackend::RocksDb),
         "redb" => Ok(ComputeBackend::Redb),
         other => anyhow::bail!("unsupported compute backend: {other}"),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NetworkProfile {
+    Mainnet,
+    Testnet,
+    Devnet,
+    Local,
+}
+
+impl NetworkProfile {
+    fn parse(value: &str) -> Result<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "mainnet" => Ok(Self::Mainnet),
+            "testnet" => Ok(Self::Testnet),
+            "devnet" => Ok(Self::Devnet),
+            "local" => Ok(Self::Local),
+            other => anyhow::bail!("unsupported network profile: {other}"),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Mainnet => "mainnet",
+            Self::Testnet => "testnet",
+            Self::Devnet => "devnet",
+            Self::Local => "local",
+        }
+    }
+
+    fn apply_defaults(self, cfg: &mut ApiConfig, data_dir: &str) {
+        match self {
+            Self::Mainnet => {
+                cfg.http_rpc.port = 8545;
+                cfg.ws.port = 8546;
+                cfg.http_rpc.chain_id = 10086;
+                cfg.http_rpc.network_id = 10086;
+                if cfg.http_rpc.compute_db_path == "./data/compute-db" {
+                    cfg.http_rpc.compute_db_path = format!("{}/mainnet/compute-db", data_dir);
+                }
+            }
+            Self::Testnet => {
+                cfg.http_rpc.port = 18545;
+                cfg.ws.port = 18546;
+                cfg.http_rpc.chain_id = 10087;
+                cfg.http_rpc.network_id = 10087;
+                if cfg.http_rpc.compute_db_path == "./data/compute-db" {
+                    cfg.http_rpc.compute_db_path = format!("{}/testnet/compute-db", data_dir);
+                }
+            }
+            Self::Devnet => {
+                cfg.http_rpc.port = 28545;
+                cfg.ws.port = 28546;
+                cfg.http_rpc.chain_id = 10088;
+                cfg.http_rpc.network_id = 10088;
+                if cfg.http_rpc.compute_db_path == "./data/compute-db" {
+                    cfg.http_rpc.compute_db_path = format!("{}/devnet/compute-db", data_dir);
+                }
+            }
+            Self::Local => {
+                cfg.http_rpc.port = 8545;
+                cfg.ws.port = 8546;
+                cfg.http_rpc.chain_id = 31337;
+                cfg.http_rpc.network_id = 31337;
+                if cfg.http_rpc.compute_db_path == "./data/compute-db" {
+                    cfg.http_rpc.compute_db_path = format!("{}/local/compute-db", data_dir);
+                }
+            }
+        }
+    }
+}
+
+fn parse_u64_decimal_or_hex(value: &str) -> Result<u64> {
+    let v = value.trim();
+    if let Some(hex) = v.strip_prefix("0x") {
+        u64::from_str_radix(hex, 16)
+            .map_err(|e| anyhow::anyhow!("invalid hex integer '{value}': {e}"))
+    } else {
+        v.parse::<u64>()
+            .map_err(|e| anyhow::anyhow!("invalid integer '{value}': {e}"))
     }
 }

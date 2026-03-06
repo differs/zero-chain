@@ -17,6 +17,33 @@
 - `compute_backend = ComputeBackend::Mem`
 - `compute_db_path = "./data/compute-db"`
 
+### CLI 多网络运行（mainnet/testnet/devnet/local）
+
+`zerocchain run` 已支持按网络 profile 启动：
+
+- `--network mainnet`
+- `--network testnet`
+- `--network devnet`
+- `--network local`（默认）
+
+每个 profile 会设置默认的 `chain_id/network_id/ports`，并将 compute DB 路径按网络隔离。
+
+可通过参数覆盖：
+
+- `--chain-id <hex|dec>` 覆盖 `eth_chainId`
+- `--rpc-network-id <dec>` 覆盖 `net_version`
+- `--rpc-coinbase <0x...>` 覆盖 `eth_coinbase`
+
+示例：
+
+```bash
+# 启动 testnet
+zerocchain --network testnet run --compute-backend rocksdb --compute-db-path ~/.zerocchain/testnet/compute-db
+
+# 启动 mainnet（显式链参数）
+zerocchain --network mainnet run --chain-id 0x276e --rpc-network-id 10086
+```
+
 校验规则：
 
 - 当 `compute_backend` 为 `RocksDb` 或 `Redb` 时，`compute_db_path` 不能为空。
