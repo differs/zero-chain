@@ -1,17 +1,18 @@
 //! EVM 合约执行基准测试
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use zerocore::crypto::{Address, PrivateKey, Hash};
+use zerocore::crypto::{Address, PrivateKey, Hash, PublicKey};
 use zerocore::account::{U256, Account};
 use zerocore::evm::{EvmEngine, EvmConfig};
 use zerocore::state::StateDb;
 use zerocore::transaction::UnsignedTransaction;
 use std::time::Duration;
 
-/// 创建测试环境
+/// 创建测试账户
 fn setup_test_account(state_db: &mut StateDb) -> (PrivateKey, Address) {
     let private_key = PrivateKey::random();
-    let address = private_key.public_key().address();
+    let public_key = private_key.public_key();
+    let address = Address::from_public_key(&public_key);
     
     let account = Account {
         address,
@@ -19,7 +20,7 @@ fn setup_test_account(state_db: &mut StateDb) -> (PrivateKey, Address) {
         nonce: 0,
         ..Default::default()
     };
-    state_db.insert_account(address, account).unwrap();
+    state_db.insert_account(address, account);
     
     (private_key, address)
 }

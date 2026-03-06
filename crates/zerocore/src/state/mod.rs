@@ -192,3 +192,44 @@ mod tests {
         assert_eq!(state.get_nonce(&address), 0);
     }
 }
+
+// ========================================
+// 实现 EVM StateDb trait
+// ========================================
+impl crate::evm::StateDb for StateDb {
+    fn get_account(&self, address: &crate::crypto::Address) -> Option<crate::account::Account> {
+        self.get_account(address)
+    }
+
+    fn get_balance(&self, address: &crate::crypto::Address) -> crate::account::U256 {
+        self.get_balance(address)
+    }
+
+    fn get_nonce(&self, address: &crate::crypto::Address) -> u64 {
+        self.get_nonce(address)
+    }
+
+    fn get_code(&self, address: &crate::crypto::Address) -> Option<Vec<u8>> {
+        self.get_code(address)
+    }
+
+    fn get_storage(&self, address: &crate::crypto::Address, key: &crate::crypto::Hash) -> crate::crypto::Hash {
+        self.get_storage(address, key)
+    }
+
+    fn set_balance(&mut self, address: crate::crypto::Address, balance: crate::account::U256) {
+        self.set_balance(address, balance);
+    }
+
+    fn set_nonce(&mut self, address: crate::crypto::Address, nonce: u64) {
+        self.set_nonce(address, nonce);
+    }
+
+    fn set_code(&mut self, address: crate::crypto::Address, code: Vec<u8>) {
+        self.set_code(address, code);
+    }
+
+    fn set_storage(&mut self, address: crate::crypto::Address, key: crate::crypto::Hash, value: crate::crypto::Hash) {
+        self.set_storage(address, key, value);
+    }
+}
