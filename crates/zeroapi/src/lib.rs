@@ -41,6 +41,7 @@ pub type Result<T> = std::result::Result<T, ApiError>;
 
 /// API configuration
 #[derive(Clone, Debug)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ApiConfig {
     /// HTTP RPC config
     pub http_rpc: RpcConfig,
@@ -81,10 +82,13 @@ pub struct ApiService {
 }
 
 impl ApiService {
-    /// Create new API service
-    pub fn new(config: ApiConfig) -> Self {
+    /// Create new API service.
+    ///
+    /// Returns an error when configuration is invalid.
+    pub fn try_new(config: ApiConfig) -> Result<Self> {
         let rpc_server = if config.enable_http_rpc {
-            Some(RpcServer::new(config.http_rpc.clone()))
+            Some(RpcServer::try_new(config.http_rpc.clone())
+                .map_err(|e| ApiError::Rpc(e.to_string()))?)
         } else {
             None
         };
@@ -101,11 +105,22 @@ impl ApiService {
             None
         };
         
-        Self {
+        Ok(Self {
             config,
             rpc_server,
             ws_server,
             rest_server,
+        })
+    }
+
+    /// Create new API service with fallback behavior.
+    pub fn new(config: ApiConfig) -> Self {
+        match Self::try_new(config.clone()) {
+            Ok(svc) => svc,
+            Err(err) => {
+                tracing::warn!("invalid API config, fallback to default: {}", err);
+                Self::try_new(ApiConfig::default()).expect("default ApiConfig must be valid")
+            }
         }
     }
     

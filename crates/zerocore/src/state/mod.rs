@@ -194,73 +194,32 @@ mod tests {
 }
 
 // ========================================
-// 实现 EVM StateDb trait
-// ========================================
-impl crate::evm::StateDb for StateDb {
-    fn get_account(&self, address: &crate::crypto::Address) -> Option<crate::account::Account> {
-        self.get_account(address)
-    }
-
-    fn get_balance(&self, address: &crate::crypto::Address) -> crate::account::U256 {
-        self.get_balance(address)
-    }
-
-    fn get_nonce(&self, address: &crate::crypto::Address) -> u64 {
-        self.get_nonce(address)
-    }
-
-    fn get_code(&self, address: &crate::crypto::Address) -> Option<Vec<u8>> {
-        self.get_code(address)
-    }
-
-    fn get_storage(&self, address: &crate::crypto::Address, key: &crate::crypto::Hash) -> crate::crypto::Hash {
-        self.get_storage(address, key)
-    }
-
-    fn set_balance(&mut self, address: crate::crypto::Address, balance: crate::account::U256) {
-        self.set_balance(address, balance);
-    }
-
-    fn set_nonce(&mut self, address: crate::crypto::Address, nonce: u64) {
-        self.set_nonce(address, nonce);
-    }
-
-    fn set_code(&mut self, address: crate::crypto::Address, code: Vec<u8>) {
-        self.set_code(address, code);
-    }
-
-    fn set_storage(&mut self, address: crate::crypto::Address, key: crate::crypto::Hash, value: crate::crypto::Hash) {
-        self.set_storage(address, key, value);
-    }
-}
-
-// ========================================
 // EVM StateDb Trait 实现文档
 // ========================================
 /// ## EVM StateDb Trait 实现
-/// 
+///
 /// 本模块实现了 `evm::StateDb` trait，使得 `StateDb` 可以被 EVM 使用。
-/// 
+///
 /// ### 功能
-/// 
+///
 /// - 账户余额查询和更新
 /// - Nonce 管理
 /// - 合约代码存储
 /// - 合约状态存储
-/// 
+///
 /// ### 使用示例
-/// 
+///
 /// ```rust,ignore
 /// use zerocore::state::StateDb;
 /// use zerocore::evm::StateDb as EvmStateDb;
-/// 
+///
 /// let mut state = StateDb::new(Hash::zero());
 /// // 现在可以作为 EVM 的状态数据库使用
 /// evm.execute(&tx, &mut state);
 /// ```
-/// 
+///
 /// ### 性能特征
-/// 
+///
 /// - 所有操作都是 O(1) 或 O(log n)
 /// - 使用 RwLock 实现并发读取
 /// - 支持批量操作
@@ -286,7 +245,11 @@ impl crate::evm::StateDb for StateDb {
     }
 
     /// 获取合约存储
-    fn get_storage(&self, address: &crate::crypto::Address, key: &crate::crypto::Hash) -> crate::crypto::Hash {
+    fn get_storage(
+        &self,
+        address: &crate::crypto::Address,
+        key: &crate::crypto::Hash,
+    ) -> crate::crypto::Hash {
         self.get_storage(address, key)
     }
 
@@ -306,7 +269,12 @@ impl crate::evm::StateDb for StateDb {
     }
 
     /// 设置合约存储
-    fn set_storage(&mut self, address: crate::crypto::Address, key: crate::crypto::Hash, value: crate::crypto::Hash) {
+    fn set_storage(
+        &mut self,
+        address: crate::crypto::Address,
+        key: crate::crypto::Hash,
+        value: crate::crypto::Hash,
+    ) {
         self.set_storage(address, key, value);
     }
 }

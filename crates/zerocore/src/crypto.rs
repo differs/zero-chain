@@ -6,8 +6,12 @@
 //! - Digital signatures (ECDSA)
 //! - Address derivation
 
-use k256::ecdsa::{signature::Signer, Signature as K256Signature, SigningKey, VerifyingKey};
+use k256::ecdsa::{SigningKey, VerifyingKey};
 use rand::rngs::OsRng;
+use secp256k1::{
+    ecdsa::{RecoverableSignature, RecoveryId, Signature as SecpSignature},
+    Message as SecpMessage, PublicKey as SecpPublicKey, Secp256k1, SecretKey,
+};
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Keccak256};
 use std::fmt;
@@ -298,10 +302,7 @@ impl PrivateKey {
 
     /// Create from bytes
     pub fn from_bytes(bytes: [u8; 32]) -> Result<Self, CryptoError> {
-        // Validate the key is within the valid range
-        if bytes.iter().all(|&b| b == 0) {
-            return Err(CryptoError::InvalidPrivateKey);
-        }
+        SecretKey::from_slice(&bytes).map_err(|_| CryptoError::InvalidPrivateKey)?;
         Ok(Self(bytes))
     }
 
@@ -321,23 +322,18 @@ impl PrivateKey {
     /// Sign a message
     pub fn sign(&self, message: &[u8]) -> Signature {
         let hash = keccak256(message);
+        let secp = Secp256k1::new();
+        let sk = SecretKey::from_slice(&self.0).expect("valid private key");
+        let msg = SecpMessage::from_slice(&hash).expect("hash must be 32 bytes");
+        let recoverable = secp.sign_ecdsa_recoverable(&msg, &sk);
+        let (rec_id, sig64) = recoverable.serialize_compact();
 
-        let signing_key = SigningKey::from_bytes(&self.0.into()).expect("Valid private key");
-
-        // Sign with recovery ID
-        let signature: K256Signature = signing_key.try_sign(&hash).expect("Valid signature");
-
-        let signature_bytes = signature.to_bytes();
-
-        // Extract r, s from signature
         let mut r = [0u8; 32];
         let mut s = [0u8; 32];
-        r.copy_from_slice(&signature_bytes[0..32]);
-        s.copy_from_slice(&signature_bytes[32..64]);
+        r.copy_from_slice(&sig64[0..32]);
+        s.copy_from_slice(&sig64[32..64]);
 
-        // Recovery id - use deterministic value for now
-        // In production, this should be computed from the signature
-        let v = 27u8;
+        let v = 27u8 + (rec_id.to_i32() as u8);
 
         Signature::new(r, s, v)
     }
@@ -415,57 +411,49 @@ impl Signature {
 
     /// Verify a signature
     pub fn verify(&self, message: &[u8], public_key: &PublicKey) -> Result<bool, CryptoError> {
-        use k256::ecdsa::signature::Verifier;
+        let hash = keccak256(message);
+        let secp = Secp256k1::verification_only();
 
-        let verifying_key = VerifyingKey::from_encoded_point(
-            &k256::EncodedPoint::from_bytes(&public_key.0)
-                .map_err(|_| CryptoError::InvalidPublicKey)?,
-        )
-        .map_err(|_| CryptoError::InvalidPublicKey)?;
+        let pubkey =
+            SecpPublicKey::from_slice(&public_key.0).map_err(|_| CryptoError::InvalidPublicKey)?;
 
-        // Reconstruct signature bytes
-        let mut sig_bytes = [0u8; 64];
-        sig_bytes[0..32].copy_from_slice(&self.r);
-        sig_bytes[32..64].copy_from_slice(&self.s);
-
+        let mut sig64 = [0u8; 64];
+        sig64[0..32].copy_from_slice(&self.r);
+        sig64[32..64].copy_from_slice(&self.s);
         let signature =
-            K256Signature::from_slice(&sig_bytes).map_err(|_| CryptoError::InvalidSignature)?;
+            SecpSignature::from_compact(&sig64).map_err(|_| CryptoError::InvalidSignature)?;
 
-        // Verify the message (not prehash)
-        verifying_key
-            .verify(message, &signature)
+        let msg = SecpMessage::from_slice(&hash).expect("hash must be 32 bytes");
+        secp.verify_ecdsa(&msg, &signature, &pubkey)
             .map(|_| true)
             .map_err(|_| CryptoError::VerificationFailed)
     }
 
     /// Recover the public key from signature and message
     pub fn recover(&self, message: &[u8]) -> Result<PublicKey, CryptoError> {
-        use k256::ecdsa::{Signature, VerifyingKey};
-        use k256::elliptic_curve::PublicKey as _;
-
         let hash = keccak256(message);
+        let secp = Secp256k1::verification_only();
+        let msg = SecpMessage::from_slice(&hash).expect("hash must be 32 bytes");
 
-        // Create signature from r, s values
-        let mut sig_bytes = [0u8; 64];
-        sig_bytes[0..32].copy_from_slice(&self.r);
-        sig_bytes[32..64].copy_from_slice(&self.s);
+        let mut sig64 = [0u8; 64];
+        sig64[0..32].copy_from_slice(&self.r);
+        sig64[32..64].copy_from_slice(&self.s);
 
-        let signature =
-            Signature::from_slice(&sig_bytes).map_err(|_| CryptoError::InvalidSignature)?;
+        let candidates = [self.v, self.v.saturating_sub(27)];
 
-        // Try both recovery IDs (0 and 1) since we don't have the correct one
-        for recovery_byte in 0..=1u8 {
-            let recovery_id = k256::ecdsa::RecoveryId::new(recovery_byte != 0, false);
-
-            if let Ok(verifying_key) =
-                VerifyingKey::recover_from_prehash(&hash, &signature, recovery_id)
-            {
-                let encoded = verifying_key.to_encoded_point(false);
-                return PublicKey::from_bytes(encoded.as_bytes().try_into().unwrap());
+        for v in candidates {
+            if let Ok(rec_id) = RecoveryId::from_i32(i32::from(v)) {
+                if let Ok(rec_sig) = RecoverableSignature::from_compact(&sig64, rec_id) {
+                    if let Ok(pubkey) = secp.recover_ecdsa(&msg, &rec_sig) {
+                        let bytes = pubkey.serialize_uncompressed();
+                        return PublicKey::from_bytes(bytes)
+                            .map_err(|_| CryptoError::InvalidPublicKey);
+                    }
+                }
             }
         }
 
-        Err(CryptoError::VerificationFailed)
+        Err(CryptoError::InvalidSignature)
     }
 
     /// Convert to hex string

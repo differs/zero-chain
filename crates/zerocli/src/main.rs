@@ -3,6 +3,8 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use zeroapi::rpc::{ComputeBackend, RpcConfig};
+use zeroapi::ApiConfig;
 
 
 mod commands;
@@ -25,6 +27,10 @@ struct Cli {
     /// Network ID
     #[arg(short, long, default_value = "10086")]
     network_id: u64,
+
+    /// Optional node config file (JSON)
+    #[arg(long)]
+    config: Option<String>,
     
     #[command(subcommand)]
     command: Option<Commands>,
@@ -49,6 +55,14 @@ enum Commands {
         /// WebSocket RPC port
         #[arg(long, default_value = "8546")]
         ws_port: u16,
+
+        /// Compute persistent backend (mem|rocksdb|redb)
+        #[arg(long, default_value = "mem")]
+        compute_backend: String,
+
+        /// Compute database path for rocksdb/redb
+        #[arg(long, default_value = "./data/compute-db")]
+        compute_db_path: String,
     },
     
     /// Initialize data directory
@@ -139,11 +153,31 @@ async fn main() -> Result<()> {
         .init();
     
     match cli.command {
-        Some(Commands::Run { mine, coinbase, http_port, ws_port }) => {
-            commands::run::run_node(mine, coinbase, http_port, ws_port, &cli.data_dir).await?;
+        Some(Commands::Run { mine, coinbase, http_port, ws_port, compute_backend, compute_db_path }) => {
+            let mut api_config = if let Some(path) = &cli.config {
+                commands::init::load_api_config(path)?
+            } else {
+                ApiConfig::default()
+            };
+
+            // CLI flags override config file.
+            let backend = parse_compute_backend(&compute_backend)?;
+            api_config.http_rpc = RpcConfig {
+                address: "127.0.0.1".to_string(),
+                port: http_port,
+                compute_backend: backend,
+                compute_db_path,
+                ..api_config.http_rpc
+            };
+            api_config.ws.port = ws_port;
+
+            commands::run::run_node(mine, coinbase, http_port, ws_port, &cli.data_dir, Some(api_config.http_rpc.clone())).await?;
         }
         Some(Commands::Init) => {
             commands::init::init_data_dir(&cli.data_dir)?;
+            let cfg_path = format!("{}/api-config.json", &cli.data_dir);
+            commands::init::write_default_api_config(&cfg_path)?;
+            println!("Default API config written to {}", cfg_path);
         }
         Some(Commands::Account { action }) => {
             commands::account::handle_account(format!("{:?}", action)).await?;
@@ -168,4 +202,13 @@ async fn main() -> Result<()> {
     }
     
     Ok(())
+}
+
+fn parse_compute_backend(value: &str) -> Result<ComputeBackend> {
+    match value.to_ascii_lowercase().as_str() {
+        "mem" => Ok(ComputeBackend::Mem),
+        "rocksdb" => Ok(ComputeBackend::RocksDb),
+        "redb" => Ok(ComputeBackend::Redb),
+        other => anyhow::bail!("unsupported compute backend: {other}"),
+    }
 }

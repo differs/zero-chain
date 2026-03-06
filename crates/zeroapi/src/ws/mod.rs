@@ -35,6 +35,7 @@ pub type Result<T> = std::result::Result<T, WsError>;
 
 /// WebSocket configuration
 #[derive(Clone, Debug)]
+#[derive(Serialize, Deserialize)]
 pub struct WsConfig {
     /// Listen address
     pub address: String,

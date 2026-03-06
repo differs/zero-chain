@@ -5,6 +5,8 @@ use zerocore::crypto::Hash;
 use zerocore::consensus::PowConsensus;
 use zerocore::block::create_genesis_block;
 use zerocore::account::U256;
+use zeroapi::{ApiConfig, ApiService};
+use zeroapi::rpc::RpcConfig;
 
 pub async fn run_node(
     mine: bool,
@@ -12,6 +14,7 @@ pub async fn run_node(
     http_port: u16,
     ws_port: u16,
     data_dir: &str,
+    rpc_config: Option<RpcConfig>,
 ) -> Result<()> {
     println!("🚀 Starting ZeroChain node...");
     println!("   Data directory: {}", data_dir);
@@ -82,6 +85,21 @@ pub async fn run_node(
     
     println!("✅ Node started successfully!");
     println!("   Press Ctrl+C to stop");
+
+    if let Some(mut cfg) = rpc_config {
+        cfg.port = http_port;
+        let mut api_cfg = ApiConfig::default();
+        api_cfg.http_rpc = cfg;
+        api_cfg.ws.port = ws_port;
+        api_cfg.rest.port = http_port.saturating_add(10);
+
+        let api = ApiService::try_new(api_cfg)
+            .map_err(|e| anyhow::anyhow!("failed to create API service: {e}"))?;
+        api.start()
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to start API service: {e}"))?;
+        println!("   HTTP RPC service started on port {}", http_port);
+    }
     
     // Keep running
     loop {

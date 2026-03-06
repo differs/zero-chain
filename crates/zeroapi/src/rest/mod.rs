@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 /// REST server configuration
 #[derive(Clone, Debug)]
+#[derive(Serialize, Deserialize)]
 pub struct RestConfig {
     pub address: String,
     pub port: u16,

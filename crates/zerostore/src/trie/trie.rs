@@ -556,26 +556,14 @@ mod tests {
         let trie = MerklePatriciaTrie::new(db);
 
         // Insert multiple keys
-        trie.insert(b"key1", b"value1".to_vec())
-            .unwrap();
-        trie.insert(b"key2", b"value2".to_vec())
-            .unwrap();
-        trie.insert(b"key3", b"value3".to_vec())
-            .unwrap();
+        trie.insert(b"key1", b"value1".to_vec()).unwrap();
+        trie.insert(b"key2", b"value2".to_vec()).unwrap();
+        trie.insert(b"key3", b"value3".to_vec()).unwrap();
 
         // Verify all values
-        assert_eq!(
-            trie.get(b"key1").unwrap(),
-            Some(b"value1".to_vec())
-        );
-        assert_eq!(
-            trie.get(b"key2").unwrap(),
-            Some(b"value2".to_vec())
-        );
-        assert_eq!(
-            trie.get(b"key3").unwrap(),
-            Some(b"value3".to_vec())
-        );
+        assert_eq!(trie.get(b"key1").unwrap(), Some(b"value1".to_vec()));
+        assert_eq!(trie.get(b"key2").unwrap(), Some(b"value2".to_vec()));
+        assert_eq!(trie.get(b"key3").unwrap(), Some(b"value3".to_vec()));
     }
 
     #[test]
@@ -584,18 +572,13 @@ mod tests {
         let trie = MerklePatriciaTrie::new(db);
 
         // Insert
-        trie.insert(b"key", b"value1".to_vec())
-            .unwrap();
+        trie.insert(b"key", b"value1".to_vec()).unwrap();
 
         // Update
-        trie.insert(b"key", b"value2".to_vec())
-            .unwrap();
+        trie.insert(b"key", b"value2".to_vec()).unwrap();
 
         // Verify updated value
-        assert_eq!(
-            trie.get(b"key").unwrap(),
-            Some(b"value2".to_vec())
-        );
+        assert_eq!(trie.get(b"key").unwrap(), Some(b"value2".to_vec()));
     }
 
     #[test]

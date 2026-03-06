@@ -8,10 +8,12 @@
 #![warn(missing_docs)]
 #![warn(rustdoc::missing_crate_level_docs)]
 
+pub mod compute;
 pub mod db;
 pub mod index;
 pub mod trie;
 
+pub use compute::ComputeStore;
 pub use db::{KeyValueDB, RedbDatabase, RocksDb};
 pub use index::{BlockIndex, IndexDB, TxIndex};
 pub use trie::{MerklePatriciaTrie, TrieDB, TrieNode, TrieProof};

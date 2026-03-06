@@ -15,6 +15,7 @@
 
 pub mod account;
 pub mod block;
+pub mod compute;
 pub mod consensus;
 pub mod crypto;
 pub mod evm;
@@ -24,6 +25,7 @@ pub mod transaction;
 // Re-export commonly used types
 pub use account::{Account, AccountType, AccountManager};
 pub use block::{Block, BlockHeader};
+pub use compute::{ComputeTx, ObjectId, ObjectOutput, OutputId, TxId};
 pub use consensus::{Consensus, PowAlgorithm};
 pub use crypto::{Address, Hash, PublicKey, PrivateKey, Signature};
 pub use evm::EvmEngine;
