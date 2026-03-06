@@ -1,56 +1,57 @@
-//! EVM 合约部署和执行基准测试
-//! 
-//! 测试真实的智能合约部署和调用
+//! EVM 合约执行基准测试
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use zerocore::crypto::{Address, PrivateKey, Hash};
-use zerocore::account::{U256, Account, InMemoryAccountManager};
+use zerocore::account::{U256, Account};
 use zerocore::evm::{EvmEngine, EvmConfig, StateDb};
-use zerocore::transaction::{UnsignedTransaction, SignedTransaction};
-use std::sync::Arc;
+use zerocore::transaction::UnsignedTransaction;
 use std::time::Duration;
 
-/// ERC20 合约字节码 (简化版)
-const ERC20_BYTECODE: &[u8] = include_bytes!("../../test_contracts/erc20_bytecode.bin");
-
 /// 创建测试环境
-fn setup_evm_environment() -> (EvmEngine, StateDb, Address) {
-    let evm = EvmEngine::new(EvmConfig::default());
-    let state_db = StateDb::new(Hash::zero());
+fn setup_test_account(state_db: &mut dyn StateDb) -> (PrivateKey, Address) {
+    let private_key = PrivateKey::random();
+    let address = private_key.public_key().address();
     
-    // 创建测试账户
-    let deployer = Address::from_bytes([1u8; 20]);
     let account = Account {
-        address: deployer,
-        balance: U256::from(1_000_000_000_000_000u64), // 足够 Gas 费
+        address,
+        balance: U256::from(1_000_000_000_000_000u64),
         nonce: 0,
         ..Default::default()
     };
-    state_db.insert_account(deployer, account).unwrap();
+    state_db.insert_account(address, account).unwrap();
     
-    (evm, state_db, deployer)
+    (private_key, address)
 }
 
-/// 基准测试：合约部署
-fn bench_contract_deployment(c: &mut Criterion) {
-    let mut group = c.benchmark_group("evm_deployment");
+/// 基准测试：简单 EVM 执行
+fn bench_evm_simple_execution(c: &mut Criterion) {
+    let mut group = c.benchmark_group("evm_simple");
     group.sample_size(10);
-    group.measurement_time(Duration::from_secs(60));
+    group.measurement_time(Duration::from_secs(30));
     
-    group.bench_function(BenchmarkId::from_parameter("erc20_deploy"), |b| {
+    group.bench_function("simple_stop", |b| {
         b.iter(|| {
-            let (evm, state_db, deployer) = setup_evm_environment();
+            let mut state_db = StateDb::new(Hash::zero());
+            let (private_key, address) = setup_test_account(&mut state_db);
             
-            // 部署合约
-            let result = evm.deploy(
-                &state_db,
-                ERC20_BYTECODE.to_vec(),
-                vec![], // 构造函数参数
-                deployer,
-                U256::from(1_000_000), // Gas limit
-                U256::from(1_000_000_000), // Gas price
-            );
+            // STOP 操作码
+            let bytecode = vec![0x00];
             
+            let tx = UnsignedTransaction::new_legacy(
+                0,
+                U256::from(1_000_000_000),
+                U256::from(100_000),
+                None,
+                U256::zero(),
+                bytecode,
+                10086,
+            ).sign(&private_key);
+            
+            let mut evm = EvmEngine::new(EvmConfig {
+                chain_id: 10086,
+            });
+            
+            let result = evm.execute(&tx, &mut state_db);
             black_box(result.is_ok());
         });
     });
@@ -58,77 +59,35 @@ fn bench_contract_deployment(c: &mut Criterion) {
     group.finish();
 }
 
-/// 基准测试：合约调用 (转账)
-fn bench_contract_call(c: &mut Criterion) {
-    let mut group = c.benchmark_group("evm_call");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(60));
-    
-    // 先部署合约
-    let (evm, state_db, deployer) = setup_evm_environment();
-    let contract_result = evm.deploy(
-        &state_db,
-        ERC20_BYTECODE.to_vec(),
-        vec![],
-        deployer,
-        U256::from(1_000_000),
-        U256::from(1_000_000_000),
-    );
-    
-    if let Ok(contract_address) = contract_result {
-        // 准备转账调用数据
-        let transfer_selector = [0xa9, 0x05, 0x9c, 0xbb]; // transfer(address,uint256)
-        let mut call_data = Vec::new();
-        call_data.extend_from_slice(&transfer_selector);
-        call_data.extend_from_slice(&[2u8; 32]); // to address
-        call_data.extend_from_slice(&U256::from(100).to_big_endian()); // amount
-        
-        group.bench_function(BenchmarkId::from_parameter("erc20_transfer"), |b| {
-            b.iter(|| {
-                let result = evm.call(
-                    &state_db,
-                    contract_address,
-                    call_data.clone(),
-                    deployer,
-                    U256::zero(), // value
-                    U256::from(100_000), // gas limit
-                    U256::from(1_000_000_000), // gas price
-                );
-                
-                black_box(result.is_ok());
-            });
-        });
-    }
-    
-    group.finish();
-}
-
-/// 基准测试：简单计算合约
-fn bench_simple_computation(c: &mut Criterion) {
-    let mut group = c.benchmark_group("evm_computation");
+/// 基准测试：EVM 算术运算
+fn bench_evm_arithmetic(c: &mut Criterion) {
+    let mut group = c.benchmark_group("evm_arithmetic");
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(30));
     
-    // 简单计算合约字节码 (加法)
-    let simple_bytecode = vec![
-        0x60, 0x01, // PUSH1 1
-        0x60, 0x02, // PUSH1 2
-        0x01,       // ADD
-        0x00,       // STOP
-    ];
-    
-    group.bench_function(BenchmarkId::from_parameter("simple_add"), |b| {
+    group.bench_function("add_numbers", |b| {
         b.iter(|| {
-            let (evm, state_db, deployer) = setup_evm_environment();
+            let mut state_db = StateDb::new(Hash::zero());
+            let (private_key, address) = setup_test_account(&mut state_db);
             
-            let result = evm.execute(
-                &state_db,
-                deployer,
-                simple_bytecode.clone(),
-                U256::from(100_000),
+            // PUSH1 1, PUSH1 2, ADD, STOP
+            let bytecode = vec![0x60, 0x01, 0x60, 0x02, 0x01, 0x00];
+            
+            let tx = UnsignedTransaction::new_legacy(
+                0,
                 U256::from(1_000_000_000),
-            );
+                U256::from(100_000),
+                None,
+                U256::zero(),
+                bytecode,
+                10086,
+            ).sign(&private_key);
             
+            let mut evm = EvmEngine::new(EvmConfig {
+                chain_id: 10086,
+            });
+            
+            let result = evm.execute(&tx, &mut state_db);
             black_box(result.is_ok());
         });
     });
@@ -139,6 +98,6 @@ fn bench_simple_computation(c: &mut Criterion) {
 criterion_group!(
     name = benches;
     config = Criterion::default().noise_threshold(0.1);
-    targets = bench_contract_deployment, bench_contract_call, bench_simple_computation
+    targets = bench_evm_simple_execution, bench_evm_arithmetic
 );
 criterion_main!(benches);
