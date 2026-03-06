@@ -66,9 +66,52 @@ pub enum Command {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TxWitness {
     /// Signatures proving authorization.
-    pub signatures: Vec<Signature>,
+    pub signatures: Vec<TxSignature>,
     /// Optional minimal signatures required for authorization.
     pub threshold: Option<u16>,
+}
+
+/// Signature scheme used by compute witness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SignatureScheme {
+    /// Ethereum-compatible secp256k1 ECDSA signature.
+    Secp256k1,
+    /// Native ed25519 signature.
+    Ed25519,
+}
+
+/// One signature entry in witness.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TxSignature {
+    /// Signature scheme.
+    pub scheme: SignatureScheme,
+    /// Raw signature bytes (65 for secp256k1, 64 for ed25519).
+    pub bytes: Vec<u8>,
+    /// Signer public key bytes when required by scheme.
+    ///
+    /// For secp256k1 this may be omitted because pubkey can be recovered from
+    /// recoverable signature. For ed25519 this must be present (32 bytes).
+    pub public_key: Option<Vec<u8>>,
+}
+
+impl TxSignature {
+    /// Builds a secp256k1 witness signature from core signature type.
+    pub fn secp256k1(signature: Signature) -> Self {
+        Self {
+            scheme: SignatureScheme::Secp256k1,
+            bytes: signature.as_bytes().to_vec(),
+            public_key: None,
+        }
+    }
+
+    /// Builds an ed25519 witness signature entry.
+    pub fn ed25519(signature: [u8; 64], public_key: [u8; 32]) -> Self {
+        Self {
+            scheme: SignatureScheme::Ed25519,
+            bytes: signature.to_vec(),
+            public_key: Some(public_key.to_vec()),
+        }
+    }
 }
 
 /// UTXO Compute transaction.
@@ -282,6 +325,10 @@ fn encode_ownership(out: &mut Vec<u8>, owner: &Ownership) {
         }
         Ownership::Shared => {
             out.push(3);
+        }
+        Ownership::NativeEd25519(pubkey) => {
+            out.push(4);
+            out.extend_from_slice(pubkey);
         }
     }
 }

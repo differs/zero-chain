@@ -43,3 +43,4 @@ jsonrpc-v2 = "0.12"
 
 [dev-dependencies]
 reqwest = { version = "0.11", features = ["json"] }
+ed25519-dalek = "2.1"

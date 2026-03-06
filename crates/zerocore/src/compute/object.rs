@@ -17,6 +17,8 @@ pub enum Ownership {
     Program(Address),
     /// Shared object with no single owner authority.
     Shared,
+    /// Native chain owner controlled by ed25519 public key.
+    NativeEd25519([u8; 32]),
 }
 
 /// Supported object categories.

@@ -23,4 +23,6 @@ pub use policy::{
     AuthorizationPolicy, DefaultAuthorizationPolicy, NoopResourcePolicy, ResourcePolicy,
 };
 pub use primitives::{DomainId, ObjectId, ObjectPointer, OutputId, ResourceId, TxId, Version};
-pub use tx::{Command, ComputeTx, ObjectReadRef, OutputProposal, TxWitness};
+pub use tx::{
+    Command, ComputeTx, ObjectReadRef, OutputProposal, SignatureScheme, TxSignature, TxWitness,
+};

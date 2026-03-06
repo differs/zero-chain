@@ -57,6 +57,10 @@ pub enum ComputeError {
     #[error("Signature does not match owner")]
     SignatureOwnerMismatch,
 
+    /// Signature scheme is not supported in current context.
+    #[error("Unsupported signature scheme")]
+    UnsupportedSignatureScheme,
+
     /// Resource accounting policy check failed.
     #[error("Resource policy violation")]
     ResourcePolicyViolation,

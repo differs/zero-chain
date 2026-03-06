@@ -1,7 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use zeroapi::rpc::{ComputeBackend, JsonRpcRequest, RpcConfig, RpcServer};
-use zerocore::compute::{Command, ComputeTx, DomainId, ObjectKind, ObjectReadRef, ObjectId, OutputId, OutputProposal, Ownership, TxId, TxWitness, Version};
+use zerocore::compute::{Command, ComputeTx, DomainId, ObjectKind, ObjectReadRef, ObjectId, OutputId, OutputProposal, Ownership, TxId, TxSignature, TxWitness, Version};
 use zerocore::crypto::{Hash, Signature};
 
 fn parse_result(resp: &zeroapi::rpc::JsonRpcResponse) -> serde_json::Value {
@@ -51,13 +51,13 @@ async fn compute_submit_result_output_smoke_redb_backend() {
         chain_id: Some(10086),
         network_id: Some(1),
         witness: TxWitness {
-            signatures: vec![Signature::new([1; 32], [2; 32], 27)],
+            signatures: vec![TxSignature::secp256k1(Signature::new([1; 32], [2; 32], 27))],
             threshold: Some(1),
         },
     };
     tx.assign_expected_tx_id();
     let tx_id_hex = format!("0x{}", tx.tx_id.0.to_hex());
-    let sig_hex = format!("0x{}", hex::encode(tx.witness.signatures[0].as_bytes()));
+    let sig_hex = format!("0x{}", hex::encode(&tx.witness.signatures[0].bytes));
 
     let submit_req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),

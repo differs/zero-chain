@@ -307,7 +307,9 @@ fn object_from_proposal(proposal: &OutputProposal) -> ObjectOutput {
 mod tests {
     use std::collections::BTreeMap;
 
-    use crate::crypto::{Address, Hash, PrivateKey, Signature};
+    use ed25519_dalek::Signer as _;
+
+    use crate::crypto::{Address, Hash, PrivateKey};
 
     use super::*;
     use crate::compute::{
@@ -315,7 +317,7 @@ mod tests {
         object::{ObjectKind, Ownership},
         policy::{DefaultAuthorizationPolicy, NoopResourcePolicy},
         primitives::{DomainId, ObjectId, OutputId, TxId, Version},
-        tx::{Command, ObjectReadRef, OutputProposal, TxWitness},
+        tx::{Command, ObjectReadRef, OutputProposal, TxSignature, TxWitness},
     };
 
     fn build_output(domain: DomainId, seed: u8) -> ObjectOutput {
@@ -370,7 +372,9 @@ mod tests {
             chain_id: None,
             network_id: None,
             witness: TxWitness {
-                signatures: vec![Signature::new([1; 32], [2; 32], 27)],
+                signatures: vec![TxSignature::secp256k1(crate::crypto::Signature::new(
+                    [1; 32], [2; 32], 27,
+                ))],
                 threshold: None,
             },
         }
@@ -439,7 +443,9 @@ mod tests {
             chain_id: None,
             network_id: None,
             witness: TxWitness {
-                signatures: vec![Signature::new([1; 32], [2; 32], 27)],
+                signatures: vec![TxSignature::secp256k1(crate::crypto::Signature::new(
+                    [1; 32], [2; 32], 27,
+                ))],
                 threshold: None,
             },
         }
@@ -488,7 +494,9 @@ mod tests {
             chain_id: None,
             network_id: None,
             witness: TxWitness {
-                signatures: vec![Signature::new([1; 32], [2; 32], 27)],
+                signatures: vec![TxSignature::secp256k1(crate::crypto::Signature::new(
+                    [1; 32], [2; 32], 27,
+                ))],
                 threshold: None,
             },
         }
@@ -540,7 +548,9 @@ mod tests {
             chain_id: None,
             network_id: None,
             witness: TxWitness {
-                signatures: vec![Signature::new([1; 32], [2; 32], 27)],
+                signatures: vec![TxSignature::secp256k1(crate::crypto::Signature::new(
+                    [1; 32], [2; 32], 27,
+                ))],
                 threshold: None,
             },
         }
@@ -616,7 +626,7 @@ mod tests {
         };
 
         let sig = owner_key.sign(&tx.signing_preimage());
-        tx.witness.signatures = vec![sig];
+        tx.witness.signatures = vec![TxSignature::secp256k1(sig)];
         tx.tx_id = TxId(Hash::from_bytes([99; 32]));
 
         let validator = BasicTxValidator {
@@ -689,7 +699,7 @@ mod tests {
         };
 
         let sig = owner_key.sign(&tx.signing_preimage());
-        tx.witness.signatures = vec![sig];
+        tx.witness.signatures = vec![TxSignature::secp256k1(sig)];
         tx.assign_expected_tx_id();
 
         let validator = BasicTxValidator {
@@ -700,6 +710,81 @@ mod tests {
         };
 
         let report = validator.validate(&tx).expect("valid transfer should pass");
+        assert_eq!(report.inputs.len(), 1);
+    }
+
+    #[test]
+    fn validate_accepts_transfer_when_native_ed25519_signature_matches() {
+        let store = InMemoryObjectStore::new();
+
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+        let verify_key = signing_key.verifying_key();
+        let owner_pub = verify_key.to_bytes();
+
+        let input = ObjectOutput {
+            output_id: OutputId(Hash::from_bytes([71; 32])),
+            object_id: ObjectId(Hash::from_bytes([72; 32])),
+            version: Version(1),
+            domain_id: DomainId(0),
+            kind: ObjectKind::Asset,
+            owner: Ownership::NativeEd25519(owner_pub),
+            predecessor: None,
+            state: vec![1],
+            logic: None,
+            resources: BTreeMap::new(),
+            spent: false,
+        };
+        store.insert_output(input.clone()).expect("insert input");
+
+        let domains = InMemoryDomainRegistry::new();
+        domains.upsert_domain(DomainConfig {
+            domain_id: DomainId(0),
+            name: "main".to_string(),
+            vm: "wasm".to_string(),
+            public: true,
+        });
+
+        let mut tx = ComputeTx {
+            tx_id: TxId(Hash::from_bytes([81; 32])),
+            domain_id: DomainId(0),
+            command: Command::Transfer,
+            input_set: vec![input.output_id],
+            read_set: vec![],
+            output_proposals: vec![OutputProposal {
+                output_id: OutputId(Hash::from_bytes([82; 32])),
+                object_id: input.object_id,
+                domain_id: DomainId(0),
+                kind: ObjectKind::Asset,
+                owner: Ownership::NativeEd25519(owner_pub),
+                predecessor: Some(input.output_id),
+                version: Version(2),
+                state: vec![2],
+                logic: None,
+            }],
+            payload: vec![7, 7, 7],
+            deadline_unix_secs: Some(1_900_000_001),
+            chain_id: Some(10086),
+            network_id: Some(1),
+            witness: TxWitness {
+                signatures: vec![],
+                threshold: Some(1),
+            },
+        };
+
+        let sig = signing_key.sign(&tx.signing_preimage()).to_bytes();
+        tx.witness.signatures = vec![TxSignature::ed25519(sig, owner_pub)];
+        tx.assign_expected_tx_id();
+
+        let validator = BasicTxValidator {
+            store: &store,
+            authorization: &DefaultAuthorizationPolicy,
+            resources: &NoopResourcePolicy,
+            domains: &domains,
+        };
+
+        let report = validator
+            .validate(&tx)
+            .expect("valid native transfer should pass");
         assert_eq!(report.inputs.len(), 1);
     }
 }

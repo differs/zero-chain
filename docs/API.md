@@ -194,7 +194,9 @@ curl -X POST http://localhost:8545 \
       "payload":"0x",
       "deadline_unix_secs":null,
       "witness":{
-        "signatures":["0x010101010101010101010101010101010101010101010101010101010101010102020202020202020202020202020202020202020202020202020202020202021b"],
+        "signatures":[
+          "0x010101010101010101010101010101010101010101010101010101010101010102020202020202020202020202020202020202020202020202020202020202021b"
+        ],
         "threshold":1
       }
     }],
@@ -245,6 +247,7 @@ curl -X POST http://localhost:8545 \
 - `3003` `invalid_signature`
 - `3004` `signature_owner_mismatch`
 - `3005` `tx_id_mismatch`
+- `3006` `unsupported_signature_scheme`
 - `4001` `state_error`
 - `5001` `resource_error`
 - `6001` `tx_error`
@@ -256,6 +259,18 @@ curl -X POST http://localhost:8545 \
 - `invalid_signature`（签名无法恢复/格式非法）
 - `signature_owner_mismatch`（签名恢复地址与 owner 不匹配）
 - `tx_id_mismatch`（`tx_id` 与签名 preimage 的规范哈希不一致）
+
+Witness 签名格式支持两种：
+
+- 兼容格式（默认按 `secp256k1` 解析）：
+  - `"0x<65-byte-signature-hex>"`
+- 显式对象格式：
+  - `{"scheme":"secp256k1","signature":"0x..."}`
+  - `{"scheme":"ed25519","signature":"0x...","public_key":"0x<32-byte-pubkey>"}`
+
+`owner` 也支持原生 ed25519 所有权：
+
+- `{"type":"NativeEd25519","public_key":"0x<32-byte-pubkey>"}`
 
 ### ComputeTx 签名与 anti-replay 规则
 

@@ -3,9 +3,10 @@
 use super::{
     error::{ComputeError, ComputeResult},
     object::{ObjectOutput, Ownership},
-    tx::{Command, ComputeTx},
+    tx::{Command, ComputeTx, SignatureScheme, TxSignature},
 };
 use crate::crypto::Address;
+use ed25519_dalek::{Signature as Ed25519Signature, Verifier as _};
 
 /// Authorization policy checks ownership/capability validity.
 pub trait AuthorizationPolicy: Send + Sync {
@@ -73,15 +74,32 @@ impl AuthorizationPolicy for DefaultAuthorizationPolicy {
             }
 
             for input in inputs {
-                if let Ownership::Address(owner_addr) = input.owner {
-                    if tx.witness.signatures.is_empty() {
-                        return Err(ComputeError::AuthorizationDenied);
+                match input.owner {
+                    Ownership::Address(owner_addr) => {
+                        if tx.witness.signatures.is_empty() {
+                            return Err(ComputeError::AuthorizationDenied);
+                        }
+                        match secp_signature_matches_owner(tx, owner_addr, &tx.witness.signatures) {
+                            Ok(true) => {}
+                            Ok(false) => return Err(ComputeError::SignatureOwnerMismatch),
+                            Err(err) => return Err(err),
+                        }
                     }
-                    match signature_matches_owner(tx, owner_addr, &tx.witness.signatures) {
-                        Ok(true) => {}
-                        Ok(false) => return Err(ComputeError::SignatureOwnerMismatch),
-                        Err(err) => return Err(err),
+                    Ownership::NativeEd25519(owner_pubkey) => {
+                        if tx.witness.signatures.is_empty() {
+                            return Err(ComputeError::AuthorizationDenied);
+                        }
+                        match ed25519_signature_matches_owner(
+                            tx,
+                            &owner_pubkey,
+                            &tx.witness.signatures,
+                        ) {
+                            Ok(true) => {}
+                            Ok(false) => return Err(ComputeError::SignatureOwnerMismatch),
+                            Err(err) => return Err(err),
+                        }
                     }
+                    _ => {}
                 }
             }
         }
@@ -89,16 +107,21 @@ impl AuthorizationPolicy for DefaultAuthorizationPolicy {
     }
 }
 
-fn signature_matches_owner(
+fn secp_signature_matches_owner(
     tx: &ComputeTx,
     owner: Address,
-    signatures: &[crate::crypto::Signature],
+    signatures: &[TxSignature],
 ) -> ComputeResult<bool> {
     let message = tx.signing_preimage();
     let mut had_recover_error = false;
 
     for sig in signatures {
-        match sig.recover(&message) {
+        if sig.scheme != SignatureScheme::Secp256k1 {
+            continue;
+        }
+        let parsed = crate::crypto::Signature::from_bytes(&sig.bytes)
+            .map_err(|_| ComputeError::InvalidSignature)?;
+        match parsed.recover(&message) {
             Ok(pubkey) => {
                 if Address::from_public_key(&pubkey) == owner {
                     return Ok(true);
@@ -115,6 +138,38 @@ fn signature_matches_owner(
     } else {
         Ok(false)
     }
+}
+
+fn ed25519_signature_matches_owner(
+    tx: &ComputeTx,
+    owner_pubkey: &[u8; 32],
+    signatures: &[TxSignature],
+) -> ComputeResult<bool> {
+    let message = tx.signing_preimage();
+    let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(owner_pubkey)
+        .map_err(|_| ComputeError::OwnershipCheckFailed)?;
+
+    for sig in signatures {
+        if sig.scheme != SignatureScheme::Ed25519 {
+            continue;
+        }
+        let Some(pk_bytes) = &sig.public_key else {
+            return Err(ComputeError::InvalidSignature);
+        };
+        if pk_bytes.len() != 32 {
+            return Err(ComputeError::InvalidSignature);
+        }
+        if pk_bytes.as_slice() != owner_pubkey {
+            continue;
+        }
+        let sig_obj =
+            Ed25519Signature::from_slice(&sig.bytes).map_err(|_| ComputeError::InvalidSignature)?;
+        if verifying_key.verify(&message, &sig_obj).is_ok() {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
 }
 
 /// No-op resource policy.

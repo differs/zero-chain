@@ -1,5 +1,5 @@
 use zeroapi::rpc::{ComputeBackend, JsonRpcRequest, RpcConfig, RpcServer};
-use zerocore::compute::{Command, ComputeTx, DomainId, ObjectKind, ObjectReadRef, ObjectId, OutputId, OutputProposal, Ownership, TxId, TxWitness, Version};
+use zerocore::compute::{Command, ComputeTx, DomainId, ObjectKind, ObjectReadRef, ObjectId, OutputId, OutputProposal, Ownership, TxId, TxSignature, TxWitness, Version};
 use zerocore::crypto::{Hash, Signature};
 
 fn parse_result(resp: &zeroapi::rpc::JsonRpcResponse) -> serde_json::Value {
@@ -40,7 +40,7 @@ async fn compute_submit_result_output_smoke() {
         chain_id: Some(10086),
         network_id: Some(1),
         witness: TxWitness {
-            signatures: vec![Signature::new([1; 32], [2; 32], 27)],
+            signatures: vec![TxSignature::secp256k1(Signature::new([1; 32], [2; 32], 27))],
             threshold: Some(1),
         },
     };
@@ -51,7 +51,7 @@ async fn compute_submit_result_output_smoke() {
     let object_id = format!("0x{}", hex::encode([0xB3u8; 32]));
     let sig_hex = format!(
         "0x{}",
-        hex::encode(tx.witness.signatures[0].as_bytes())
+        hex::encode(&tx.witness.signatures[0].bytes)
     );
 
     let submit_req = JsonRpcRequest {

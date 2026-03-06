@@ -8,7 +8,8 @@ use zerocore::state::StateDb;
 use zerocore::compute::{
     BasicTxExecutor, Command, ComputeTx, DefaultAuthorizationPolicy, DomainConfig, DomainId,
     InMemoryDomainRegistry, InMemoryObjectStore, NoopResourcePolicy, ObjectId, ObjectKind,
-    ObjectOutput, ObjectStore, OutputId, OutputProposal, Ownership, TxWitness, Version,
+    ObjectOutput, ObjectStore, OutputId, OutputProposal, Ownership, SignatureScheme, TxSignature,
+    TxWitness, Version,
 };
 use zerocore::compute::domain::DomainRegistry;
 use zerocore::crypto::{PrivateKey, Signature};
@@ -725,6 +726,9 @@ fn compute_error_to_json(err: &zerocore::compute::ComputeError) -> serde_json::V
         zerocore::compute::ComputeError::TxIdMismatch => {
             (3005, "tx_id_mismatch", "authorization")
         }
+        zerocore::compute::ComputeError::UnsupportedSignatureScheme => {
+            (3006, "unsupported_signature_scheme", "authorization")
+        }
         zerocore::compute::ComputeError::InvalidPredecessor
         | zerocore::compute::ComputeError::InvalidVersionProgression
         | zerocore::compute::ComputeError::DuplicateOutputId
@@ -947,14 +951,60 @@ fn parse_witness(v: Option<&serde_json::Value>) -> Result<TxWitness, RpcErrorObj
 
     let mut signatures = Vec::with_capacity(sig_arr.len());
     for raw in sig_arr {
-        let s = raw
-            .as_str()
-            .ok_or_else(|| RpcErrorObject::invalid_params("signature must be hex string".to_string()))?;
-        let bytes = hex::decode(s.strip_prefix("0x").unwrap_or(s))
+        if let Some(s) = raw.as_str() {
+            let bytes = hex::decode(s.strip_prefix("0x").unwrap_or(s))
+                .map_err(|e| RpcErrorObject::invalid_params(format!("invalid signature hex: {e}")))?;
+            let sig = Signature::from_bytes(&bytes)
+                .map_err(|e| RpcErrorObject::invalid_params(format!("invalid signature bytes: {e}")))?;
+            signatures.push(TxSignature::secp256k1(sig));
+            continue;
+        }
+
+        let obj = raw
+            .as_object()
+            .ok_or_else(|| RpcErrorObject::invalid_params("signature must be string or object".to_string()))?;
+        let scheme = obj
+            .get("scheme")
+            .and_then(|x| x.as_str())
+            .ok_or_else(|| RpcErrorObject::invalid_params("signature.scheme must be string".to_string()))?;
+        let sig_hex = obj
+            .get("signature")
+            .and_then(|x| x.as_str())
+            .ok_or_else(|| RpcErrorObject::invalid_params("signature.signature must be string".to_string()))?;
+        let sig_bytes = hex::decode(sig_hex.strip_prefix("0x").unwrap_or(sig_hex))
             .map_err(|e| RpcErrorObject::invalid_params(format!("invalid signature hex: {e}")))?;
-        let sig = Signature::from_bytes(&bytes)
-            .map_err(|e| RpcErrorObject::invalid_params(format!("invalid signature bytes: {e}")))?;
-        signatures.push(sig);
+
+        match scheme {
+            "secp256k1" => {
+                let sig = Signature::from_bytes(&sig_bytes)
+                    .map_err(|e| RpcErrorObject::invalid_params(format!("invalid signature bytes: {e}")))?;
+                signatures.push(TxSignature::secp256k1(sig));
+            }
+            "ed25519" => {
+                let pubkey_hex = obj
+                    .get("public_key")
+                    .and_then(|x| x.as_str())
+                    .ok_or_else(|| RpcErrorObject::invalid_params("ed25519 signature requires public_key".to_string()))?;
+                let pubkey = hex::decode(pubkey_hex.strip_prefix("0x").unwrap_or(pubkey_hex))
+                    .map_err(|e| RpcErrorObject::invalid_params(format!("invalid public_key hex: {e}")))?;
+                if sig_bytes.len() != 64 {
+                    return Err(RpcErrorObject::invalid_params("ed25519 signature must be 64 bytes".to_string()));
+                }
+                if pubkey.len() != 32 {
+                    return Err(RpcErrorObject::invalid_params("ed25519 public_key must be 32 bytes".to_string()));
+                }
+                signatures.push(TxSignature {
+                    scheme: SignatureScheme::Ed25519,
+                    bytes: sig_bytes,
+                    public_key: Some(pubkey),
+                });
+            }
+            other => {
+                return Err(RpcErrorObject::invalid_params(format!(
+                    "unsupported signature scheme: {other}"
+                )));
+            }
+        }
     }
 
     let threshold = match obj.get("threshold") {
@@ -1026,6 +1076,22 @@ fn parse_ownership(v: Option<&serde_json::Value>) -> Result<Ownership, RpcErrorO
                 .and_then(|x| x.as_str())
                 .ok_or_else(|| RpcErrorObject::invalid_params("owner.address missing".to_string()))?;
             Ok(Ownership::Program(parse_address(addr)?))
+        }
+        "NativeEd25519" => {
+            let pubkey = obj
+                .get("public_key")
+                .and_then(|x| x.as_str())
+                .ok_or_else(|| RpcErrorObject::invalid_params("owner.public_key missing".to_string()))?;
+            let bytes = hex::decode(pubkey.strip_prefix("0x").unwrap_or(pubkey))
+                .map_err(|e| RpcErrorObject::invalid_params(format!("invalid owner.public_key hex: {e}")))?;
+            if bytes.len() != 32 {
+                return Err(RpcErrorObject::invalid_params(
+                    "owner.public_key must be 32 bytes".to_string(),
+                ));
+            }
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            Ok(Ownership::NativeEd25519(arr))
         }
         _ => Err(RpcErrorObject::invalid_params(format!("unsupported owner type: {typ}"))),
     }
@@ -1174,6 +1240,7 @@ fn parse_bytes_hex_opt(v: Option<&serde_json::Value>) -> Result<Option<Vec<u8>>,
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::Signer as _;
     use std::collections::BTreeMap;
     use std::sync::Arc;
     use zerostore::db::MemDatabase;
@@ -1224,6 +1291,49 @@ mod tests {
         tx.assign_expected_tx_id();
         tx_json["tx_id"] = serde_json::Value::String(format!("0x{}", tx.tx_id.0.to_hex()));
         tx_json
+    }
+
+    #[test]
+    fn test_parse_compute_tx_accepts_ed25519_witness_and_owner() {
+        let signer = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let verify = signer.verifying_key();
+        let owner_pub_hex = format!("0x{}", hex::encode(verify.to_bytes()));
+
+        let mut tx = serde_json::json!({
+            "tx_id": format!("0x{}", hex::encode([0x91u8; 32])),
+            "domain_id": 0,
+            "chain_id": 10086,
+            "network_id": 1,
+            "command": "Transfer",
+            "input_set": [format!("0x{}", hex::encode([0x92u8; 32]))],
+            "read_set": [],
+            "output_proposals": [{
+                "output_id": format!("0x{}", hex::encode([0x93u8; 32])),
+                "object_id": format!("0x{}", hex::encode([0x94u8; 32])),
+                "domain_id": 0,
+                "kind": "Asset",
+                "owner": { "type": "NativeEd25519", "public_key": owner_pub_hex },
+                "predecessor": format!("0x{}", hex::encode([0x92u8; 32])),
+                "version": 2,
+                "state": "0x01",
+                "logic": null
+            }],
+            "payload": "0x1234",
+            "deadline_unix_secs": 1900000000u64,
+            "witness": {"signatures": [], "threshold": 1}
+        });
+
+        let parsed = parse_compute_tx(tx.clone()).expect("tx should parse");
+        let sig = signer.sign(&parsed.signing_preimage());
+        tx["witness"]["signatures"] = serde_json::json!([{
+            "scheme": "ed25519",
+            "signature": format!("0x{}", hex::encode(sig.to_bytes())),
+            "public_key": format!("0x{}", hex::encode(verify.to_bytes()))
+        }]);
+
+        let parsed = parse_compute_tx(tx).expect("ed25519 tx should parse");
+        assert_eq!(parsed.witness.signatures.len(), 1);
+        assert_eq!(parsed.witness.signatures[0].scheme, SignatureScheme::Ed25519);
     }
     
     #[test]
