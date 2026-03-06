@@ -6,3 +6,4 @@ pub mod account;
 pub mod transaction;
 pub mod block;
 pub mod console;
+pub mod wallet;

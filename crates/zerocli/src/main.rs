@@ -7,6 +7,7 @@ use clap::{Parser, Subcommand};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use zeroapi::rpc::{ComputeBackend, RpcConfig};
 use zeroapi::ApiConfig;
+use crate::commands::wallet::{WalletCommand, WalletScheme};
 
 
 mod commands;
@@ -93,6 +94,53 @@ enum Commands {
     
     /// Version information
     Version,
+
+    /// Wallet commands
+    Wallet {
+        #[command(subcommand)]
+        action: WalletAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum WalletAction {
+    /// Create new wallet account
+    New {
+        /// Optional account name
+        #[arg(long)]
+        name: Option<String>,
+        /// Signature scheme: ed25519 (native) | secp256k1 (evm)
+        #[arg(long, default_value = "ed25519")]
+        scheme: String,
+    },
+    /// List wallet accounts
+    List,
+    /// Show wallet account details
+    Show {
+        #[arg(long)]
+        name: String,
+    },
+    /// Sign message with wallet account
+    Sign {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        message: String,
+    },
+    /// Verify signature with wallet account public key
+    Verify {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        message: String,
+        #[arg(long)]
+        signature: String,
+    },
+    /// Delete wallet account
+    Delete {
+        #[arg(long)]
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -196,6 +244,10 @@ async fn main() -> Result<()> {
         Some(Commands::Version) => {
             println!("ZeroChain v{}", env!("CARGO_PKG_VERSION"));
         }
+        Some(Commands::Wallet { action }) => {
+            let cmd = map_wallet_action(action)?;
+            commands::wallet::handle_wallet(&cli.data_dir, cmd).await?;
+        }
         None => {
             // Default: show help
             println!("ZeroChain v{}", env!("CARGO_PKG_VERSION"));
@@ -204,6 +256,37 @@ async fn main() -> Result<()> {
     }
     
     Ok(())
+}
+
+fn parse_wallet_scheme(value: &str) -> Result<WalletScheme> {
+    match value.to_ascii_lowercase().as_str() {
+        "ed25519" => Ok(WalletScheme::Ed25519),
+        "secp256k1" | "secp" | "ecdsa" => Ok(WalletScheme::Secp256k1),
+        other => anyhow::bail!("unsupported wallet scheme: {other}"),
+    }
+}
+
+fn map_wallet_action(action: WalletAction) -> Result<WalletCommand> {
+    let cmd = match action {
+        WalletAction::New { name, scheme } => WalletCommand::New {
+            name,
+            scheme: parse_wallet_scheme(&scheme)?,
+        },
+        WalletAction::List => WalletCommand::List,
+        WalletAction::Show { name } => WalletCommand::Show { name },
+        WalletAction::Sign { name, message } => WalletCommand::Sign { name, message },
+        WalletAction::Verify {
+            name,
+            message,
+            signature,
+        } => WalletCommand::Verify {
+            name,
+            message,
+            signature_hex: signature,
+        },
+        WalletAction::Delete { name } => WalletCommand::Delete { name },
+    };
+    Ok(cmd)
 }
 
 fn parse_compute_backend(value: &str) -> Result<ComputeBackend> {
