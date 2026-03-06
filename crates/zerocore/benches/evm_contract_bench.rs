@@ -3,12 +3,13 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use zerocore::crypto::{Address, PrivateKey, Hash};
 use zerocore::account::{U256, Account};
-use zerocore::evm::{EvmEngine, EvmConfig, StateDb};
+use zerocore::evm::{EvmEngine, EvmConfig};
+use zerocore::state::StateDb;
 use zerocore::transaction::UnsignedTransaction;
 use std::time::Duration;
 
 /// 创建测试环境
-fn setup_test_account(state_db: &mut dyn StateDb) -> (PrivateKey, Address) {
+fn setup_test_account(state_db: &mut StateDb) -> (PrivateKey, Address) {
     let private_key = PrivateKey::random();
     let address = private_key.public_key().address();
     
@@ -49,6 +50,8 @@ fn bench_evm_simple_execution(c: &mut Criterion) {
             
             let mut evm = EvmEngine::new(EvmConfig {
                 chain_id: 10086,
+                gas_limit: 100_000,
+                base_fee: U256::from(1_000_000_000),
             });
             
             let result = evm.execute(&tx, &mut state_db);
@@ -85,6 +88,8 @@ fn bench_evm_arithmetic(c: &mut Criterion) {
             
             let mut evm = EvmEngine::new(EvmConfig {
                 chain_id: 10086,
+                gas_limit: 100_000,
+                base_fee: U256::from(1_000_000_000),
             });
             
             let result = evm.execute(&tx, &mut state_db);
