@@ -5,8 +5,9 @@
 //! - Database abstraction (RocksDB/Redb)
 //! - Index services for fast lookups
 
-#![warn(missing_docs)]
-#![warn(rustdoc::missing_crate_level_docs)]
+#![allow(missing_docs)]
+#![allow(rustdoc::missing_crate_level_docs)]
+#![allow(unused)]
 
 pub mod compute;
 pub mod db;

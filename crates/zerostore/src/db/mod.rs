@@ -71,8 +71,7 @@ impl RocksDb {
             .map(|p| p.get() as i32)
             .unwrap_or(4);
         opts.increase_parallelism(parallelism);
-        opts.set_max_background_flushes(4);
-        opts.set_max_background_compactions(4);
+        opts.set_max_background_jobs(8);
         opts.set_write_buffer_size(256 * 1024 * 1024); // 256MB
         opts.set_max_write_buffer_number(4);
         opts.set_target_file_size_base(128 * 1024 * 1024); // 128MB

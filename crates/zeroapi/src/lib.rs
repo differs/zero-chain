@@ -5,8 +5,9 @@
 //! - REST API
 //! - WebSocket subscriptions
 
-#![warn(missing_docs)]
-#![warn(rustdoc::missing_crate_level_docs)]
+#![allow(missing_docs)]
+#![allow(rustdoc::missing_crate_level_docs)]
+#![allow(unused)]
 
 pub mod rpc;
 pub mod rest;

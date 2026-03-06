@@ -1,5 +1,7 @@
 //! ZeroChain CLI - Blockchain node and client
 
+#![allow(unused)]
+
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};

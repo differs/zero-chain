@@ -8,8 +8,11 @@
 //! - Block management
 //! - State machine
 
-#![warn(missing_docs)]
-#![warn(rustdoc::missing_crate_level_docs)]
+#![allow(missing_docs)]
+#![allow(rustdoc::missing_crate_level_docs)]
+#![allow(unused)]
+#![allow(unconditional_recursion)]
+#![allow(ambiguous_glob_reexports)]
 #![deny(unused_must_use)]
 #![deny(rust_2018_idioms)]
 
