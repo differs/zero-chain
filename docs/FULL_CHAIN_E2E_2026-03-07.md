@@ -37,10 +37,12 @@
 - Mining pool: `127.0.0.1:9332`
 - Miner metrics: `127.0.0.1:9333`
 - Explorer backend: `127.0.0.1:18080`
+- Explorer frontend: `127.0.0.1:5178`
 
 Health checks:
 
 - `GET /health` (pool/miner/explorer-backend): all `ok=true`
+- `GET /` (explorer-frontend): HTTP `200`
 
 ## 3) E2E Verification Results
 
