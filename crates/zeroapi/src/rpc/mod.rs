@@ -3267,6 +3267,7 @@ mod tests {
             "chain_id": 10086,
             "network_id": 1,
             "command": "Mint",
+            "nonce": 1,
             "input_set": [],
             "read_set": [],
             "output_proposals": [
@@ -3323,6 +3324,7 @@ mod tests {
             "chain_id": 10086,
             "network_id": 1,
             "command": "Mint",
+            "nonce": 2,
             "input_set": [],
             "read_set": [],
             "output_proposals": [{
@@ -3593,6 +3595,7 @@ mod tests {
             "chain_id": 10086,
             "network_id": 1,
             "command": "Mint",
+            "nonce": 3,
             "input_set": [],
             "read_set": [],
             "output_proposals": [],
@@ -3618,6 +3621,7 @@ mod tests {
             "chain_id": 10086,
             "network_id": 1,
             "command": "Mint",
+            "nonce": 4,
             "input_set": [],
             "read_set": [],
             "output_proposals": [{

@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use crate::crypto::{keccak256, Address, Signature};
 use parking_lot::RwLock;
 
 use super::{
@@ -22,6 +23,7 @@ const KNOWN_FLAGS_MASK: u32 = 0x1f;
 const MAX_METADATA_ENTRIES: usize = 64;
 const MAX_METADATA_KEY_BYTES: usize = 128;
 const MAX_METADATA_VALUE_BYTES: usize = 4096;
+const REPLAY_NONCE_WINDOW_SECS: u64 = 60 * 60;
 
 /// Object storage abstraction.
 pub trait ObjectStore: Send + Sync {
@@ -265,12 +267,9 @@ fn validate_tx_envelope(tx: &ComputeTx) -> ComputeResult<()> {
         ));
     }
 
-    if !matches!(tx.command, Command::Mint)
-        && (tx.chain_id.is_some() || tx.network_id.is_some())
-        && tx.nonce.is_none()
-    {
+    if nonce_required(tx) && tx.nonce.is_none() {
         return Err(ComputeError::InvalidTransaction(
-            "nonce is required for non-mint tx when replay fields are set".to_string(),
+            "nonce is required for empty-input or cross-domain command transactions".to_string(),
         ));
     }
 
@@ -282,6 +281,14 @@ fn validate_tx_envelope(tx: &ComputeTx) -> ComputeResult<()> {
 
     validate_metadata(&tx.metadata)?;
     Ok(())
+}
+
+fn nonce_required(tx: &ComputeTx) -> bool {
+    tx.input_set.is_empty()
+        || matches!(
+            tx.command,
+            Command::Anchor | Command::Reveal | Command::AgentTick
+        )
 }
 
 fn validate_metadata(metadata: &[(String, Vec<u8>)]) -> ComputeResult<()> {
@@ -322,6 +329,82 @@ fn validate_metadata(metadata: &[(String, Vec<u8>)]) -> ComputeResult<()> {
     }
 
     Ok(())
+}
+
+fn current_unix_secs() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn register_replay_nonce(
+    tx: &ComputeTx,
+    registry: &RwLock<HashMap<String, u64>>,
+) -> ComputeResult<()> {
+    let Some(nonce) = tx.nonce else {
+        return Ok(());
+    };
+    let now = current_unix_secs();
+    let actors = replay_actors(tx);
+    let mut registry_guard = registry.write();
+    registry_guard.retain(|_, ts| now.saturating_sub(*ts) <= REPLAY_NONCE_WINDOW_SECS);
+    for actor in actors {
+        let key = replay_nonce_key(&actor, tx, nonce);
+        if registry_guard.contains_key(&key) {
+            return Err(ComputeError::InvalidTransaction(
+                "replay nonce tuple already used in active window".to_string(),
+            ));
+        }
+        registry_guard.insert(key, now);
+    }
+    Ok(())
+}
+
+fn replay_nonce_key(actor: &str, tx: &ComputeTx, nonce: u64) -> String {
+    format!(
+        "{}|d:{}|c:{:?}|n:{:?}|x:{}",
+        actor, tx.domain_id.0, tx.chain_id, tx.network_id, nonce
+    )
+}
+
+fn replay_actors(tx: &ComputeTx) -> Vec<String> {
+    let preimage = tx.signing_preimage();
+    let mut actors = Vec::with_capacity(tx.witness.signatures.len().max(1));
+    for sig in &tx.witness.signatures {
+        match sig.scheme {
+            super::tx::SignatureScheme::Secp256k1 => {
+                let actor = Signature::from_bytes(&sig.bytes)
+                    .ok()
+                    .and_then(|parsed| parsed.recover(&preimage).ok())
+                    .map(|pk| {
+                        let addr = Address::from_public_key(&pk);
+                        format!("secp:{}", hex::encode(addr.as_bytes()))
+                    })
+                    .unwrap_or_else(|| format!("secp_sig:{}", hex::encode(keccak256(&sig.bytes))));
+                actors.push(actor);
+            }
+            super::tx::SignatureScheme::Ed25519 => {
+                if let Some(pk) = &sig.public_key {
+                    if pk.len() == 32 {
+                        actors.push(format!("ed25519:{}", hex::encode(pk)));
+                        continue;
+                    }
+                }
+                actors.push(format!(
+                    "ed25519_sig:{}",
+                    hex::encode(keccak256(&sig.bytes))
+                ));
+            }
+        }
+    }
+    if actors.is_empty() {
+        actors.push("anonymous".to_string());
+    }
+    actors.sort();
+    actors.dedup();
+    actors
 }
 
 fn validate_existing_output_lifecycle(
@@ -425,6 +508,8 @@ pub struct BasicTxExecutor<
     pub resources: R,
     /// Domain registry.
     pub domains: D,
+    /// Replay nonce tuple cache scoped to this executor instance.
+    replay_nonce_registry: RwLock<HashMap<String, u64>>,
 }
 
 impl<S: ObjectStore, A: AuthorizationPolicy, R: ResourcePolicy, D: DomainRegistry>
@@ -437,6 +522,7 @@ impl<S: ObjectStore, A: AuthorizationPolicy, R: ResourcePolicy, D: DomainRegistr
             authorization,
             resources,
             domains,
+            replay_nonce_registry: RwLock::new(HashMap::new()),
         }
     }
 
@@ -450,6 +536,7 @@ impl<S: ObjectStore, A: AuthorizationPolicy, R: ResourcePolicy, D: DomainRegistr
         };
 
         let report = validator.validate(tx)?;
+        register_replay_nonce(tx, &self.replay_nonce_registry)?;
         for id in &tx.input_set {
             self.store.mark_spent(*id)?;
         }
@@ -563,7 +650,7 @@ mod tests {
                 extensions: vec![],
             }],
             fee: 0,
-            nonce: None,
+            nonce: Some(77),
             metadata: vec![],
             payload: vec![],
             deadline_unix_secs: None,
@@ -645,7 +732,7 @@ mod tests {
                 extensions: vec![],
             }],
             fee: 0,
-            nonce: None,
+            nonce: Some(77),
             metadata: vec![],
             payload: vec![],
             deadline_unix_secs: None,
@@ -707,7 +794,7 @@ mod tests {
                 extensions: vec![],
             }],
             fee: 0,
-            nonce: None,
+            nonce: Some(88),
             metadata: vec![],
             payload: vec![],
             deadline_unix_secs: None,
@@ -772,7 +859,7 @@ mod tests {
                 extensions: vec![],
             }],
             fee: 0,
-            nonce: None,
+            nonce: Some(88),
             metadata: vec![],
             payload: vec![],
             deadline_unix_secs: None,
@@ -1110,7 +1197,7 @@ mod tests {
                 extensions: vec![],
             }],
             fee: 0,
-            nonce: None,
+            nonce: Some(111),
             metadata: vec![
                 ("proof".to_string(), vec![1]),
                 ("proof".to_string(), vec![2]),
@@ -1141,7 +1228,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_transfer_without_nonce_with_replay_fields() {
+    fn validate_rejects_empty_input_command_without_nonce() {
         let store = InMemoryObjectStore::new();
         let input = build_output(DomainId(0), 120);
         store.insert_output(input.clone()).expect("insert input");
@@ -1157,8 +1244,8 @@ mod tests {
         let tx = ComputeTx {
             tx_id: TxId(Hash::from_bytes([121; 32])),
             domain_id: DomainId(0),
-            command: Command::Transfer,
-            input_set: vec![input.output_id],
+            command: Command::Anchor,
+            input_set: vec![],
             read_set: vec![],
             output_proposals: vec![OutputProposal {
                 output_id: OutputId(Hash::from_bytes([122; 32])),
@@ -1184,8 +1271,8 @@ mod tests {
             metadata: vec![],
             payload: vec![],
             deadline_unix_secs: None,
-            chain_id: Some(10086),
-            network_id: Some(1),
+            chain_id: None,
+            network_id: None,
             witness: TxWitness {
                 signatures: vec![TxSignature::secp256k1(crate::crypto::Signature::new(
                     [1; 32], [2; 32], 27,
@@ -1203,7 +1290,7 @@ mod tests {
         };
         let err = validator
             .validate(&tx)
-            .expect_err("nonce must be required in replay-protected transfer");
+            .expect_err("nonce must be required in empty-input/cross-domain command");
         assert!(matches!(err, ComputeError::InvalidTransaction(_)));
     }
 
@@ -1244,7 +1331,7 @@ mod tests {
                 extensions: vec![],
             }],
             fee: 0,
-            nonce: None,
+            nonce: Some(131),
             metadata: vec![],
             payload: vec![],
             deadline_unix_secs: None,
@@ -1408,5 +1495,118 @@ mod tests {
             .validate(&tx)
             .expect_err("missing required witness scheme must fail");
         assert!(matches!(err, ComputeError::AuthorizationDenied));
+    }
+
+    #[test]
+    fn execute_rejects_replay_nonce_tuple_within_window() {
+        let signer = [9u8; 32];
+        let sig = [7u8; 64];
+        let store = InMemoryObjectStore::new();
+        let input_a = build_output(DomainId(0), 160);
+        let input_b = build_output(DomainId(0), 161);
+        store
+            .insert_output(input_a.clone())
+            .expect("insert input_a");
+        store
+            .insert_output(input_b.clone())
+            .expect("insert input_b");
+
+        let domains = InMemoryDomainRegistry::new();
+        domains.upsert_domain(DomainConfig {
+            domain_id: DomainId(0),
+            name: "main".to_string(),
+            vm: "wasm".to_string(),
+            public: true,
+        });
+
+        let executor = BasicTxExecutor::new(
+            store,
+            DefaultAuthorizationPolicy,
+            NoopResourcePolicy,
+            domains,
+        );
+
+        let tx1 = ComputeTx {
+            tx_id: TxId(Hash::from_bytes([162; 32])),
+            domain_id: DomainId(0),
+            command: Command::Transfer,
+            input_set: vec![input_a.output_id],
+            read_set: vec![],
+            output_proposals: vec![OutputProposal {
+                output_id: OutputId(Hash::from_bytes([163; 32])),
+                object_id: input_a.object_id,
+                domain_id: DomainId(0),
+                kind: ObjectKind::Asset,
+                owner: Ownership::Shared,
+                predecessor: Some(input_a.output_id),
+                version: Version(2),
+                state: vec![1],
+                state_root: None,
+                resources: vec![],
+                lock: Script::default(),
+                logic: None,
+                created_at: 0,
+                ttl: None,
+                rent_reserve: None,
+                flags: 0,
+                extensions: vec![],
+            }],
+            fee: 0,
+            nonce: Some(424_242),
+            metadata: vec![],
+            payload: vec![],
+            deadline_unix_secs: None,
+            chain_id: Some(999_160),
+            network_id: Some(1),
+            witness: TxWitness {
+                signatures: vec![TxSignature::ed25519(sig, signer)],
+                threshold: Some(1),
+            },
+        }
+        .with_expected_tx_id();
+        executor.execute(&tx1).expect("first tx should pass");
+
+        let tx2 = ComputeTx {
+            tx_id: TxId(Hash::from_bytes([164; 32])),
+            domain_id: DomainId(0),
+            command: Command::Transfer,
+            input_set: vec![input_b.output_id],
+            read_set: vec![],
+            output_proposals: vec![OutputProposal {
+                output_id: OutputId(Hash::from_bytes([165; 32])),
+                object_id: input_b.object_id,
+                domain_id: DomainId(0),
+                kind: ObjectKind::Asset,
+                owner: Ownership::Shared,
+                predecessor: Some(input_b.output_id),
+                version: Version(2),
+                state: vec![2],
+                state_root: None,
+                resources: vec![],
+                lock: Script::default(),
+                logic: None,
+                created_at: 0,
+                ttl: None,
+                rent_reserve: None,
+                flags: 0,
+                extensions: vec![],
+            }],
+            fee: 0,
+            nonce: Some(424_242),
+            metadata: vec![],
+            payload: vec![],
+            deadline_unix_secs: None,
+            chain_id: Some(999_160),
+            network_id: Some(1),
+            witness: TxWitness {
+                signatures: vec![TxSignature::ed25519(sig, signer)],
+                threshold: Some(1),
+            },
+        }
+        .with_expected_tx_id();
+        let err = executor
+            .execute(&tx2)
+            .expect_err("second tx should be rejected by replay tuple");
+        assert!(matches!(err, ComputeError::InvalidTransaction(_)));
     }
 }

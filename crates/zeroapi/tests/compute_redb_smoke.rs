@@ -58,7 +58,7 @@ async fn compute_submit_result_output_smoke_redb_backend() {
             extensions: vec![],
         }],
         fee: 0,
-        nonce: None,
+        nonce: Some(1),
         metadata: vec![],
         payload: vec![],
         deadline_unix_secs: None,
@@ -82,6 +82,7 @@ async fn compute_submit_result_output_smoke_redb_backend() {
             "chain_id": 10086,
             "network_id": 1,
             "command": "Mint",
+            "nonce": 1,
             "input_set": [],
             "read_set": [],
             "output_proposals": [{

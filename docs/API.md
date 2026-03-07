@@ -328,7 +328,7 @@ curl -X POST http://localhost:8545 \
         "extensions":[]
       }],
       "fee":0,
-      "nonce":null,
+      "nonce":1,
       "metadata":[],
       "payload":"0x",
       "deadline_unix_secs":null,
@@ -422,7 +422,9 @@ Witness 签名格式支持两种：
   - `chain_id`、`network_id`
   - `witness.threshold`
 - 合法性规则（P0）：
-  - 当 `command != Mint` 且设置了 `chain_id` 或 `network_id` 时，`nonce` 必填且 `> 0`
+  - 当 `input_set` 为空，或 `command` 属于 `Anchor`/`Reveal`/`AgentTick` 时，`nonce` 必填且 `> 0`
+  - 常规 `Transfer`/`Burn`（带输入）可不携带 `nonce`
+  - 若携带 `nonce`，节点会按 `(actor, domain_id, chain_id, network_id, nonce)` 在 1 小时窗口内做重放拒绝
   - `metadata` 键必须唯一且非空（键值长度受限）
   - `Mint` 交易 `fee` 必须为 `0`
 - `lock` 脚本执行入口（P0 最小子集）：
