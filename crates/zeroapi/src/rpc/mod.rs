@@ -1574,7 +1574,7 @@ fn build_compute_kv_backend(config: &RpcConfig) -> Arc<dyn KeyValueDB> {
 fn parse_address(s: &str) -> Result<Address, RpcErrorObject> {
     let raw = s.trim();
     let body = raw
-        .strip_prefix("ZERO")
+        .strip_prefix("ZER0x")
         .or_else(|| raw.strip_prefix("0x"))
         .unwrap_or(raw);
     let bytes = hex::decode(body)
@@ -1672,7 +1672,7 @@ fn format_zero_address(address: Address) -> String {
         }
     }
 
-    format!("ZERO{}", checksummed)
+    format!("ZER0x{}", checksummed)
 }
 
 fn block_to_zero_block_json(block: &Block) -> serde_json::Value {
@@ -2589,7 +2589,7 @@ mod tests {
 
     #[test]
     fn test_parse_zero_prefixed_address() {
-        let addr = parse_address("ZERO0000000000000000000000000000000000000001").unwrap();
+        let addr = parse_address("ZER0x0000000000000000000000000000000000000001").unwrap();
         assert!(!addr.is_zero());
     }
 
@@ -2603,8 +2603,8 @@ mod tests {
     fn test_format_zero_address_prefix() {
         let addr = parse_address("0x1111111111111111111111111111111111111111").unwrap();
         let formatted = format_zero_address(addr);
-        assert!(formatted.starts_with("ZERO"));
-        assert_eq!(formatted.len(), 44);
+        assert!(formatted.starts_with("ZER0x"));
+        assert_eq!(formatted.len(), 45);
     }
 
     #[test]

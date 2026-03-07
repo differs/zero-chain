@@ -465,7 +465,7 @@ fn format_zero_native_address(address: [u8; 20]) -> String {
         }
     }
 
-    format!("ZERO{}", checksummed)
+    format!("ZER0x{}", checksummed)
 }
 
 fn wallet_file_path(data_dir: &str) -> PathBuf {
