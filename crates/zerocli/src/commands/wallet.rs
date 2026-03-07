@@ -123,6 +123,14 @@ struct UnlockedSession {
     key_hash_hex: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct WalletSigningContext {
+    pub account_name: String,
+    pub scheme: WalletScheme,
+    pub address: Option<String>,
+    pub secret: [u8; 32],
+}
+
 pub async fn handle_wallet(data_dir: &str, cmd: WalletCommand) -> Result<()> {
     let path = wallet_file_path(data_dir);
 
@@ -319,12 +327,62 @@ pub async fn handle_wallet(data_dir: &str, cmd: WalletCommand) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn load_signing_context(
+    data_dir: &str,
+    account_name: Option<&str>,
+    address: Option<&str>,
+    passphrase: Option<&str>,
+) -> Result<WalletSigningContext> {
+    let wallet = load_wallet_file(&wallet_file_path(data_dir))?;
+    let account = resolve_account_for_signing(&wallet, account_name, address)?;
+    let secret = decrypt_or_session(data_dir, account, passphrase)?;
+    Ok(WalletSigningContext {
+        account_name: account.name.clone(),
+        scheme: account.scheme,
+        address: account.address.clone(),
+        secret,
+    })
+}
+
 fn find_account<'a>(wallet: &'a WalletFile, name: &str) -> Result<&'a WalletAccount> {
     wallet
         .accounts
         .iter()
         .find(|a| a.name == name)
         .ok_or_else(|| anyhow::anyhow!("wallet account not found: {}", name))
+}
+
+fn resolve_account_for_signing<'a>(
+    wallet: &'a WalletFile,
+    account_name: Option<&str>,
+    address: Option<&str>,
+) -> Result<&'a WalletAccount> {
+    if let Some(name) = account_name {
+        return find_account(wallet, name);
+    }
+
+    if let Some(address) = address {
+        let normalized = normalize_address(address);
+        return wallet
+            .accounts
+            .iter()
+            .find(|account| {
+                account.address.as_deref().map(normalize_address).as_deref()
+                    == Some(normalized.as_str())
+            })
+            .ok_or_else(|| anyhow::anyhow!("wallet account not found by address: {}", address));
+    }
+
+    if let Some(default_name) = wallet.default.as_deref() {
+        if let Ok(account) = find_account(wallet, default_name) {
+            return Ok(account);
+        }
+    }
+
+    wallet
+        .accounts
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("wallet account not found"))
 }
 
 fn ensure_passphrase_strength(passphrase: &str) -> Result<()> {
@@ -745,6 +803,10 @@ fn parse_fixed_32_hex(s: &str) -> Result<[u8; 32]> {
     Ok(out)
 }
 
+fn normalize_address(value: &str) -> String {
+    value.trim().to_ascii_lowercase()
+}
+
 fn print_account(a: &WalletAccount) {
     println!("name: {}", a.name);
     println!("scheme: {}", scheme_name(a.scheme));
@@ -762,5 +824,70 @@ fn scheme_name(s: WalletScheme) -> &'static str {
     match s {
         WalletScheme::Ed25519 => "ed25519",
         WalletScheme::Secp256k1 => "secp256k1",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn env_name_for(account_name: &str) -> String {
+        format!(
+            "ZEROCHAIN_WALLET_UNLOCK_{}",
+            account_name.to_uppercase().replace('-', "_")
+        )
+    }
+
+    #[test]
+    fn unlock_session_token_roundtrip() {
+        let temp = TempDir::new().expect("create tempdir");
+        let data_dir = temp.path().to_string_lossy().to_string();
+        let account_name = "evm-token-test";
+        let secret = [7u8; 32];
+
+        let token = save_unlocked_session(&data_dir, account_name, &secret, 60).expect("save");
+        let env_name = env_name_for(account_name);
+        std::env::set_var(&env_name, token);
+
+        let loaded = load_unlocked_session(&data_dir, account_name).expect("load");
+        std::env::remove_var(&env_name);
+        assert_eq!(loaded, secret);
+
+        let session = load_session_file(&session_file_path(&data_dir)).expect("load session file");
+        let entry = session
+            .sessions
+            .iter()
+            .find(|item| item.account_name == account_name)
+            .expect("session entry");
+        assert!(entry.session_token_hash_hex.is_some());
+        assert!(entry.encrypted_secret.is_some());
+        assert!(entry.key_hash_hex.is_none());
+    }
+
+    #[test]
+    fn unlock_session_legacy_key_hash_is_supported() {
+        let temp = TempDir::new().expect("create tempdir");
+        let data_dir = temp.path().to_string_lossy().to_string();
+        let account_name = "evm-legacy-test";
+        let secret = [9u8; 32];
+        let env_secret = format!("0x{}", hex::encode(secret));
+
+        let legacy = SessionFile {
+            sessions: vec![UnlockedSession {
+                account_name: account_name.to_string(),
+                expires_unix_secs: now_unix_secs().saturating_add(60),
+                session_token_hash_hex: None,
+                encrypted_secret: None,
+                key_hash_hex: Some(hex::encode(keccak256(&secret))),
+            }],
+        };
+        save_session_file(&session_file_path(&data_dir), &legacy).expect("save legacy session");
+
+        let env_name = env_name_for(account_name);
+        std::env::set_var(&env_name, env_secret);
+        let loaded = load_unlocked_session(&data_dir, account_name).expect("load legacy");
+        std::env::remove_var(&env_name);
+        assert_eq!(loaded, secret);
     }
 }

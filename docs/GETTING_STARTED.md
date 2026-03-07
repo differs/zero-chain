@@ -38,7 +38,10 @@ cargo build --release
 
 ```bash
 # 创建新账户
-./target/release/zerochain account new
+./target/release/zerochain account new \
+  --name evm-1 \
+  --scheme secp256k1 \
+  --passphrase "StrongPassphrase123!"
 
 # 查看账户列表
 ./target/release/zerochain account list
@@ -50,7 +53,12 @@ cargo build --release
 ./target/release/zerochain transaction send \
   --from 0xYourAddress \
   --to 0xRecipientAddress \
-  --amount 100
+  --amount 1000000000000000000 \
+  --account-name evm-1 \
+  --passphrase "StrongPassphrase123!"
+
+# 若返回 -32010，请在开发环境重启节点并开启写 RPC：
+./target/release/zerochain run --rpc-enable-eth-write-rpcs
 ```
 
 ## 连接测试网

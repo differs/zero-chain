@@ -140,7 +140,7 @@ curl -s -H "Content-Type: application/json" \
 # discovery v5 / sync baseline:
 # - discovery 已接入 discv5(Kademlia) + ENR 事件流
 # - sync 已启用 header -> body -> state 三阶段请求响应
-# - eth_sendTransaction / eth_sendRawTransaction 默认禁用（如需联调兼容可加 --rpc-enable-eth-write-rpcs）
+# - eth_sendTransaction / eth_sendRawTransaction 默认禁用（仅在开发环境使用 --rpc-enable-eth-write-rpcs）
 # 提示：--bootnode 同时支持 enode:// 与 enr:...（优先用 enr:... 参与 discv5）
 ```
 
@@ -159,12 +159,25 @@ zerochain wallet new --name evm-1 --scheme secp256k1 --passphrase "StrongPassphr
 # List wallet accounts
 zerochain wallet list
 
+# Create account alias command (delegates to wallet)
+zerochain account new --name evm-2 --scheme secp256k1 --passphrase "StrongPassphrase123!"
+zerochain account list
+
 # Sign with passphrase
 zerochain wallet sign --name native-1 --message "hello" --passphrase "StrongPassphrase123!"
 
 # Unlock account for temporary session then sign without passphrase
 zerochain wallet unlock --name native-1 --passphrase "StrongPassphrase123!" --ttl-secs 600
+# 命令会输出：export ZEROCHAIN_WALLET_UNLOCK_<NAME>=0x... (session token)
 zerochain wallet sign --name native-1 --message "hello"
+
+# Send transaction with local signing + eth_sendRawTransaction
+zerochain transaction send \
+  --from 0xYourAddress \
+  --to 0xRecipientAddress \
+  --amount 1000000000000000000 \
+  --account-name evm-1 \
+  --passphrase "StrongPassphrase123!"
 
 # Rotate account passphrase
 zerochain wallet rotate-passphrase --name native-1 --old-passphrase "StrongPassphrase123!" --new-passphrase "NewPassphrase123!"
@@ -211,6 +224,9 @@ curl -X POST http://localhost:8545 \
 curl -X POST http://localhost:8545 \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","method":"eth_sendRawTransaction","params":["0x..."],"id":1}'
+
+# 如果返回 -32010，表示节点关闭了写 RPC：
+# 当前节点默认关闭 eth_sendRawTransaction。请在开发环境使用 --rpc-enable-eth-write-rpcs 启动节点。
 
 # ZeroChain extensions
 curl -X POST http://localhost:8545 \

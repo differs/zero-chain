@@ -1,34 +1,29 @@
 //! Account command implementation.
 
+use crate::commands::rpc::rpc_call;
+use crate::commands::wallet::{self, WalletCommand, WalletScheme};
 use crate::{AccountAction, Result};
-use anyhow::{anyhow, Context};
-use serde::de::DeserializeOwned;
-use serde::Deserialize;
 use serde_json::json;
 
-#[derive(Debug, Deserialize)]
-struct JsonRpcError {
-    code: i64,
-    message: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct JsonRpcResponse<T> {
-    result: Option<T>,
-    error: Option<JsonRpcError>,
-}
-
-pub async fn handle_account(action: AccountAction, rpc_url: &str) -> Result<()> {
+pub async fn handle_account(action: AccountAction, data_dir: &str, rpc_url: &str) -> Result<()> {
     match action {
-        AccountAction::New => {
-            anyhow::bail!(
-                "account new is not implemented yet; use `zerochain wallet new --scheme secp256k1|ed25519`"
-            );
+        AccountAction::New {
+            name,
+            scheme,
+            passphrase,
+        } => {
+            wallet::handle_wallet(
+                data_dir,
+                WalletCommand::New {
+                    name,
+                    scheme: parse_wallet_scheme(&scheme)?,
+                    passphrase,
+                },
+            )
+            .await?;
         }
         AccountAction::List => {
-            anyhow::bail!(
-                "account list is not implemented yet; use `zerochain wallet list` for local wallet accounts"
-            );
+            wallet::handle_wallet(data_dir, WalletCommand::List).await?;
         }
         AccountAction::Balance { address } => {
             let balance_hex: String =
@@ -53,43 +48,10 @@ pub async fn handle_account(action: AccountAction, rpc_url: &str) -> Result<()> 
     Ok(())
 }
 
-async fn rpc_call<T>(rpc_url: &str, method: &str, params: serde_json::Value) -> Result<T>
-where
-    T: DeserializeOwned,
-{
-    let client = reqwest::Client::new();
-    let payload = json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": method,
-        "params": params,
-    });
-
-    let response = client
-        .post(rpc_url)
-        .json(&payload)
-        .send()
-        .await
-        .with_context(|| format!("failed to call rpc method `{method}`"))?;
-
-    let status = response.status();
-    if !status.is_success() {
-        return Err(anyhow!("rpc http status {} for `{}`", status, method));
+fn parse_wallet_scheme(value: &str) -> Result<WalletScheme> {
+    match value.to_ascii_lowercase().as_str() {
+        "ed25519" => Ok(WalletScheme::Ed25519),
+        "secp256k1" | "secp" | "ecdsa" => Ok(WalletScheme::Secp256k1),
+        other => anyhow::bail!("unsupported wallet scheme: {other}"),
     }
-
-    let body: JsonRpcResponse<T> = response
-        .json()
-        .await
-        .with_context(|| format!("failed to decode rpc response for `{method}`"))?;
-    if let Some(error) = body.error {
-        return Err(anyhow!(
-            "rpc `{}` error {}: {}",
-            method,
-            error.code,
-            error.message
-        ));
-    }
-
-    body.result
-        .ok_or_else(|| anyhow!("rpc `{}` missing result field", method))
 }

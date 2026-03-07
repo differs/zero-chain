@@ -268,7 +268,17 @@ enum WalletAction {
 #[derive(Subcommand, Debug)]
 pub(crate) enum AccountAction {
     /// Create new account
-    New,
+    New {
+        /// Optional account name
+        #[arg(long)]
+        name: Option<String>,
+        /// Signature scheme: ed25519 (native) | secp256k1 (evm)
+        #[arg(long, default_value = "secp256k1")]
+        scheme: String,
+        /// Passphrase for encrypting private key
+        #[arg(long)]
+        passphrase: String,
+    },
     /// List accounts
     List,
     /// Get account balance
@@ -288,6 +298,25 @@ pub(crate) enum TransactionAction {
         to: String,
         #[arg(short, long)]
         amount: String,
+        /// Wallet account name used for local signing.
+        /// If omitted, CLI tries to find account by --from address.
+        #[arg(long)]
+        account_name: Option<String>,
+        /// Wallet passphrase used to decrypt signing key (optional if wallet unlock token exists)
+        #[arg(long)]
+        passphrase: Option<String>,
+        /// Optional explicit nonce (decimal)
+        #[arg(long)]
+        nonce: Option<u64>,
+        /// Optional gas limit (decimal)
+        #[arg(long, default_value_t = 21_000)]
+        gas_limit: u64,
+        /// Optional gas price in wei (decimal or 0x hex)
+        #[arg(long)]
+        gas_price: Option<String>,
+        /// Optional calldata (0x-prefixed hex)
+        #[arg(long)]
+        data: Option<String>,
     },
     /// Get transaction by hash
     Get {
@@ -461,10 +490,10 @@ async fn main() -> Result<()> {
             println!("Default API config written to {}", cfg_path);
         }
         Some(Commands::Account { action }) => {
-            commands::account::handle_account(action, &rpc_url).await?;
+            commands::account::handle_account(action, &data_dir, &rpc_url).await?;
         }
         Some(Commands::Transaction { action }) => {
-            commands::transaction::handle_transaction(action, &rpc_url).await?;
+            commands::transaction::handle_transaction(action, &data_dir, &rpc_url).await?;
         }
         Some(Commands::Block { action }) => {
             commands::block::handle_block(format!("{:?}", action)).await?;
