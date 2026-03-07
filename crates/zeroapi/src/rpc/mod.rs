@@ -435,6 +435,7 @@ impl RpcApi {
             "eth_getBlockByNumber" => self.eth_get_block_by_number(params),
             "eth_getBlockByHash" => self.eth_get_block_by_hash(params),
             "eth_getTransactionByHash" => self.eth_get_transaction_by_hash(params),
+            "eth_sendTransaction" => self.eth_send_transaction(params),
             "eth_sendRawTransaction" => self.eth_send_raw_transaction(params),
             "eth_call" => self.eth_call(params),
             "eth_estimateGas" => self.eth_estimate_gas(params),
@@ -740,6 +741,74 @@ impl RpcApi {
 
         // Decode and add to pool
         let tx_hash = Hash::from_bytes(zerocore::crypto::keccak256(&tx_bytes));
+
+        Ok(serde_json::json!(format!(
+            "0x{}",
+            hex::encode(tx_hash.as_bytes())
+        )))
+    }
+
+    fn eth_send_transaction(
+        &self,
+        params: Option<Vec<serde_json::Value>>,
+    ) -> Result<serde_json::Value, RpcErrorObject> {
+        let params = params.ok_or(RpcErrorObject::invalid_params("Missing params".to_string()))?;
+        let tx = params
+            .first()
+            .and_then(|v| v.as_object())
+            .ok_or_else(|| RpcErrorObject::invalid_params("tx object missing".to_string()))?;
+
+        let from = tx
+            .get("from")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcErrorObject::invalid_params("from missing".to_string()))
+            .and_then(parse_address)?;
+        let to = tx
+            .get("to")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcErrorObject::invalid_params("to missing".to_string()))
+            .and_then(parse_address)?;
+        let value = tx
+            .get("value")
+            .and_then(|v| v.as_str())
+            .map(parse_u256_hex)
+            .transpose()?
+            .unwrap_or(U256::zero());
+
+        let now = current_unix_secs();
+        let mut from_account = self
+            .state_db
+            .get_account(&from)
+            .ok_or_else(|| RpcErrorObject::invalid_params("from account not found".to_string()))?;
+        if from_account.balance < value {
+            return Err(RpcErrorObject::invalid_params(
+                "insufficient balance".to_string(),
+            ));
+        }
+
+        from_account.balance = from_account.balance.saturating_sub(value);
+        from_account.nonce = from_account.nonce.saturating_add(1);
+        from_account.updated_at = now;
+        self.state_db.insert_account(from, from_account.clone());
+
+        let mut to_account = self.state_db.get_account(&to).unwrap_or_else(|| Account {
+            address: to,
+            state: AccountState::Active,
+            created_at: now,
+            updated_at: now,
+            ..Account::default()
+        });
+        to_account.balance = to_account.balance.saturating_add(value);
+        to_account.updated_at = now;
+        self.state_db.insert_account(to, to_account);
+
+        let mut hash_input = Vec::new();
+        hash_input.extend_from_slice(from.as_bytes());
+        hash_input.extend_from_slice(to.as_bytes());
+        hash_input.extend_from_slice(&value.to_big_endian());
+        hash_input.extend_from_slice(&from_account.nonce.to_be_bytes());
+        hash_input.extend_from_slice(&now.to_be_bytes());
+        let tx_hash = Hash::from_bytes(zerocore::crypto::keccak256(&hash_input));
 
         Ok(serde_json::json!(format!(
             "0x{}",
@@ -1526,6 +1595,23 @@ fn parse_hash(s: &str) -> Result<Hash, RpcErrorObject> {
     }
 
     Ok(Hash::from_slice(&bytes).unwrap())
+}
+
+fn parse_u256_hex(s: &str) -> Result<U256, RpcErrorObject> {
+    let raw = s.strip_prefix("0x").unwrap_or(s);
+    let normalized = if raw.len().is_multiple_of(2) {
+        raw.to_string()
+    } else {
+        format!("0{}", raw)
+    };
+    let bytes = hex::decode(normalized)
+        .map_err(|e| RpcErrorObject::invalid_params(format!("Invalid u256 hex: {}", e)))?;
+    if bytes.len() > 32 {
+        return Err(RpcErrorObject::invalid_params(
+            "u256 must be <= 32 bytes".to_string(),
+        ));
+    }
+    Ok(U256::from_big_endian(&bytes))
 }
 
 fn parse_object_id(s: &str) -> Result<ObjectId, RpcErrorObject> {
@@ -2338,6 +2424,36 @@ mod tests {
                 .map(|txs| txs.len()),
             Some(0)
         );
+    }
+
+    #[test]
+    fn test_eth_send_transaction_moves_balance_between_addresses() {
+        let api = build_test_api_with_persistent_compute();
+        let from = parse_address("0x1111111111111111111111111111111111111111").unwrap();
+        let to = parse_address("0x2222222222222222222222222222222222222222").unwrap();
+
+        let mut from_account = Account {
+            address: from,
+            state: AccountState::Active,
+            created_at: 1,
+            updated_at: 1,
+            ..Account::default()
+        };
+        from_account.balance = U256::from(9_000);
+        api.state_db.insert_account(from, from_account);
+
+        let tx_hash = api
+            .eth_send_transaction(Some(vec![serde_json::json!({
+                "from": "0x1111111111111111111111111111111111111111",
+                "to": "0x2222222222222222222222222222222222222222",
+                "value": "0x3e8"
+            })]))
+            .expect("send tx should succeed");
+        assert!(tx_hash.as_str().unwrap_or_default().starts_with("0x"));
+
+        assert_eq!(api.state_db.get_balance(&from).as_u64(), 8_000);
+        assert_eq!(api.state_db.get_nonce(&from), 1);
+        assert_eq!(api.state_db.get_balance(&to).as_u64(), 1_000);
     }
 
     #[test]
