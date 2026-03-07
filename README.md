@@ -219,6 +219,12 @@ Release gate report path:
 artifacts/release-gate/go-no-go-report.md
 ```
 
+Latest full-chain integration record:
+
+```text
+docs/FULL_CHAIN_E2E_2026-03-07.md
+```
+
 ### Benchmark
 
 ```bash
