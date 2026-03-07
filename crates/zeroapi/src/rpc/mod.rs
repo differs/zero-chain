@@ -22,7 +22,7 @@ use zerocore::crypto::{Address, Hash};
 use zerocore::crypto::{PrivateKey, Signature};
 use zerocore::state::StateDb;
 use zerocore::transaction::{pool::TxPoolConfig, SignedTransaction, TransactionPool};
-use zeronet::global_peer_count;
+use zeronet::{global_peer_count, global_peers};
 use zerostore::db::{KeyValueDB, MemDatabase, RedbDatabase, RocksDb};
 use zerostore::ComputeStore;
 
@@ -462,6 +462,7 @@ impl RpcApi {
             "zero_getLatestBlock" => self.zero_get_latest_block(params),
             "zero_importBlock" => self.zero_import_block(params),
             "zero_getMetrics" => self.zero_get_metrics(params),
+            "zero_peers" => self.zero_peers(params),
 
             _ => Err(RpcErrorObject::method_not_found(method)),
         }
@@ -1219,6 +1220,42 @@ impl RpcApi {
     ) -> Result<serde_json::Value, RpcErrorObject> {
         let text = RPC_METRICS.render()?;
         Ok(serde_json::json!({ "text": text }))
+    }
+
+    fn zero_peers(
+        &self,
+        params: Option<Vec<serde_json::Value>>,
+    ) -> Result<serde_json::Value, RpcErrorObject> {
+        if let Some(values) = params {
+            if !values.is_empty() {
+                return Err(RpcErrorObject::invalid_params(
+                    "zero_peers does not accept params".to_string(),
+                ));
+            }
+        }
+
+        let now = current_unix_secs();
+        let peers = global_peers()
+            .into_iter()
+            .map(|peer| {
+                let idle_secs = now.saturating_sub(peer.last_activity);
+                serde_json::json!({
+                    "peer_id": peer.peer_id,
+                    "network_id": peer.network_id,
+                    "protocol_version": peer.protocol_version,
+                    "client_version": peer.client_version,
+                    "remote_addr": peer.remote_addr.to_string(),
+                    "local_addr": peer.local_addr.to_string(),
+                    "connected_at": peer.connected_at,
+                    "last_activity": peer.last_activity,
+                    "idle_secs": idle_secs,
+                    "reputation": peer.reputation,
+                    "capabilities": peer.capabilities,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        Ok(serde_json::json!(peers))
     }
 
     fn zero_get_latest_block(
@@ -2580,6 +2617,22 @@ mod tests {
 
         assert!(text.contains("zero_rpc_method_calls_total"));
         assert!(text.contains("zero_rpc_method_errors_total"));
+    }
+
+    #[test]
+    fn test_zero_peers_returns_array() {
+        let api = build_test_api_with_compute();
+        let peers = api.zero_peers(None).expect("zero_peers should succeed");
+        assert!(peers.is_array());
+    }
+
+    #[test]
+    fn test_zero_peers_rejects_params() {
+        let api = build_test_api_with_compute();
+        let err = api
+            .zero_peers(Some(vec![serde_json::json!(1)]))
+            .expect_err("zero_peers should reject params");
+        assert_eq!(err.code, -32602);
     }
 
     #[test]

@@ -20,6 +20,7 @@ pub use peer::{Peer, PeerInfo, PeerManager, PeerStatus};
 pub use protocol::{BlockMessage, Protocol, ProtocolMessage, TxMessage};
 pub use sync::{SyncManager, SyncState};
 
+use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -27,13 +28,19 @@ use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
-use tokio::time::timeout;
+use tokio::time::{interval, timeout, MissedTickBehavior};
 use uuid::Uuid;
 
 static GLOBAL_PEER_COUNT: AtomicUsize = AtomicUsize::new(0);
+static GLOBAL_PEER_INFOS: Lazy<RwLock<Vec<PeerInfo>>> = Lazy::new(|| RwLock::new(Vec::new()));
 const HANDSHAKE_PREFIX: &str = "ZERO/1";
 const HANDSHAKE_MAX_LEN: usize = 512;
 const HANDSHAKE_TIMEOUT_SECS: u64 = 5;
+const HEARTBEAT_PING: &[u8] = b"ZERO/PING\n";
+const HEARTBEAT_PONG: &[u8] = b"ZERO/PONG\n";
+const CONTROL_FRAME_MAX_LEN: usize = 256;
+const HEARTBEAT_INTERVAL_SECS: u64 = 15;
+const PEER_IDLE_TIMEOUT_SECS: u64 = 45;
 
 /// Returns the current process-level peer count.
 pub fn global_peer_count() -> usize {
@@ -42,6 +49,15 @@ pub fn global_peer_count() -> usize {
 
 pub(crate) fn set_global_peer_count(count: usize) {
     GLOBAL_PEER_COUNT.store(count, Ordering::Relaxed);
+}
+
+/// Returns snapshots for all currently tracked peers.
+pub fn global_peers() -> Vec<PeerInfo> {
+    GLOBAL_PEER_INFOS.read().clone()
+}
+
+pub(crate) fn set_global_peers(peers: Vec<PeerInfo>) {
+    *GLOBAL_PEER_INFOS.write() = peers;
 }
 
 /// Network error types
@@ -207,6 +223,7 @@ impl NetworkService {
         // Disconnect all peers
         self.peer_manager.disconnect_all_peers();
         set_global_peer_count(0);
+        set_global_peers(Vec::new());
 
         *self.is_running.write() = false;
 
@@ -402,17 +419,96 @@ async fn monitor_peer_socket(
     peer_id: String,
     mut stream: TcpStream,
 ) {
-    let mut buf = [0u8; 1];
+    let _ = peer_manager.touch_peer(&peer_id);
+    let mut ticker = interval(std::time::Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
     loop {
-        match stream.read(&mut buf).await {
-            Ok(0) => break,
-            Ok(_) => continue,
-            Err(_) => break,
+        tokio::select! {
+            _ = ticker.tick() => {
+                if let Err(err) = stream.write_all(HEARTBEAT_PING).await {
+                    tracing::debug!("heartbeat write failed for {}: {}", peer_id, err);
+                    break;
+                }
+                if peer_manager
+                    .stale_peers(PEER_IDLE_TIMEOUT_SECS)
+                    .iter()
+                    .any(|id| id == &peer_id)
+                {
+                    tracing::info!("peer {} considered stale, disconnecting", peer_id);
+                    break;
+                }
+            }
+            frame = read_control_frame(&mut stream) => {
+                match frame {
+                    Ok(ControlFrame::Ping) => {
+                        let _ = peer_manager.touch_peer(&peer_id);
+                        if let Err(err) = stream.write_all(HEARTBEAT_PONG).await {
+                            tracing::debug!("heartbeat pong write failed for {}: {}", peer_id, err);
+                            break;
+                        }
+                    }
+                    Ok(ControlFrame::Pong) => {
+                        let _ = peer_manager.touch_peer(&peer_id);
+                    }
+                    Ok(ControlFrame::Other(line)) => {
+                        tracing::debug!("received non-control frame from {}: {}", peer_id, line);
+                        let _ = peer_manager.touch_peer(&peer_id);
+                    }
+                    Ok(ControlFrame::Eof) => break,
+                    Err(err) => {
+                        tracing::debug!("control frame read failed for {}: {}", peer_id, err);
+                        break;
+                    }
+                }
+            }
         }
     }
 
     let _ = peer_manager.remove_peer(&peer_id);
     set_global_peer_count(peer_manager.peer_count());
+}
+
+enum ControlFrame {
+    Ping,
+    Pong,
+    Other(String),
+    Eof,
+}
+
+async fn read_control_frame(stream: &mut TcpStream) -> std::io::Result<ControlFrame> {
+    let mut line = Vec::with_capacity(32);
+    loop {
+        let mut b = [0u8; 1];
+        let read = stream.read(&mut b).await?;
+        if read == 0 {
+            return Ok(ControlFrame::Eof);
+        }
+        if b[0] == b'\n' {
+            break;
+        }
+        line.push(b[0]);
+        if line.len() > CONTROL_FRAME_MAX_LEN {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "control frame line too long",
+            ));
+        }
+    }
+
+    let line = String::from_utf8(line).map_err(|err| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("control frame is not utf8: {err}"),
+        )
+    })?;
+    let normalized = line.trim();
+    let frame = match normalized {
+        "ZERO/PING" => ControlFrame::Ping,
+        "ZERO/PONG" => ControlFrame::Pong,
+        _ => ControlFrame::Other(normalized.to_string()),
+    };
+    Ok(frame)
 }
 
 async fn inbound_handshake(

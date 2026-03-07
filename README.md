@@ -252,6 +252,12 @@ Run full-chain E2E locally:
 bash scripts/full_chain_e2e.sh
 ```
 
+Run 3-node P2P convergence smoke locally:
+
+```bash
+bash scripts/p2p_three_node_smoke.sh
+```
+
 ### Benchmark
 
 ```bash

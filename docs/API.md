@@ -154,6 +154,45 @@ curl -X POST http://localhost:8545 \
 
 说明：`zero_getAccount` / `zero_getUtxos` 推荐使用原生地址 `ZER0x` + 40 hex（checksum）；EVM `0x...` 地址在兼容路径下仍可解析。
 
+### zero_peers
+
+用于查询当前节点已连接 peer 的实时详情（联调与运维观测）。
+
+```bash
+curl -X POST http://localhost:8545 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc":"2.0",
+    "method":"zero_peers",
+    "params":[],
+    "id":1
+  }'
+```
+
+响应示例：
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": [
+    {
+      "peer_id": "node-xxxxxxxx",
+      "network_id": 10086,
+      "protocol_version": 1,
+      "client_version": "Unknown",
+      "remote_addr": "127.0.0.1:31332",
+      "local_addr": "0.0.0.0:0",
+      "connected_at": 1760000000,
+      "last_activity": 1760000015,
+      "idle_secs": 2,
+      "reputation": 100,
+      "capabilities": []
+    }
+  ]
+}
+```
+
 ### zero_getDomain
 
 ```bash

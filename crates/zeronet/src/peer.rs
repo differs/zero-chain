@@ -1,6 +1,6 @@
 //! Peer management module
 
-use crate::{set_global_peer_count, NetworkError, Result};
+use crate::{set_global_peer_count, set_global_peers, NetworkError, Result};
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -148,6 +148,8 @@ pub struct PeerManager {
     max_peers: u32,
     /// Connected peers
     peers: RwLock<HashMap<PeerId, Arc<Peer>>>,
+    /// Last activity timestamps by peer
+    activity: RwLock<HashMap<PeerId, u64>>,
     /// Peer scores
     scores: RwLock<HashMap<PeerId, i32>>,
 }
@@ -158,6 +160,7 @@ impl PeerManager {
         Self {
             max_peers,
             peers: RwLock::new(HashMap::new()),
+            activity: RwLock::new(HashMap::new()),
             scores: RwLock::new(HashMap::new()),
         }
     }
@@ -190,8 +193,12 @@ impl PeerManager {
         let peer = Arc::new(Peer::new(info, tx));
 
         self.peers.write().insert(peer_id.clone(), peer);
+        self.activity
+            .write()
+            .insert(peer_id.clone(), current_timestamp());
         self.scores.write().entry(peer_id).or_insert(0);
         set_global_peer_count(self.peer_count());
+        set_global_peers(self.get_active_peer_infos());
 
         Ok(())
     }
@@ -199,8 +206,10 @@ impl PeerManager {
     /// Remove peer
     pub fn remove_peer(&self, peer_id: &str) -> Result<()> {
         self.peers.write().remove(peer_id);
+        self.activity.write().remove(peer_id);
         self.scores.write().remove(peer_id);
         set_global_peer_count(self.peer_count());
+        set_global_peers(self.get_active_peer_infos());
         Ok(())
     }
 
@@ -221,11 +230,18 @@ impl PeerManager {
 
     /// Get active peer infos
     pub fn get_active_peer_infos(&self) -> Vec<PeerInfo> {
-        self.peers
-            .read()
+        let peers = self.peers.read();
+        let activity = self.activity.read();
+        peers
             .values()
             .filter(|p| p.status == PeerStatus::Connected)
-            .map(|p| p.info.clone())
+            .map(|p| {
+                let mut info = p.info.clone();
+                if let Some(ts) = activity.get(&info.peer_id) {
+                    info.last_activity = *ts;
+                }
+                info
+            })
             .collect()
     }
 
@@ -241,7 +257,9 @@ impl PeerManager {
         }
 
         self.peers.write().clear();
+        self.activity.write().clear();
         set_global_peer_count(0);
+        set_global_peers(Vec::new());
     }
 
     /// Get best peers for sync (by score)
@@ -287,6 +305,34 @@ impl PeerManager {
     pub fn is_banned(&self, peer_id: &str) -> bool {
         // Would check ban list
         false
+    }
+
+    /// Update last activity timestamp for a peer.
+    pub fn touch_peer(&self, peer_id: &str) -> bool {
+        let mut activity = self.activity.write();
+        let Some(last_seen) = activity.get_mut(peer_id) else {
+            return false;
+        };
+        *last_seen = current_timestamp();
+        drop(activity);
+        set_global_peers(self.get_active_peer_infos());
+        true
+    }
+
+    /// Return peer IDs that have been idle for longer than `max_idle_secs`.
+    pub fn stale_peers(&self, max_idle_secs: u64) -> Vec<PeerId> {
+        let now = current_timestamp();
+        self.activity
+            .read()
+            .iter()
+            .filter_map(|(peer_id, last_seen)| {
+                if now.saturating_sub(*last_seen) > max_idle_secs {
+                    Some(peer_id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 }
 
