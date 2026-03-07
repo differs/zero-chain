@@ -1,10 +1,13 @@
 //! Database abstraction layer
 
 use crate::{Result, StorageError};
+use redb::ReadableTable;
 use std::sync::Arc;
 
 /// Prefix iterator type used by key-value backends.
 pub type PrefixIterator<'a> = Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)> + 'a>;
+const REDB_KV_TABLE: redb::TableDefinition<&[u8], &[u8]> =
+    redb::TableDefinition::new("zerostore_kv");
 
 /// Key-value database trait
 pub trait KeyValueDB: Send + Sync {
@@ -164,6 +167,15 @@ pub struct RedbDatabase {
 impl RedbDatabase {
     pub fn open(path: &str) -> Result<Self> {
         let db = redb::Database::create(path).map_err(|e| StorageError::Database(e.to_string()))?;
+        let tx = db
+            .begin_write()
+            .map_err(|e| StorageError::Database(e.to_string()))?;
+        {
+            tx.open_table(REDB_KV_TABLE)
+                .map_err(|e| StorageError::Database(e.to_string()))?;
+        }
+        tx.commit()
+            .map_err(|e| StorageError::Database(e.to_string()))?;
 
         Ok(Self { db: Arc::new(db) })
     }
@@ -171,23 +183,85 @@ impl RedbDatabase {
 
 impl KeyValueDB for RedbDatabase {
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        // Simplified - would implement full redb interface
-        Ok(None)
+        let tx = self
+            .db
+            .begin_read()
+            .map_err(|e| StorageError::Database(e.to_string()))?;
+        let table = tx
+            .open_table(REDB_KV_TABLE)
+            .map_err(|e| StorageError::Database(e.to_string()))?;
+        let value = table
+            .get(key)
+            .map_err(|e| StorageError::Database(e.to_string()))?;
+        Ok(value.map(|guard| guard.value().to_vec()))
     }
 
     fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
+        let tx = self
+            .db
+            .begin_write()
+            .map_err(|e| StorageError::Database(e.to_string()))?;
+        {
+            let mut table = tx
+                .open_table(REDB_KV_TABLE)
+                .map_err(|e| StorageError::Database(e.to_string()))?;
+            table
+                .insert(key, value)
+                .map_err(|e| StorageError::Database(e.to_string()))?;
+        }
+        tx.commit()
+            .map_err(|e| StorageError::Database(e.to_string()))?;
         Ok(())
     }
 
     fn delete(&self, key: &[u8]) -> Result<()> {
+        let tx = self
+            .db
+            .begin_write()
+            .map_err(|e| StorageError::Database(e.to_string()))?;
+        {
+            let mut table = tx
+                .open_table(REDB_KV_TABLE)
+                .map_err(|e| StorageError::Database(e.to_string()))?;
+            table
+                .remove(key)
+                .map_err(|e| StorageError::Database(e.to_string()))?;
+        }
+        tx.commit()
+            .map_err(|e| StorageError::Database(e.to_string()))?;
         Ok(())
     }
 
     fn has(&self, key: &[u8]) -> Result<bool> {
-        Ok(false)
+        Ok(self.get(key)?.is_some())
     }
 
-    fn write_batch(&self, _batch: Batch) -> Result<()> {
+    fn write_batch(&self, batch: Batch) -> Result<()> {
+        let tx = self
+            .db
+            .begin_write()
+            .map_err(|e| StorageError::Database(e.to_string()))?;
+        {
+            let mut table = tx
+                .open_table(REDB_KV_TABLE)
+                .map_err(|e| StorageError::Database(e.to_string()))?;
+            for op in batch.operations {
+                match op {
+                    BatchOp::Put(k, v) => {
+                        table
+                            .insert(k.as_slice(), v.as_slice())
+                            .map_err(|e| StorageError::Database(e.to_string()))?;
+                    }
+                    BatchOp::Delete(k) => {
+                        table
+                            .remove(k.as_slice())
+                            .map_err(|e| StorageError::Database(e.to_string()))?;
+                    }
+                }
+            }
+        }
+        tx.commit()
+            .map_err(|e| StorageError::Database(e.to_string()))?;
         Ok(())
     }
 
@@ -195,8 +269,25 @@ impl KeyValueDB for RedbDatabase {
         Batch::new()
     }
 
-    fn iter_prefix(&self, _prefix: &[u8]) -> Result<PrefixIterator<'_>> {
-        Ok(Box::new(std::iter::empty()))
+    fn iter_prefix(&self, prefix: &[u8]) -> Result<PrefixIterator<'_>> {
+        let tx = self
+            .db
+            .begin_read()
+            .map_err(|e| StorageError::Database(e.to_string()))?;
+        let table = tx
+            .open_table(REDB_KV_TABLE)
+            .map_err(|e| StorageError::Database(e.to_string()))?;
+        let mut iter = table
+            .iter()
+            .map_err(|e| StorageError::Database(e.to_string()))?;
+        let mut items = Vec::new();
+        while let Some(entry) = iter.next() {
+            let (k, v) = entry.map_err(|e| StorageError::Database(e.to_string()))?;
+            if k.value().starts_with(prefix) {
+                items.push((k.value().to_vec(), v.value().to_vec()));
+            }
+        }
+        Ok(Box::new(items.into_iter()))
     }
 }
 
@@ -273,6 +364,7 @@ impl KeyValueDB for MemDatabase {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn test_mem_database() {
@@ -299,5 +391,33 @@ mod tests {
 
         assert_eq!(db.get(b"key1").unwrap(), Some(b"value1".to_vec()));
         assert_eq!(db.get(b"key2").unwrap(), Some(b"value2".to_vec()));
+    }
+
+    #[test]
+    fn test_redb_database_roundtrip_and_prefix() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("zerostore-redb.db");
+        let path_s = path.to_string_lossy().to_string();
+
+        let db = RedbDatabase::open(&path_s).expect("open redb");
+        db.put(b"k1", b"v1").expect("put k1");
+        db.put(b"prefix:a", b"va").expect("put prefix:a");
+        db.put(b"prefix:b", b"vb").expect("put prefix:b");
+        assert_eq!(db.get(b"k1").expect("get k1"), Some(b"v1".to_vec()));
+        assert!(db.has(b"k1").expect("has k1"));
+
+        let mut batch = db.batch();
+        batch.put(b"k2", b"v2");
+        batch.delete(b"k1");
+        db.write_batch(batch).expect("write batch");
+
+        assert_eq!(db.get(b"k2").expect("get k2"), Some(b"v2".to_vec()));
+        assert_eq!(db.get(b"k1").expect("get deleted k1"), None);
+
+        let mut prefixed: Vec<_> = db.iter_prefix(b"prefix:").expect("iter prefix").collect();
+        prefixed.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(prefixed.len(), 2);
+        assert_eq!(prefixed[0], (b"prefix:a".to_vec(), b"va".to_vec()));
+        assert_eq!(prefixed[1], (b"prefix:b".to_vec(), b"vb".to_vec()));
     }
 }

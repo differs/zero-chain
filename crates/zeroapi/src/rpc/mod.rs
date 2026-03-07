@@ -7,7 +7,7 @@ use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 use prometheus::{Encoder, IntCounterVec, IntGauge, Registry, TextEncoder};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use tokio::sync::oneshot;
 use tower_http::cors::{Any, CorsLayer};
@@ -29,6 +29,10 @@ use zerostore::db::{KeyValueDB, MemDatabase, RedbDatabase, RocksDb};
 use zerostore::ComputeStore;
 
 static RPC_METRICS: Lazy<RpcMetrics> = Lazy::new(RpcMetrics::new);
+const MAX_MINING_JOBS: usize = 2_048;
+const MAX_MINING_JOB_AGE_SECS: u64 = 300;
+const MAX_MINER_EXTRA_DATA_BYTES: usize = 64;
+const MAX_SEEN_MINING_SUBMISSIONS: usize = 16_384;
 
 struct RpcMetrics {
     registry: Registry,
@@ -311,6 +315,9 @@ pub struct RpcApi {
     submitted_compute_results: RwLock<HashMap<Hash, serde_json::Value>>,
     persistent_compute_store: Option<Arc<ComputeStore>>,
     mining_jobs: RwLock<HashMap<String, MiningWork>>,
+    mining_job_order: RwLock<VecDeque<String>>,
+    mining_seen_submissions: RwLock<HashSet<SeenShareKey>>,
+    mining_seen_submission_order: RwLock<VecDeque<SeenShareKey>>,
     hashrate_counter: RwLock<u64>,
 }
 
@@ -320,6 +327,14 @@ struct MiningWork {
     prev_hash: Hash,
     height: u64,
     target_leading_zero_bytes: usize,
+    created_at_secs: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct SeenShareKey {
+    work_id: String,
+    nonce: u64,
+    hash: [u8; 32],
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -350,6 +365,9 @@ impl RpcApi {
             submitted_compute_results: RwLock::new(HashMap::new()),
             persistent_compute_store: None,
             mining_jobs: RwLock::new(HashMap::new()),
+            mining_job_order: RwLock::new(VecDeque::new()),
+            mining_seen_submissions: RwLock::new(HashSet::new()),
+            mining_seen_submission_order: RwLock::new(VecDeque::new()),
             hashrate_counter: RwLock::new(0),
         }
     }
@@ -372,6 +390,9 @@ impl RpcApi {
             submitted_compute_results: RwLock::new(HashMap::new()),
             persistent_compute_store: None,
             mining_jobs: RwLock::new(HashMap::new()),
+            mining_job_order: RwLock::new(VecDeque::new()),
+            mining_seen_submissions: RwLock::new(HashSet::new()),
+            mining_seen_submission_order: RwLock::new(VecDeque::new()),
             hashrate_counter: RwLock::new(0),
         }
     }
@@ -394,6 +415,9 @@ impl RpcApi {
             submitted_compute_results: RwLock::new(HashMap::new()),
             persistent_compute_store: Some(compute_store),
             mining_jobs: RwLock::new(HashMap::new()),
+            mining_job_order: RwLock::new(VecDeque::new()),
+            mining_seen_submissions: RwLock::new(HashSet::new()),
+            mining_seen_submission_order: RwLock::new(VecDeque::new()),
             hashrate_counter: RwLock::new(0),
         }
     }
@@ -1108,22 +1132,48 @@ impl RpcApi {
         &self,
         _params: Option<Vec<serde_json::Value>>,
     ) -> Result<serde_json::Value, RpcErrorObject> {
+        let now = current_unix_secs();
         let latest = self.latest_block.read();
         let (prev_hash, height) = match latest.as_ref() {
             Some(b) => (b.header.hash, b.header.number.as_u64().saturating_add(1)),
             None => (Hash::zero(), 1),
         };
 
-        let work_id = format!("work-{}-{}", height, current_unix_secs());
+        let work_id = format!("work-{}-{}", height, now);
         let work = MiningWork {
             work_id: work_id.clone(),
             prev_hash,
             height,
             target_leading_zero_bytes: 2,
+            created_at_secs: now,
         };
-        self.mining_jobs
-            .write()
-            .insert(work_id.clone(), work.clone());
+        {
+            let mut jobs = self.mining_jobs.write();
+            let mut order = self.mining_job_order.write();
+
+            while let Some(front) = order.front().cloned() {
+                let should_drop = match jobs.get(&front) {
+                    Some(existing) => {
+                        now.saturating_sub(existing.created_at_secs) > MAX_MINING_JOB_AGE_SECS
+                    }
+                    None => true,
+                };
+                if !should_drop {
+                    break;
+                }
+                order.pop_front();
+                jobs.remove(&front);
+            }
+
+            jobs.insert(work_id.clone(), work.clone());
+            order.push_back(work_id.clone());
+
+            while order.len() > MAX_MINING_JOBS {
+                if let Some(stale_work_id) = order.pop_front() {
+                    jobs.remove(&stale_work_id);
+                }
+            }
+        }
 
         Ok(serde_json::json!({
             "work_id": work.work_id,
@@ -1161,6 +1211,13 @@ impl RpcApi {
 
         let hash_bytes = hex::decode(req.hash_hex.strip_prefix("0x").unwrap_or(&req.hash_hex))
             .map_err(|e| RpcErrorObject::invalid_params(format!("invalid hash hex: {e}")))?;
+        if hash_bytes.len() != 32 {
+            return Err(RpcErrorObject::invalid_params(
+                "hash must be 32 bytes".to_string(),
+            ));
+        }
+        let mut hash = [0u8; 32];
+        hash.copy_from_slice(&hash_bytes);
         let leading = hash_bytes.iter().take_while(|b| **b == 0).count();
         if leading < work.target_leading_zero_bytes {
             RPC_METRICS
@@ -1179,7 +1236,7 @@ impl RpcApi {
         data.extend_from_slice(&work.height.to_be_bytes());
         data.extend_from_slice(&req.nonce.to_be_bytes());
         let expected = zerocore::crypto::keccak256(&data);
-        if expected.as_slice() != hash_bytes.as_slice() {
+        if expected != hash {
             RPC_METRICS
                 .mining_shares_rejected
                 .with_label_values(&["invalid_pow_hash"])
@@ -1187,6 +1244,59 @@ impl RpcApi {
             return Ok(serde_json::json!({
                 "accepted": false,
                 "reason": "invalid_pow_hash"
+            }));
+        }
+
+        let miner_label = req.miner.unwrap_or_else(|| "zero-miner".to_string());
+        if miner_label.as_bytes().len() > MAX_MINER_EXTRA_DATA_BYTES {
+            RPC_METRICS
+                .mining_shares_rejected
+                .with_label_values(&["invalid_miner_label"])
+                .inc();
+            return Ok(serde_json::json!({
+                "accepted": false,
+                "reason": "invalid_miner_label"
+            }));
+        }
+
+        let seen_key = SeenShareKey {
+            work_id: req.work_id.clone(),
+            nonce: req.nonce,
+            hash,
+        };
+        {
+            let mut seen = self.mining_seen_submissions.write();
+            let mut order = self.mining_seen_submission_order.write();
+            if !seen.insert(seen_key.clone()) {
+                RPC_METRICS
+                    .mining_shares_rejected
+                    .with_label_values(&["duplicate_share"])
+                    .inc();
+                return Ok(serde_json::json!({
+                    "accepted": false,
+                    "reason": "duplicate_share"
+                }));
+            }
+            order.push_back(seen_key);
+            while order.len() > MAX_SEEN_MINING_SUBMISSIONS {
+                if let Some(stale) = order.pop_front() {
+                    seen.remove(&stale);
+                }
+            }
+        }
+
+        let consumed = self.mining_jobs.write().remove(&req.work_id).is_some();
+        self.mining_job_order
+            .write()
+            .retain(|work_id| work_id != &req.work_id);
+        if !consumed {
+            RPC_METRICS
+                .mining_shares_rejected
+                .with_label_values(&["stale_or_duplicate_work"])
+                .inc();
+            return Ok(serde_json::json!({
+                "accepted": false,
+                "reason": "stale_or_duplicate_work"
             }));
         }
 
@@ -1224,10 +1334,7 @@ impl RpcApi {
             timestamp,
             difficulty,
             nonce: req.nonce,
-            extra_data: req
-                .miner
-                .unwrap_or_else(|| "zero-miner".to_string())
-                .into_bytes(),
+            extra_data: miner_label.into_bytes(),
             mix_hash: Hash::from_bytes(expected),
             base_fee_per_gas: U256::from(1_000_000_000u64),
             hash: Hash::zero(),
@@ -3033,6 +3140,85 @@ mod tests {
         let err = submit.expect_err("stale work id should error");
         assert_eq!(err.code, -32602);
         assert_eq!(err.message, "Invalid params");
+    }
+
+    #[test]
+    fn test_zero_submit_work_replay_is_rejected_after_accept() {
+        let api = build_test_api_with_persistent_compute();
+        let work = api.zero_get_work(None).expect("work should be available");
+        let work_id = work["work_id"].as_str().unwrap().to_string();
+        let prev_hash = work["prev_hash"].as_str().unwrap().to_string();
+        let height = work["height"].as_u64().unwrap();
+
+        {
+            let mut jobs = api.mining_jobs.write();
+            if let Some(job) = jobs.get_mut(&work_id) {
+                job.target_leading_zero_bytes = 0;
+            }
+        }
+
+        let prev_hash_bytes =
+            hex::decode(prev_hash.strip_prefix("0x").unwrap_or(&prev_hash)).unwrap();
+        let nonce = 77u64;
+        let mut data = Vec::new();
+        data.extend_from_slice(&prev_hash_bytes);
+        data.extend_from_slice(&height.to_be_bytes());
+        data.extend_from_slice(&nonce.to_be_bytes());
+        let digest = zerocore::crypto::keccak256(&data);
+        let payload = serde_json::json!({
+            "work_id": work_id,
+            "nonce": nonce,
+            "hash_hex": format!("0x{}", hex::encode(digest)),
+            "miner": "test-miner"
+        });
+
+        let first = api
+            .zero_submit_work(Some(vec![payload.clone()]))
+            .expect("first submit should succeed");
+        assert_eq!(first["accepted"].as_bool(), Some(true));
+
+        let second = api.zero_submit_work(Some(vec![payload]));
+        let err = second.expect_err("replay should be rejected as stale work_id");
+        assert_eq!(err.code, -32602);
+        assert_eq!(err.message, "Invalid params");
+    }
+
+    #[test]
+    fn test_zero_submit_work_rejects_oversized_miner_label() {
+        let api = build_test_api_with_persistent_compute();
+        let work = api.zero_get_work(None).expect("work should be available");
+        let work_id = work["work_id"].as_str().unwrap().to_string();
+        let prev_hash = work["prev_hash"].as_str().unwrap().to_string();
+        let height = work["height"].as_u64().unwrap();
+
+        {
+            let mut jobs = api.mining_jobs.write();
+            if let Some(job) = jobs.get_mut(&work_id) {
+                job.target_leading_zero_bytes = 0;
+            }
+        }
+
+        let prev_hash_bytes =
+            hex::decode(prev_hash.strip_prefix("0x").unwrap_or(&prev_hash)).unwrap();
+        let nonce = 88u64;
+        let mut data = Vec::new();
+        data.extend_from_slice(&prev_hash_bytes);
+        data.extend_from_slice(&height.to_be_bytes());
+        data.extend_from_slice(&nonce.to_be_bytes());
+        let digest = zerocore::crypto::keccak256(&data);
+        let too_long_miner = "m".repeat(MAX_MINER_EXTRA_DATA_BYTES + 1);
+
+        let submit = api
+            .zero_submit_work(Some(vec![serde_json::json!({
+                "work_id": work_id,
+                "nonce": nonce,
+                "hash_hex": format!("0x{}", hex::encode(digest)),
+                "miner": too_long_miner
+            })]))
+            .expect("submit should return rejection");
+
+        assert_eq!(submit["accepted"].as_bool(), Some(false));
+        assert_eq!(submit["reason"].as_str(), Some("invalid_miner_label"));
     }
 
     #[test]
