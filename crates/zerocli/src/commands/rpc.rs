@@ -58,8 +58,8 @@ where
 }
 
 fn format_rpc_error(method: &str, code: i64, message: &str) -> String {
-    if code == -32010 && method == "eth_sendRawTransaction" {
-        return "当前节点默认关闭 eth_sendRawTransaction。请在开发环境使用 --rpc-enable-eth-write-rpcs 启动节点。".to_string();
+    if code == -32010 && method == "zero_submitComputeTx" {
+        return "当前节点拒绝提交 compute 交易，请检查节点配置与交易内容。".to_string();
     }
 
     format!("rpc `{}` error {}: {}", method, code, message)

@@ -15,7 +15,7 @@ pub struct DomainConfig {
     pub domain_id: DomainId,
     /// Human-readable domain name.
     pub name: String,
-    /// VM kind used by the domain (e.g. wasm, evm).
+    /// VM kind used by the domain (for example wasm).
     pub vm: String,
     /// Whether domain accepts public transactions.
     pub public: bool,

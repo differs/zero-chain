@@ -137,15 +137,12 @@ pub struct RpcConfig {
     pub compute_backend: ComputeBackend,
     /// Database path for file-based backends (rocksdb/redb)
     pub compute_db_path: String,
-    /// EVM chain id returned by eth_chainId.
+    /// Chain identifier used by native transaction context.
     pub chain_id: u64,
     /// Network id returned by net_version.
     pub network_id: u64,
-    /// Coinbase returned by eth_coinbase.
+    /// Mining reward address.
     pub coinbase: String,
-    /// Allow state-mutating Ethereum write RPCs (`eth_sendTransaction`, `eth_sendRawTransaction`).
-    /// Disabled by default for yellowpaper-aligned mainnet behavior.
-    pub enable_eth_write_rpcs: bool,
     /// Optional static auth token for all JSON-RPC requests.
     pub auth_token: Option<String>,
     /// Per-client request budget per rolling minute. `0` means disabled.
@@ -183,13 +180,12 @@ impl Default for RpcConfig {
             port: 8545,
             max_connections: 100,
             max_request_size: 15 * 1024 * 1024, // 15MB
-            modules: vec!["eth".into(), "net".into(), "web3".into()],
+            modules: vec!["zero".into(), "net".into(), "web3".into()],
             compute_backend: ComputeBackend::Mem,
             compute_db_path: "./data/compute-db".to_string(),
             chain_id: 10086,
             network_id: 10086,
             coinbase: "ZER0x0000000000000000000000000000000000000000".to_string(),
-            enable_eth_write_rpcs: false,
             auth_token: None,
             rate_limit_per_minute: 600,
         }
@@ -472,27 +468,6 @@ impl RpcApi {
             "net_peerCount" => self.net_peer_count(params),
             "net_listening" => self.net_listening(params),
 
-            // eth_* methods
-            "eth_protocolVersion" => self.eth_protocol_version(params),
-            "eth_blockNumber" => self.eth_block_number(params),
-            "eth_getBalance" => self.eth_get_balance(params),
-            "eth_getStorageAt" => self.eth_get_storage_at(params),
-            "eth_getTransactionCount" => self.eth_get_transaction_count(params),
-            "eth_getBlockByNumber" => self.eth_get_block_by_number(params),
-            "eth_getBlockByHash" => self.eth_get_block_by_hash(params),
-            "eth_getTransactionByHash" => self.eth_get_transaction_by_hash(params),
-            "eth_sendTransaction" => self.eth_send_transaction(params),
-            "eth_sendRawTransaction" => self.eth_send_raw_transaction(params),
-            "eth_call" => self.eth_call(params),
-            "eth_estimateGas" => self.eth_estimate_gas(params),
-            "eth_gasPrice" => self.eth_gas_price(params),
-            "eth_chainId" => self.eth_chain_id(params),
-            "eth_syncing" => self.eth_syncing(params),
-            "eth_coinbase" => self.eth_coinbase(params),
-            "eth_mining" => self.eth_mining(params),
-            "eth_hashrate" => self.eth_hashrate(params),
-            "eth_accounts" => self.eth_accounts(params),
-
             // ZeroChain extensions
             "zero_getAccount" => self.zero_get_account(params),
             "zero_getUtxos" => self.zero_get_utxos(params),
@@ -508,6 +483,7 @@ impl RpcApi {
             "zero_importBlock" => self.zero_import_block(params),
             "zero_getMetrics" => self.zero_get_metrics(params),
             "zero_peers" => self.zero_peers(params),
+            "zero_transfer" => self.zero_transfer(params),
 
             _ => Err(RpcErrorObject::method_not_found(method)),
         }
@@ -564,264 +540,15 @@ impl RpcApi {
         Ok(serde_json::json!(true))
     }
 
-    // ============ eth_* methods ============
-
-    fn eth_protocol_version(
-        &self,
-        _params: Option<Vec<serde_json::Value>>,
-    ) -> Result<serde_json::Value, RpcErrorObject> {
-        Ok(serde_json::json!("1"))
-    }
-
-    fn eth_block_number(
-        &self,
-        _params: Option<Vec<serde_json::Value>>,
-    ) -> Result<serde_json::Value, RpcErrorObject> {
-        let block = self.latest_block.read();
-        let number = block
-            .as_ref()
-            .map(|b| b.header.number)
-            .unwrap_or(U256::zero());
-        Ok(serde_json::json!(format_u256_hex(number)))
-    }
-
-    fn eth_get_balance(
+    fn zero_transfer(
         &self,
         params: Option<Vec<serde_json::Value>>,
     ) -> Result<serde_json::Value, RpcErrorObject> {
-        let params = params.ok_or(RpcErrorObject::invalid_params("Missing params".to_string()))?;
-
-        let address_str = params
-            .first()
-            .ok_or_else(|| RpcErrorObject::invalid_params("Missing address".to_string()))?
-            .as_str()
-            .ok_or_else(|| RpcErrorObject::invalid_params("Address must be string".to_string()))?;
-
-        let address = parse_address(address_str)?;
-
-        let balance = self.state_db.get_balance(&address);
-
-        Ok(serde_json::json!(format_u256_hex(balance)))
-    }
-
-    fn eth_get_storage_at(
-        &self,
-        params: Option<Vec<serde_json::Value>>,
-    ) -> Result<serde_json::Value, RpcErrorObject> {
-        let params = params.ok_or(RpcErrorObject::invalid_params("Missing params".to_string()))?;
-
-        let address_str = params
-            .first()
-            .ok_or_else(|| RpcErrorObject::invalid_params("Missing address".to_string()))?
-            .as_str()
-            .ok_or_else(|| RpcErrorObject::invalid_params("Address must be string".to_string()))?;
-
-        let position_str = params
-            .get(1)
-            .ok_or_else(|| RpcErrorObject::invalid_params("Missing position".to_string()))?
-            .as_str()
-            .ok_or_else(|| RpcErrorObject::invalid_params("Position must be string".to_string()))?;
-
-        let address = parse_address(address_str)?;
-        let position = parse_hash(position_str)?;
-
-        let value = self.state_db.get_storage(&address, &position);
-
-        Ok(serde_json::json!(format!(
-            "0x{}",
-            hex::encode(value.as_bytes())
-        )))
-    }
-
-    fn eth_get_transaction_count(
-        &self,
-        params: Option<Vec<serde_json::Value>>,
-    ) -> Result<serde_json::Value, RpcErrorObject> {
-        let params = params.ok_or(RpcErrorObject::invalid_params("Missing params".to_string()))?;
-
-        let address_str = params
-            .first()
-            .ok_or_else(|| RpcErrorObject::invalid_params("Missing address".to_string()))?
-            .as_str()
-            .ok_or_else(|| RpcErrorObject::invalid_params("Address must be string".to_string()))?;
-
-        let address = parse_address(address_str)?;
-        let nonce = self.state_db.get_nonce(&address);
-
-        Ok(serde_json::json!(format!("0x{:x}", nonce)))
-    }
-
-    fn eth_gas_price(
-        &self,
-        _params: Option<Vec<serde_json::Value>>,
-    ) -> Result<serde_json::Value, RpcErrorObject> {
-        Ok(serde_json::json!("0x3b9aca00")) // 1 Gwei
-    }
-
-    fn eth_chain_id(
-        &self,
-        _params: Option<Vec<serde_json::Value>>,
-    ) -> Result<serde_json::Value, RpcErrorObject> {
-        Ok(serde_json::json!(format!("0x{:x}", self.config.chain_id)))
-    }
-
-    fn eth_syncing(
-        &self,
-        _params: Option<Vec<serde_json::Value>>,
-    ) -> Result<serde_json::Value, RpcErrorObject> {
-        Ok(serde_json::json!(false))
-    }
-
-    fn eth_coinbase(
-        &self,
-        _params: Option<Vec<serde_json::Value>>,
-    ) -> Result<serde_json::Value, RpcErrorObject> {
-        let addr = parse_address(&self.config.coinbase)
-            .map_err(|e| RpcErrorObject::internal_error(format!("invalid coinbase: {e}")))?;
-        Ok(serde_json::json!(format_zero_address(addr)))
-    }
-
-    fn eth_mining(
-        &self,
-        _params: Option<Vec<serde_json::Value>>,
-    ) -> Result<serde_json::Value, RpcErrorObject> {
-        Ok(serde_json::json!(true))
-    }
-
-    fn eth_hashrate(
-        &self,
-        _params: Option<Vec<serde_json::Value>>,
-    ) -> Result<serde_json::Value, RpcErrorObject> {
-        Ok(serde_json::json!(format!(
-            "0x{:x}",
-            *self.hashrate_counter.read()
-        )))
-    }
-
-    fn eth_accounts(
-        &self,
-        _params: Option<Vec<serde_json::Value>>,
-    ) -> Result<serde_json::Value, RpcErrorObject> {
-        Ok(serde_json::json!([]))
-    }
-
-    fn eth_get_block_by_number(
-        &self,
-        params: Option<Vec<serde_json::Value>>,
-    ) -> Result<serde_json::Value, RpcErrorObject> {
-        let params = params.ok_or(RpcErrorObject::invalid_params("Missing params".to_string()))?;
-        let block_param = params
-            .first()
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| RpcErrorObject::invalid_params("Missing block selector".to_string()))?;
-        let full_transactions = params.get(1).and_then(|v| v.as_bool()).unwrap_or(false);
-
-        let block = match block_param {
-            "latest" => Some(self.current_head_block()),
-            "earliest" => Some(create_genesis_block()),
-            "pending" => None,
-            raw => {
-                let number = raw.strip_prefix("0x").unwrap_or(raw);
-                let number = u64::from_str_radix(number, 16).map_err(|e| {
-                    RpcErrorObject::invalid_params(format!("Invalid block number: {e}"))
-                })?;
-                self.block_by_number(number)
-            }
-        };
-
-        Ok(block
-            .as_ref()
-            .map(|block| block_to_eth_json(block, full_transactions))
-            .unwrap_or(serde_json::Value::Null))
-    }
-
-    fn eth_get_block_by_hash(
-        &self,
-        params: Option<Vec<serde_json::Value>>,
-    ) -> Result<serde_json::Value, RpcErrorObject> {
-        let params = params.ok_or(RpcErrorObject::invalid_params("Missing params".to_string()))?;
-        let hash = params
-            .first()
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| RpcErrorObject::invalid_params("Missing block hash".to_string()))?;
-        let hash = parse_hash(hash)?;
-        let full_transactions = params.get(1).and_then(|v| v.as_bool()).unwrap_or(false);
-
-        let genesis = create_genesis_block();
-        let block = if genesis.header.hash == hash {
-            Some(genesis)
-        } else {
-            self.latest_block
-                .read()
-                .as_ref()
-                .filter(|block| block.header.hash == hash)
-                .cloned()
-        };
-
-        Ok(block
-            .as_ref()
-            .map(|block| block_to_eth_json(block, full_transactions))
-            .unwrap_or(serde_json::Value::Null))
-    }
-
-    fn eth_get_transaction_by_hash(
-        &self,
-        params: Option<Vec<serde_json::Value>>,
-    ) -> Result<serde_json::Value, RpcErrorObject> {
-        Ok(serde_json::json!(null))
-    }
-
-    fn ensure_eth_write_rpc_enabled(&self) -> Result<(), RpcErrorObject> {
-        if self.config.enable_eth_write_rpcs {
-            return Ok(());
-        }
-
-        Err(RpcErrorObject {
-            code: -32010,
-            message: "Ethereum write RPCs are disabled".to_string(),
-            data: Some(serde_json::json!({
-                "hint": "enable --rpc-enable-eth-write-rpcs for development compatibility"
-            })),
-        })
-    }
-
-    fn eth_send_raw_transaction(
-        &self,
-        params: Option<Vec<serde_json::Value>>,
-    ) -> Result<serde_json::Value, RpcErrorObject> {
-        self.ensure_eth_write_rpc_enabled()?;
-        let params = params.ok_or(RpcErrorObject::invalid_params("Missing params".to_string()))?;
-
-        let tx_data = params
-            .first()
-            .ok_or_else(|| RpcErrorObject::invalid_params("Missing transaction data".to_string()))?
-            .as_str()
-            .ok_or_else(|| {
-                RpcErrorObject::invalid_params("Transaction data must be string".to_string())
-            })?;
-
-        let tx_bytes = hex::decode(tx_data.strip_prefix("0x").unwrap_or(tx_data))
-            .map_err(|e| RpcErrorObject::invalid_params(format!("Invalid hex: {}", e)))?;
-
-        // Decode and add to pool
-        let tx_hash = Hash::from_bytes(zerocore::crypto::keccak256(&tx_bytes));
-
-        Ok(serde_json::json!(format!(
-            "0x{}",
-            hex::encode(tx_hash.as_bytes())
-        )))
-    }
-
-    fn eth_send_transaction(
-        &self,
-        params: Option<Vec<serde_json::Value>>,
-    ) -> Result<serde_json::Value, RpcErrorObject> {
-        self.ensure_eth_write_rpc_enabled()?;
         let params = params.ok_or(RpcErrorObject::invalid_params("Missing params".to_string()))?;
         let tx = params
             .first()
             .and_then(|v| v.as_object())
-            .ok_or_else(|| RpcErrorObject::invalid_params("tx object missing".to_string()))?;
+            .ok_or_else(|| RpcErrorObject::invalid_params("transfer object missing".to_string()))?;
 
         let from = tx
             .get("from")
@@ -879,20 +606,6 @@ impl RpcApi {
             "0x{}",
             hex::encode(tx_hash.as_bytes())
         )))
-    }
-
-    fn eth_call(
-        &self,
-        params: Option<Vec<serde_json::Value>>,
-    ) -> Result<serde_json::Value, RpcErrorObject> {
-        Ok(serde_json::json!("0x"))
-    }
-
-    fn eth_estimate_gas(
-        &self,
-        params: Option<Vec<serde_json::Value>>,
-    ) -> Result<serde_json::Value, RpcErrorObject> {
-        Ok(serde_json::json!("0x5208")) // 21000
     }
 
     // ============ ZeroChain extensions ============
@@ -2038,38 +1751,6 @@ fn block_to_zero_block_json(block: &Block) -> serde_json::Value {
     })
 }
 
-fn block_to_eth_json(block: &Block, _full_transactions: bool) -> serde_json::Value {
-    let transactions = block
-        .transactions
-        .iter()
-        .map(|tx| serde_json::Value::String(format!("0x{}", hex::encode(tx.hash().as_bytes()))))
-        .collect::<Vec<_>>();
-
-    serde_json::json!({
-        "number": format!("0x{:x}", block.header.number.as_u64()),
-        "hash": format!("0x{}", hex::encode(block.header.hash.as_bytes())),
-        "parentHash": format!("0x{}", hex::encode(block.header.parent_hash.as_bytes())),
-        "nonce": format!("0x{:x}", block.header.nonce),
-        "sha3Uncles": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
-        "logsBloom": format!("0x{}", "0".repeat(512)),
-        "transactionsRoot": format!("0x{}", hex::encode(block.header.transactions_root.as_bytes())),
-        "stateRoot": format!("0x{}", hex::encode(block.header.state_root.as_bytes())),
-        "receiptsRoot": format!("0x{}", hex::encode(block.header.receipts_root.as_bytes())),
-        "miner": block.header.coinbase.to_checksum_hex(),
-        "difficulty": format!("0x{:x}", block.header.difficulty.as_u64()),
-        "totalDifficulty": format!("0x{:x}", block.header.difficulty.as_u64()),
-        "extraData": format!("0x{}", hex::encode(&block.header.extra_data)),
-        "size": "0x0",
-        "gasLimit": format!("0x{:x}", block.header.gas_limit),
-        "gasUsed": format!("0x{:x}", block.header.gas_used),
-        "timestamp": format!("0x{:x}", block.header.timestamp),
-        "transactions": transactions,
-        "uncles": [],
-        "mixHash": format!("0x{}", hex::encode(block.header.mix_hash.as_bytes())),
-        "baseFeePerGas": format!("0x{:x}", block.header.base_fee_per_gas.as_u64())
-    })
-}
-
 fn object_output_to_json(output: ObjectOutput) -> serde_json::Value {
     serde_json::json!({
         "output_id": format!("0x{}", hex::encode(output.output_id.0.as_bytes())),
@@ -2988,21 +2669,17 @@ mod tests {
             .expect("submit should succeed");
         assert_eq!(submit.get("accepted").and_then(|v| v.as_bool()), Some(true));
 
-        let coinbase = api
-            .eth_coinbase(None)
-            .expect("coinbase")
-            .as_str()
-            .expect("coinbase str")
-            .to_string();
-        let balance = api
-            .eth_get_balance(Some(vec![
-                serde_json::json!(coinbase),
-                serde_json::json!("latest"),
-            ]))
-            .expect("balance");
+        let coinbase = api.config.coinbase.clone();
+        let account = api
+            .zero_get_account(Some(vec![serde_json::json!(coinbase)]))
+            .expect("coinbase account");
+        let balance = account
+            .get("balance")
+            .and_then(|v| v.as_str())
+            .expect("balance string");
         let expected = format!("0x{:x}", zerocore::INITIAL_BLOCK_REWARD);
 
-        assert_eq!(balance.as_str(), Some(expected.as_str()));
+        assert_eq!(balance, expected);
     }
 
     #[test]
@@ -3083,28 +2760,7 @@ mod tests {
     }
 
     #[test]
-    fn test_eth_get_block_by_number_returns_genesis_before_mining() {
-        let api = build_test_api_with_persistent_compute();
-
-        let block = api
-            .eth_get_block_by_number(Some(vec![
-                serde_json::json!("0x0"),
-                serde_json::json!(true),
-            ]))
-            .expect("genesis block");
-
-        assert_eq!(block.get("number").and_then(|v| v.as_str()), Some("0x0"));
-        assert_eq!(
-            block
-                .get("transactions")
-                .and_then(|v| v.as_array())
-                .map(|txs| txs.len()),
-            Some(0)
-        );
-    }
-
-    #[test]
-    fn test_eth_send_transaction_moves_balance_between_addresses() {
+    fn test_zero_transfer_moves_balance_between_addresses() {
         let account_manager = Arc::new(InMemoryAccountManager::new());
         let tx_pool = Arc::new(TransactionPool::new(
             TxPoolConfig::default(),
@@ -3122,10 +2778,7 @@ mod tests {
             public: true,
         });
         let api = RpcApi::with_persistent_compute(
-            RpcConfig {
-                enable_eth_write_rpcs: true,
-                ..RpcConfig::default()
-            },
+            RpcConfig::default(),
             state_db,
             tx_pool,
             persistent_store,
@@ -3145,7 +2798,7 @@ mod tests {
         api.state_db.insert_account(from, from_account);
 
         let tx_hash = api
-            .eth_send_transaction(Some(vec![serde_json::json!({
+            .zero_transfer(Some(vec![serde_json::json!({
                 "from": "0x1111111111111111111111111111111111111111",
                 "to": "0x2222222222222222222222222222222222222222",
                 "value": "0x3e8"
@@ -3159,16 +2812,16 @@ mod tests {
     }
 
     #[test]
-    fn test_eth_send_transaction_rejected_when_eth_write_disabled() {
+    fn test_zero_transfer_rejects_missing_from_account() {
         let api = build_test_api_with_persistent_compute();
         let err = api
-            .eth_send_transaction(Some(vec![serde_json::json!({
+            .zero_transfer(Some(vec![serde_json::json!({
                 "from": "ZER0x1111111111111111111111111111111111111111",
                 "to": "ZER0x2222222222222222222222222222222222222222",
                 "value": "0x1"
             })]))
-            .expect_err("eth write should be disabled by default");
-        assert_eq!(err.code, -32010);
+            .expect_err("from account should be required");
+        assert_eq!(err.code, -32602);
     }
 
     #[test]

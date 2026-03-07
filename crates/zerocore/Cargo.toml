@@ -50,11 +50,6 @@ proptest = "1.4"
 ed25519-dalek = "2.1"
 
 [[bench]]
-name = "evm_bench"
-harness = false
-path = "../../benches/evm_bench.rs"
-
-[[bench]]
 name = "gas_benchmark"
 harness = false
 path = "benches/gas_benchmark.rs"
@@ -93,8 +88,3 @@ path = "benches/full_execution_bench.rs"
 name = "realistic_io_bench"
 harness = false
 path = "benches/realistic_io_bench.rs"
-
-[[bench]]
-name = "evm_contract_bench"
-harness = false
-path = "benches/evm_contract_bench.rs"

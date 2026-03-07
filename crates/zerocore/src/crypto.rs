@@ -123,7 +123,7 @@ impl Ord for Hash {
     }
 }
 
-/// 160-bit address (Ethereum compatible)
+/// 160-bit address
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub struct Address([u8; 20]);
 

@@ -1,12 +1,10 @@
 //! State Executor - Transaction Execution and State Transitions
 
 use super::StateDb;
-use crate::account::{Account, AccountType, I256, U256};
+use crate::account::{Account, AccountType, U256};
 use crate::block::Block;
 use crate::crypto::{keccak256, Address, Hash};
-use crate::evm::{EvmConfig, EvmEngine, ExecutionContext, ExecutionResult, StateDb as EvmStateDb};
 use crate::transaction::{Log, SignedTransaction, TransactionReceipt};
-use parking_lot::RwLock;
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -21,8 +19,8 @@ pub enum ExecutionError {
     NonceMismatch,
     #[error("Gas limit exceeded")]
     GasLimitExceeded,
-    #[error("EVM error: {0}")]
-    Evm(String),
+    #[error("Runtime error: {0}")]
+    Runtime(String),
     #[error("State error: {0}")]
     State(String),
     #[error("Block error: {0}")]
@@ -46,12 +44,21 @@ pub struct StateTransition {
     pub logs_bloom: [u8; 256],
 }
 
+/// Execution output used by the native state executor.
+#[derive(Clone, Debug)]
+struct ExecutionResult {
+    success: bool,
+    output: Vec<u8>,
+    gas_used: u64,
+    logs: Vec<Log>,
+    created_address: Option<Address>,
+    error: Option<String>,
+}
+
 /// State executor
 pub struct StateExecutor {
     /// State database
     state_db: Arc<StateDb>,
-    /// EVM engine
-    evm_engine: RwLock<EvmEngine>,
     /// Chain ID
     chain_id: u64,
 }
@@ -59,17 +66,7 @@ pub struct StateExecutor {
 impl StateExecutor {
     /// Create new state executor
     pub fn new(state_db: Arc<StateDb>, chain_id: u64) -> Self {
-        let evm_config = EvmConfig {
-            chain_id,
-            gas_limit: 30_000_000,
-            base_fee: U256::from(1_000_000_000),
-        };
-
-        Self {
-            state_db,
-            evm_engine: RwLock::new(EvmEngine::new(evm_config)),
-            chain_id,
-        }
+        Self { state_db, chain_id }
     }
 
     /// Execute a block
@@ -241,15 +238,7 @@ impl StateExecutor {
         self.transfer_value(tx.sender(), contract_address, tx.tx.value)?;
 
         // Execute init code
-        let mut evm = self.evm_engine.write();
-        let evm_config = EvmConfig {
-            chain_id: self.chain_id,
-            gas_limit: tx.tx.gas_limit.as_u64(),
-            base_fee: block.header.base_fee_per_gas,
-        };
-
-        // Would create proper EVM context and execute
-        // Simplified for now
+        // Runtime initialization is intentionally simplified in native-only mode.
 
         Ok(ExecutionResult {
             success: true,
@@ -285,11 +274,7 @@ impl StateExecutor {
             });
         }
 
-        // Execute EVM
-        let mut evm = self.evm_engine.write();
-
-        // Would create proper EVM context and execute
-        // Simplified for now
+        // Runtime call execution is intentionally simplified in native-only mode.
 
         Ok(ExecutionResult {
             success: true,

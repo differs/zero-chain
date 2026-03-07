@@ -1,6 +1,6 @@
 //! Merkle Patricia Trie Implementation
 //!
-//! ZeroChain uses a modified Merkle Patricia Trie similar to Ethereum's,
+//! ZeroChain uses a modified Merkle Patricia Trie,
 //! optimized for our hybrid account model.
 
 mod node;

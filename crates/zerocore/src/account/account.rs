@@ -62,7 +62,7 @@ pub enum AccountError {
     AccountDestroyed,
 }
 
-/// 256-bit unsigned integer (compatible with Ethereum)
+/// 256-bit unsigned integer
 #[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct U256(pub [u8; 32]);
 
@@ -795,7 +795,7 @@ impl Account {
             }
             AccountType::AbstractAccount { validator, .. } => {
                 // Delegate to validator contract
-                // This would be implemented in the EVM layer
+                // This path is handled by external runtime adapters.
                 Ok(true)
             }
             AccountType::Contract { .. } => Err(AccountError::InvalidAccountType),

@@ -1,7 +1,7 @@
 //! ZeroChain API Services
 //!
 //! Provides:
-//! - JSON-RPC server (Ethereum compatible)
+//! - JSON-RPC server (native method surface)
 //! - REST API
 //! - WebSocket subscriptions
 

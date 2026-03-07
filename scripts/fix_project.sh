@@ -437,7 +437,7 @@ cargo build --release
 ```bash
 curl -X POST http://localhost:8545 \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"eth_blockNumber","id":1}'
+  -d '{"jsonrpc":"2.0","method":"zero_getLatestBlock","id":1}'
 ```
 
 ### 获取余额
@@ -447,7 +447,7 @@ curl -X POST http://localhost:8545 \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc":"2.0",
-    "method":"eth_getBalance",
+    "method":"zero_getAccount",
     "params":["0xYourAddress", "latest"],
     "id":1
   }'
@@ -470,7 +470,7 @@ cat > docs/API.md << 'EOF'
 - HTTP: `http://localhost:8545`
 - WebSocket: `ws://localhost:8546`
 
-## 标准 Ethereum 方法
+## 标准网络方法与原生方法
 
 ### web3_*
 
@@ -504,37 +504,37 @@ curl -X POST http://localhost:8545 \
   }'
 ```
 
-### eth_*
+### zero_*
 
-#### eth_blockNumber
+#### zero_getLatestBlock
 
 ```bash
 curl -X POST http://localhost:8545 \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"eth_blockNumber","id":1}'
+  -d '{"jsonrpc":"2.0","method":"zero_getLatestBlock","id":1}'
 ```
 
-#### eth_getBalance
+#### zero_getAccount
 
 ```bash
 curl -X POST http://localhost:8545 \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc":"2.0",
-    "method":"eth_getBalance",
+    "method":"zero_getAccount",
     "params":["0xAddress", "latest"],
     "id":1
   }'
 ```
 
-#### eth_sendRawTransaction
+#### zero_submitComputeTx
 
 ```bash
 curl -X POST http://localhost:8545 \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc":"2.0",
-    "method":"eth_sendRawTransaction",
+    "method":"zero_submitComputeTx",
     "params":["0xSignedTx"],
     "id":1
   }'
@@ -578,7 +578,7 @@ const ws = new WebSocket('ws://localhost:8546');
 ws.onopen = () => {
   ws.send(JSON.stringify({
     jsonrpc: '2.0',
-    method: 'eth_subscribe',
+    method: 'zero_subscribe',
     params: ['newHeads'],
     id: 1
   }));
@@ -594,7 +594,7 @@ ws.onmessage = (msg) => {
 ```javascript
 ws.send(JSON.stringify({
   jsonrpc: '2.0',
-  method: 'eth_subscribe',
+  method: 'zero_subscribe',
   params: ['newPendingTransactions'],
   id: 2
 }));

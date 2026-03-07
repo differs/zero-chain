@@ -1,6 +1,6 @@
 //! RLP (Recursive Length Prefix) Encoding/Decoding
 //! 
-//! Complete implementation for Ethereum-compatible serialization
+//! Complete implementation for deterministic recursive length-prefix serialization
 
 mod encode;
 mod decode;
@@ -385,7 +385,7 @@ mod tests {
     
     #[test]
     fn test_known_vectors() {
-        // Test vectors from Ethereum RLP spec
+        // Test vectors from the canonical RLP specification
         
         // "" -> 0x80
         let encoded = "".rlp_encode();

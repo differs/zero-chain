@@ -103,6 +103,10 @@ extract_result_hex() {
   sed -n 's/.*"result":"\([^"]*\)".*/\1/p'
 }
 
+extract_block_number_hex() {
+  sed -n 's/.*"number":"\([^"]*\)".*/\1/p'
+}
+
 extract_balance_hex() {
   sed -n 's/.*"balance":"\([^"]*\)".*/\1/p'
 }
@@ -145,7 +149,6 @@ echo "==> Start node"
   --mine \
   --coinbase "${COINBASE_NATIVE}" \
   --rpc-coinbase "${COINBASE_NATIVE}" \
-  --rpc-enable-eth-write-rpcs \
   --http-port "${NODE_RPC_PORT}" \
   --ws-port "${NODE_WS_PORT}" \
   >"${NODE_LOG}" 2>&1 &
@@ -188,11 +191,11 @@ wait_http_ok "${EXPLORER_BACKEND_URL}/health" 90
 wait_http_ok "${EXPLORER_FRONTEND_URL}/" 90
 
 echo "==> Verify block growth"
-block_before_json="$(rpc_call "eth_blockNumber" "[]")"
-block_before_hex="$(printf '%s' "${block_before_json}" | extract_result_hex)"
+block_before_json="$(rpc_call "zero_getLatestBlock" "[]")"
+block_before_hex="$(printf '%s' "${block_before_json}" | extract_block_number_hex)"
 sleep 5
-block_after_json="$(rpc_call "eth_blockNumber" "[]")"
-block_after_hex="$(printf '%s' "${block_after_json}" | extract_result_hex)"
+block_after_json="$(rpc_call "zero_getLatestBlock" "[]")"
+block_after_hex="$(printf '%s' "${block_after_json}" | extract_block_number_hex)"
 block_before_dec="$(hex_to_dec "${block_before_hex}")"
 block_after_dec="$(hex_to_dec "${block_after_hex}")"
 if (( block_after_dec <= block_before_dec )); then
@@ -223,10 +226,10 @@ echo "==> Execute transfer"
 recipient_before_json="$(rpc_call "zero_getAccount" "[\"${RECIPIENT_NATIVE}\"]")"
 recipient_before_hex="$(printf '%s' "${recipient_before_json}" | extract_balance_hex)"
 
-send_json="$(rpc_call "eth_sendTransaction" "[{\"from\":\"${COINBASE_NATIVE}\",\"to\":\"${RECIPIENT_NATIVE}\",\"value\":\"${TRANSFER_VALUE_HEX}\"}]")"
+send_json="$(rpc_call "zero_transfer" "[{\"from\":\"${COINBASE_NATIVE}\",\"to\":\"${RECIPIENT_NATIVE}\",\"value\":\"${TRANSFER_VALUE_HEX}\"}]")"
 tx_hash="$(printf '%s' "${send_json}" | extract_result_hex)"
 if [[ ! "${tx_hash}" =~ ^0x[0-9a-fA-F]{64}$ ]]; then
-  echo "Unexpected tx hash from eth_sendTransaction: ${send_json}" >&2
+  echo "Unexpected tx hash from zero_transfer: ${send_json}" >&2
   exit 1
 fi
 

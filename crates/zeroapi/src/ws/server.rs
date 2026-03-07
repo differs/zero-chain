@@ -201,8 +201,8 @@ async fn handle_incoming_message(
 
     // Handle method
     let response = match request.method.as_str() {
-        "eth_subscribe" => handle_subscribe(&request, manager),
-        "eth_unsubscribe" => handle_unsubscribe(&request, manager),
+        "zero_subscribe" => handle_subscribe(&request, manager),
+        "zero_unsubscribe" => handle_unsubscribe(&request, manager),
         _ => Err(ApiError::Rpc("Method not supported".into())),
     };
 
@@ -235,7 +235,7 @@ async fn handle_incoming_message(
     Ok(())
 }
 
-/// Handle eth_subscribe
+/// Handle zero_subscribe
 fn handle_subscribe(
     request: &WsRequest,
     manager: &Arc<SubscriptionManager>,
@@ -270,7 +270,7 @@ fn handle_subscribe(
     Ok(serde_json::json!(id))
 }
 
-/// Handle eth_unsubscribe
+/// Handle zero_unsubscribe
 fn handle_unsubscribe(
     request: &WsRequest,
     manager: &Arc<SubscriptionManager>,
@@ -300,7 +300,7 @@ mod tests {
 
         let request = WsRequest {
             jsonrpc: "2.0".to_string(),
-            method: "eth_subscribe".to_string(),
+            method: "zero_subscribe".to_string(),
             params: Some(vec![serde_json::json!("newHeads")]),
             id: serde_json::json!(1),
         };
@@ -316,7 +316,7 @@ mod tests {
         // Create subscription first
         let sub_request = WsRequest {
             jsonrpc: "2.0".to_string(),
-            method: "eth_subscribe".to_string(),
+            method: "zero_subscribe".to_string(),
             params: Some(vec![serde_json::json!("newHeads")]),
             id: serde_json::json!(1),
         };
@@ -326,7 +326,7 @@ mod tests {
         // Unsubscribe
         let unsub_request = WsRequest {
             jsonrpc: "2.0".to_string(),
-            method: "eth_unsubscribe".to_string(),
+            method: "zero_unsubscribe".to_string(),
             params: Some(vec![sub_id.clone()]),
             id: serde_json::json!(2),
         };

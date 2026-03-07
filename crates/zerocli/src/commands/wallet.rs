@@ -1,4 +1,4 @@
-//! Wallet command implementation (native ed25519 + EVM secp256k1)
+//! Wallet command implementation (native ed25519 only)
 //! with encrypted private keys and short-lived unlock sessions.
 
 use crate::Result;
@@ -14,9 +14,7 @@ use sha3::{Digest, Keccak256};
 use std::fs;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
-use zerocore::crypto::{
-    keccak256, Address, PrivateKey as SecpPrivateKey, Signature as SecpSignature,
-};
+use zerocore::crypto::keccak256;
 
 const PBKDF2_ITERATIONS: u32 = 120_000;
 const KEY_LEN: usize = 32;
@@ -64,7 +62,6 @@ pub enum WalletCommand {
 #[serde(rename_all = "lowercase")]
 pub enum WalletScheme {
     Ed25519,
-    Secp256k1,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -161,7 +158,6 @@ pub async fn handle_wallet(data_dir: &str, cmd: WalletCommand) -> Result<()> {
 
             let account = match scheme {
                 WalletScheme::Ed25519 => new_ed25519_account(account_name, &passphrase)?,
-                WalletScheme::Secp256k1 => new_secp256k1_account(account_name, &passphrase)?,
             };
 
             if wallet.default.is_none() {
@@ -219,15 +215,6 @@ pub async fn handle_wallet(data_dir: &str, cmd: WalletCommand) -> Result<()> {
                     println!("message: {}", message);
                     println!("signature_hex: 0x{}", hex::encode(sig.to_bytes()));
                 }
-                WalletScheme::Secp256k1 => {
-                    let secp = SecpPrivateKey::from_bytes(secret)
-                        .map_err(|_| anyhow::anyhow!("invalid secp256k1 private key"))?;
-                    let sig = secp.sign(msg_bytes);
-                    println!("scheme: secp256k1");
-                    println!("message: {}", message);
-                    println!("message_keccak256: 0x{}", hex::encode(keccak256(msg_bytes)));
-                    println!("signature_hex: 0x{}", hex::encode(sig.as_bytes()));
-                }
             }
         }
         WalletCommand::Verify {
@@ -252,22 +239,6 @@ pub async fn handle_wallet(data_dir: &str, cmd: WalletCommand) -> Result<()> {
                     match pubkey.verify(msg_bytes, &sig) {
                         Ok(_) => println!("✅ verify ok (ed25519)"),
                         Err(_) => println!("❌ verify failed (ed25519)"),
-                    }
-                }
-                WalletScheme::Secp256k1 => {
-                    let sig = SecpSignature::from_bytes(&sig_bytes)
-                        .map_err(|_| anyhow::anyhow!("invalid secp256k1 signature bytes"))?;
-                    let recovered = sig.recover(msg_bytes);
-                    match recovered {
-                        Ok(pubk) => {
-                            let expected_pub = parse_hex(account.public_key_hex.clone())?;
-                            if expected_pub == pubk.as_bytes() {
-                                println!("✅ verify ok (secp256k1)");
-                            } else {
-                                println!("❌ verify failed (secp256k1, pubkey mismatch)");
-                            }
-                        }
-                        Err(_) => println!("❌ verify failed (secp256k1)"),
                     }
                 }
             }
@@ -408,25 +379,6 @@ fn new_ed25519_account(name: String, passphrase: &str) -> Result<WalletAccount> 
         public_key_hex: hex::encode(public),
         encrypted_private_key,
         address: Some(format_zero_native_address(address)),
-    })
-}
-
-fn new_secp256k1_account(name: String, passphrase: &str) -> Result<WalletAccount> {
-    let private_key = SecpPrivateKey::random();
-    let public_key = private_key.public_key();
-    let address = Address::from_public_key(&public_key);
-    let mut secret = [0u8; 32];
-    secret.copy_from_slice(private_key.as_bytes());
-    let encrypted_private_key = encrypt_secret(&secret, passphrase)?;
-
-    Ok(WalletAccount {
-        id: Uuid::new_v4().to_string(),
-        name,
-        scheme: WalletScheme::Secp256k1,
-        created_at: Utc::now().to_rfc3339(),
-        public_key_hex: hex::encode(public_key.as_bytes()),
-        encrypted_private_key,
-        address: Some(address.to_checksum_hex()),
     })
 }
 
@@ -588,8 +540,7 @@ fn migrate_wallet_v1_to_v2(path: &Path, passphrase: &str) -> Result<WalletFile> 
             .ok_or_else(|| anyhow::anyhow!("invalid v1 wallet: account.scheme missing"))?;
         let scheme = match scheme_s {
             "ed25519" => WalletScheme::Ed25519,
-            "secp256k1" => WalletScheme::Secp256k1,
-            other => anyhow::bail!("unsupported v1 wallet scheme: {other}"),
+            _ => anyhow::bail!("unsupported v1 wallet scheme: {scheme_s}"),
         };
         let created_at = a
             .get("created_at")
@@ -783,7 +734,6 @@ fn now_unix_secs() -> u64 {
 fn default_name(scheme: WalletScheme, idx: usize) -> String {
     match scheme {
         WalletScheme::Ed25519 => format!("native-{}", idx + 1),
-        WalletScheme::Secp256k1 => format!("evm-{}", idx + 1),
     }
 }
 
@@ -823,7 +773,6 @@ fn print_account(a: &WalletAccount) {
 fn scheme_name(s: WalletScheme) -> &'static str {
     match s {
         WalletScheme::Ed25519 => "ed25519",
-        WalletScheme::Secp256k1 => "secp256k1",
     }
 }
 
@@ -843,7 +792,7 @@ mod tests {
     fn unlock_session_token_roundtrip() {
         let temp = TempDir::new().expect("create tempdir");
         let data_dir = temp.path().to_string_lossy().to_string();
-        let account_name = "evm-token-test";
+        let account_name = "native-token-test";
         let secret = [7u8; 32];
 
         let token = save_unlocked_session(&data_dir, account_name, &secret, 60).expect("save");
@@ -869,7 +818,7 @@ mod tests {
     fn unlock_session_legacy_key_hash_is_supported() {
         let temp = TempDir::new().expect("create tempdir");
         let data_dir = temp.path().to_string_lossy().to_string();
-        let account_name = "evm-legacy-test";
+        let account_name = "native-legacy-test";
         let secret = [9u8; 32];
         let env_secret = format!("0x{}", hex::encode(secret));
 

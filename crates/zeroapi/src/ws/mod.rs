@@ -108,7 +108,7 @@ impl WsNotification {
     pub fn new(subscription: String, result: serde_json::Value) -> Self {
         Self {
             jsonrpc: "2.0".to_string(),
-            method: "eth_subscription".to_string(),
+            method: "zero_subscription".to_string(),
             params: SubscriptionMessage {
                 subscription,
                 result,

@@ -93,7 +93,7 @@ pub struct TxWitness {
 /// Signature scheme used by compute witness.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SignatureScheme {
-    /// Ethereum-compatible secp256k1 ECDSA signature.
+    /// secp256k1 ECDSA signature.
     Secp256k1,
     /// Native ed25519 signature.
     Ed25519,

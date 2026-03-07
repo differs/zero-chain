@@ -1,7 +1,7 @@
 //! UTXO Compute v1.1 core module.
 //!
-//! This module is the canonical L1 execution path. EVM compatibility can be
-//! layered above as L2/adapter capability without entering L1 consensus logic.
+//! This module is the canonical L1 execution path for native compute.
+//! L1 consensus and state transitions are defined here.
 
 pub mod agent;
 pub mod domain;

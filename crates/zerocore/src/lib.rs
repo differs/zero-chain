@@ -2,7 +2,7 @@
 //!
 //! This crate provides the core blockchain protocol components including:
 //! - Account management (hybrid balance + UTXO model)
-//! - EVM execution engine
+//! - Native execution engine
 //! - PoW consensus mechanism
 //! - Transaction processing
 //! - Block management
@@ -21,7 +21,6 @@ pub mod block;
 pub mod compute;
 pub mod consensus;
 pub mod crypto;
-pub mod evm;
 pub mod state;
 pub mod transaction;
 
@@ -31,7 +30,6 @@ pub use block::{Block, BlockHeader};
 pub use compute::{ComputeTx, ObjectId, ObjectOutput, OutputId, TxId};
 pub use consensus::{Consensus, PowAlgorithm};
 pub use crypto::{Address, Hash, PrivateKey, PublicKey, Signature};
-pub use evm::EvmEngine;
 pub use state::StateDb;
 pub use transaction::{SignedTransaction, UnsignedTransaction as Transaction};
 

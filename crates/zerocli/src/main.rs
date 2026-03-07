@@ -101,10 +101,6 @@ enum Commands {
         #[arg(long)]
         rpc_auth_token: Option<String>,
 
-        /// Enable Ethereum write RPCs (`eth_sendTransaction` / `eth_sendRawTransaction`) for dev compatibility.
-        #[arg(long, default_value_t = false)]
-        rpc_enable_eth_write_rpcs: bool,
-
         /// RPC rate limit budget per client per minute, 0 to disable
         #[arg(long, default_value = "600")]
         rpc_rate_limit_per_minute: u32,
@@ -199,7 +195,7 @@ enum WalletAction {
         /// Optional account name
         #[arg(long)]
         name: Option<String>,
-        /// Signature scheme: ed25519 (native) | secp256k1 (evm)
+        /// Signature scheme: ed25519 (native only)
         #[arg(long, default_value = "ed25519")]
         scheme: String,
         /// Passphrase for encrypting private key (required)
@@ -272,8 +268,8 @@ pub(crate) enum AccountAction {
         /// Optional account name
         #[arg(long)]
         name: Option<String>,
-        /// Signature scheme: ed25519 (native) | secp256k1 (evm)
-        #[arg(long, default_value = "secp256k1")]
+        /// Signature scheme: ed25519 (native only)
+        #[arg(long, default_value = "ed25519")]
         scheme: String,
         /// Passphrase for encrypting private key
         #[arg(long)]
@@ -292,36 +288,20 @@ pub(crate) enum AccountAction {
 pub(crate) enum TransactionAction {
     /// Send transaction
     Send {
-        #[arg(short, long)]
-        from: String,
-        #[arg(short, long)]
-        to: String,
-        #[arg(short, long)]
-        amount: String,
-        /// Wallet account name used for local signing.
-        /// If omitted, CLI tries to find account by --from address.
+        /// Native compute transaction JSON file path
         #[arg(long)]
-        account_name: Option<String>,
+        tx_file: String,
+        /// Wallet account name used for local signing
+        #[arg(long)]
+        account_name: String,
         /// Wallet passphrase used to decrypt signing key (optional if wallet unlock token exists)
         #[arg(long)]
         passphrase: Option<String>,
-        /// Optional explicit nonce (decimal)
-        #[arg(long)]
-        nonce: Option<u64>,
-        /// Optional gas limit (decimal)
-        #[arg(long, default_value_t = 21_000)]
-        gas_limit: u64,
-        /// Optional gas price in wei (decimal or 0x hex)
-        #[arg(long)]
-        gas_price: Option<String>,
-        /// Optional calldata (0x-prefixed hex)
-        #[arg(long)]
-        data: Option<String>,
     },
-    /// Get transaction by hash
+    /// Get native compute transaction result by tx id
     Get {
         #[arg(short, long)]
-        hash: String,
+        tx_id: String,
     },
 }
 
@@ -380,7 +360,6 @@ async fn main() -> Result<()> {
             rpc_network_id,
             rpc_coinbase,
             rpc_auth_token,
-            rpc_enable_eth_write_rpcs,
             rpc_rate_limit_per_minute,
             p2p_listen_addr,
             p2p_listen_port,
@@ -421,7 +400,6 @@ async fn main() -> Result<()> {
                 chain_id,
                 network_id: rpc_network_id,
                 coinbase: rpc_coinbase,
-                enable_eth_write_rpcs: rpc_enable_eth_write_rpcs,
                 auth_token: rpc_auth_token,
                 rate_limit_per_minute: rpc_rate_limit_per_minute,
                 ..api_config.http_rpc
@@ -440,14 +418,6 @@ async fn main() -> Result<()> {
                 "   rpc auth: {}",
                 if api_config.http_rpc.auth_token.is_some() {
                     "enabled"
-                } else {
-                    "disabled"
-                }
-            );
-            println!(
-                "   eth write rpcs: {}",
-                if api_config.http_rpc.enable_eth_write_rpcs {
-                    "enabled (dev)"
                 } else {
                     "disabled"
                 }
@@ -550,7 +520,6 @@ fn expand_data_dir(input: &str) -> String {
 fn parse_wallet_scheme(value: &str) -> Result<WalletScheme> {
     match value.to_ascii_lowercase().as_str() {
         "ed25519" => Ok(WalletScheme::Ed25519),
-        "secp256k1" | "secp" | "ecdsa" => Ok(WalletScheme::Secp256k1),
         other => anyhow::bail!("unsupported wallet scheme: {other}"),
     }
 }
