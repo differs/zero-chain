@@ -215,13 +215,13 @@ set -e
 echo "🚀 启动 ZeroChain 开发网络"
 
 # 检查构建
-if [ ! -f "target/release/zerocchain" ]; then
+if [ ! -f "target/release/zerochain" ]; then
     echo "📦 构建项目..."
     cargo build --release
 fi
 
 # 创建数据目录
-DATA_DIR="${HOME}/.zerocchain/devnet"
+DATA_DIR="${HOME}/.zerochain/devnet"
 mkdir -p "$DATA_DIR"
 
 # 生成配置文件
@@ -253,7 +253,7 @@ echo "✅ 配置文件已创建：$DATA_DIR/config.toml"
 
 # 启动节点
 echo "🔗 启动节点..."
-./target/release/zerocchain run --config "$DATA_DIR/config.toml" --datadir "$DATA_DIR"
+./target/release/zerochain run --config "$DATA_DIR/config.toml" --datadir "$DATA_DIR"
 EOF
 
 chmod +x scripts/devnet.sh
@@ -268,13 +268,13 @@ set -e
 echo "🌐 启动 ZeroChain 测试网"
 
 # 检查构建
-if [ ! -f "target/release/zerocchain" ]; then
+if [ ! -f "target/release/zerochain" ]; then
     echo "📦 构建项目..."
     cargo build --release
 fi
 
 # 创建数据目录
-DATA_DIR="${HOME}/.zerocchain/testnet"
+DATA_DIR="${HOME}/.zerochain/testnet"
 mkdir -p "$DATA_DIR"
 
 # 测试网配置
@@ -282,8 +282,8 @@ cat > "$DATA_DIR/config.toml" << 'TOML'
 [network]
 port = 30303
 bootnodes = [
-    "enode://testnet-bootnode-1.zerocchain.io:30303",
-    "enode://testnet-bootnode-2.zerocchain.io:30303"
+    "enode://testnet-bootnode-1.zerochain.io:30303",
+    "enode://testnet-bootnode-2.zerochain.io:30303"
 ]
 max_peers = 50
 
@@ -307,7 +307,7 @@ echo "✅ 配置文件已创建：$DATA_DIR/config.toml"
 
 # 启动节点
 echo "🔗 启动节点..."
-./target/release/zerocchain run --config "$DATA_DIR/config.toml" --datadir "$DATA_DIR"
+./target/release/zerochain run --config "$DATA_DIR/config.toml" --datadir "$DATA_DIR"
 EOF
 
 chmod +x scripts/testnet.sh
@@ -383,14 +383,14 @@ cat > docs/GETTING_STARTED.md << 'EOF'
 
 ```bash
 # 克隆仓库
-git clone https://github.com/zerocchain/zero-chain.git
+git clone https://github.com/zerochain/zero-chain.git
 cd zero-chain
 
 # 构建
 cargo build --release
 
 # 验证安装
-./target/release/zerocchain --version
+./target/release/zerochain --version
 ```
 
 ## 快速启动
@@ -402,23 +402,23 @@ cargo build --release
 ./scripts/devnet.sh
 
 # 或手动启动
-./target/release/zerocchain run --dev
+./target/release/zerochain run --dev
 ```
 
 ### 创建账户
 
 ```bash
 # 创建新账户
-./target/release/zerocchain account new
+./target/release/zerochain account new
 
 # 查看账户列表
-./target/release/zerocchain account list
+./target/release/zerochain account list
 ```
 
 ### 发送交易
 
 ```bash
-./target/release/zerocchain transaction send \
+./target/release/zerochain transaction send \
   --from 0xYourAddress \
   --to 0xRecipientAddress \
   --amount 100
@@ -457,7 +457,7 @@ curl -X POST http://localhost:8545 \
 
 - 阅读 [架构文档](../ARCHITECTURE.md)
 - 查看 [API 文档](../docs/API.md)
-- 加入 [Discord 社区](https://discord.gg/zerocchain)
+- 加入 [Discord 社区](https://discord.gg/zerochain)
 EOF
 
 echo "✅ 创建 docs/GETTING_STARTED.md"

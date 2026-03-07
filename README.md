@@ -75,7 +75,7 @@ zero-chain/
 
 ```bash
 # Clone the repository
-git clone https://github.com/zerocchain/zero-chain.git
+git clone https://github.com/zerochain/zero-chain.git
 cd zero-chain
 
 # Build in release mode
@@ -89,30 +89,30 @@ cargo test
 
 ```bash
 # Initialize data directory
-./target/release/zerocchain init
+./target/release/zerochain init
 
 # Run a local node (default profile)
-./target/release/zerocchain --network local run
+./target/release/zerochain --network local run
 
 # Run testnet profile
-./target/release/zerocchain --network testnet run
+./target/release/zerochain --network testnet run
 
 # Run mainnet profile
-./target/release/zerocchain --network mainnet run
+./target/release/zerochain --network mainnet run
 
 # Run a mining node
-./target/release/zerocchain run --mine --coinbase ZER0xYourAddress
+./target/release/zerochain run --mine --coinbase ZER0xYourAddress
 
 # Override chain/network id at runtime
-./target/release/zerocchain --network mainnet run --chain-id 0x276e --rpc-network-id 10086
+./target/release/zerochain --network mainnet run --chain-id 0x276e --rpc-network-id 10086
 
 # Multi-node bootstrap example (P2P)
 # node-1 (bootnode listener)
-./target/release/zerocchain run --http-port 18645 --ws-port 18646 \
+./target/release/zerochain run --http-port 18645 --ws-port 18646 \
   --p2p-listen-addr 0.0.0.0 --p2p-listen-port 30331
 
 # node-2 (connect to node-1)
-./target/release/zerocchain run --http-port 28645 --ws-port 28646 \
+./target/release/zerochain run --http-port 28645 --ws-port 28646 \
   --p2p-listen-addr 0.0.0.0 --p2p-listen-port 30332 \
   --bootnode enode://bootnode1@<node1-ip>:30331
 
@@ -122,7 +122,7 @@ curl -s -H "Content-Type: application/json" \
   http://127.0.0.1:28645
 
 # hardened node baseline (rpc auth+rate limit + p2p dos guardrails)
-./target/release/zerocchain run \
+./target/release/zerochain run \
   --rpc-auth-token "replace-with-long-token" \
   --rpc-rate-limit-per-minute 600 \
   --p2p-ban-duration-secs 600 \
@@ -148,38 +148,38 @@ curl -s -H "Content-Type: application/json" \
 
 ```bash
 # Show help
-zerocchain --help
+zerochain --help
 
 # Create encrypted native wallet (ed25519)
-zerocchain wallet new --name native-1 --scheme ed25519 --passphrase "StrongPassphrase123!"
+zerochain wallet new --name native-1 --scheme ed25519 --passphrase "StrongPassphrase123!"
 
 # Create encrypted EVM wallet (secp256k1)
-zerocchain wallet new --name evm-1 --scheme secp256k1 --passphrase "StrongPassphrase123!"
+zerochain wallet new --name evm-1 --scheme secp256k1 --passphrase "StrongPassphrase123!"
 
 # List wallet accounts
-zerocchain wallet list
+zerochain wallet list
 
 # Sign with passphrase
-zerocchain wallet sign --name native-1 --message "hello" --passphrase "StrongPassphrase123!"
+zerochain wallet sign --name native-1 --message "hello" --passphrase "StrongPassphrase123!"
 
 # Unlock account for temporary session then sign without passphrase
-zerocchain wallet unlock --name native-1 --passphrase "StrongPassphrase123!" --ttl-secs 600
-zerocchain wallet sign --name native-1 --message "hello"
+zerochain wallet unlock --name native-1 --passphrase "StrongPassphrase123!" --ttl-secs 600
+zerochain wallet sign --name native-1 --message "hello"
 
 # Rotate account passphrase
-zerocchain wallet rotate-passphrase --name native-1 --old-passphrase "StrongPassphrase123!" --new-passphrase "NewPassphrase123!"
+zerochain wallet rotate-passphrase --name native-1 --old-passphrase "StrongPassphrase123!" --new-passphrase "NewPassphrase123!"
 
 # Migrate legacy plaintext wallet to encrypted format
-zerocchain wallet migrate-v1 --passphrase "StrongPassphrase123!"
+zerochain wallet migrate-v1 --passphrase "StrongPassphrase123!"
 
 # Get block info
-zerocchain block latest
-zerocchain block get --number 12345
+zerochain block latest
+zerochain block get --number 12345
 ```
 
 ## Configuration
 
-Create `~/.zerocchain/config.toml`:
+Create `~/.zerochain/config.toml`:
 
 ```toml
 [network]
@@ -245,7 +245,7 @@ bash scripts/run_tests.sh
 cd deploy/observability && docker compose up -d
 
 # Run node with OTel export
-zerocchain --otel-enabled --otel-endpoint http://127.0.0.1:4317 --network testnet run
+zerochain --otel-enabled --otel-endpoint http://127.0.0.1:4317 --network testnet run
 ```
 
 See `docs/OBSERVABILITY.md` for details.
@@ -324,7 +324,7 @@ MIT OR Apache-2.0
 
 ## Community
 
-- Website: https://zerocchain.io
+- Website: https://zerochain.io
 - Twitter: @ZeroChain
-- Discord: https://discord.gg/zerocchain
-- Telegram: https://t.me/zerocchain
+- Discord: https://discord.gg/zerochain
+- Telegram: https://t.me/zerochain

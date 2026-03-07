@@ -139,7 +139,7 @@ echo "==> Build explorer frontend"
 (cd "${EXPLORER_FRONTEND_DIR}" && npm ci >/dev/null && npm run build >/dev/null)
 
 echo "==> Start node"
-"${ROOT_DIR}/target/debug/zerocchain" \
+"${ROOT_DIR}/target/debug/zerochain" \
   --data-dir "${TMP_RUN_DIR}/node-data" \
   run \
   --mine \

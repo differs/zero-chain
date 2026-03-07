@@ -41,7 +41,7 @@ curl -X POST http://localhost:8545 \
 CLI 启用：
 
 ```bash
-zerocchain run \
+zerochain run \
   --rpc-auth-token demo-token \
   --rpc-rate-limit-per-minute 600
 ```
@@ -53,12 +53,12 @@ zerocchain run \
 开发联调若需临时兼容，可显式开启：
 
 ```bash
-zerocchain run --rpc-enable-eth-write-rpcs
+zerochain run --rpc-enable-eth-write-rpcs
 ```
 
 ### P2P 发现与同步基线
 
-`zerocchain run` 的 P2P 参数（节选）：
+`zerochain run` 的 P2P 参数（节选）：
 
 - `--p2p-listen-addr`
 - `--p2p-listen-port`
@@ -74,7 +74,7 @@ zerocchain run --rpc-enable-eth-write-rpcs
 
 ### CLI 多网络运行（mainnet/testnet/devnet/local）
 
-`zerocchain run` 已支持按网络 profile 启动：
+`zerochain run` 已支持按网络 profile 启动：
 
 - `--network mainnet`
 - `--network testnet`
@@ -93,10 +93,10 @@ zerocchain run --rpc-enable-eth-write-rpcs
 
 ```bash
 # 启动 testnet
-zerocchain --network testnet run --compute-backend rocksdb --compute-db-path ~/.zerocchain/testnet/compute-db
+zerochain --network testnet run --compute-backend rocksdb --compute-db-path ~/.zerochain/testnet/compute-db
 
 # 启动 mainnet（显式链参数）
-zerocchain --network mainnet run --chain-id 0x276e --rpc-network-id 10086
+zerochain --network mainnet run --chain-id 0x276e --rpc-network-id 10086
 ```
 
 校验规则：
@@ -105,8 +105,8 @@ zerocchain --network mainnet run --chain-id 0x276e --rpc-network-id 10086
 
 CLI 使用建议：
 
-- 生成默认配置：`zerocchain init --data-dir <dir>`（会生成 `<dir>/api-config.json`）
-- 启动并加载配置：`zerocchain --config <dir>/api-config.json run --http-port 8545 --ws-port 8546`
+- 生成默认配置：`zerochain init --data-dir <dir>`（会生成 `<dir>/api-config.json`）
+- 启动并加载配置：`zerochain --config <dir>/api-config.json run --http-port 8545 --ws-port 8546`
 - CLI 参数优先级高于配置文件（例如 `--compute-backend`、`--compute-db-path` 会覆盖配置文件值）
 
 ## 标准 Ethereum 方法

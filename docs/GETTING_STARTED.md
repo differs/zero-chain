@@ -12,14 +12,14 @@
 
 ```bash
 # 克隆仓库
-git clone https://github.com/zerocchain/zero-chain.git
+git clone https://github.com/zerochain/zero-chain.git
 cd zero-chain
 
 # 构建
 cargo build --release
 
 # 验证安装
-./target/release/zerocchain --version
+./target/release/zerochain --version
 ```
 
 ## 快速启动
@@ -31,23 +31,23 @@ cargo build --release
 ./scripts/devnet.sh
 
 # 或手动启动
-./target/release/zerocchain run --dev
+./target/release/zerochain run --dev
 ```
 
 ### 创建账户
 
 ```bash
 # 创建新账户
-./target/release/zerocchain account new
+./target/release/zerochain account new
 
 # 查看账户列表
-./target/release/zerocchain account list
+./target/release/zerochain account list
 ```
 
 ### 发送交易
 
 ```bash
-./target/release/zerocchain transaction send \
+./target/release/zerochain transaction send \
   --from 0xYourAddress \
   --to 0xRecipientAddress \
   --amount 100
@@ -86,4 +86,4 @@ curl -X POST http://localhost:8545 \
 
 - 阅读 [架构文档](../ARCHITECTURE.md)
 - 查看 [API 文档](../docs/API.md)
-- 加入 [Discord 社区](https://discord.gg/zerocchain)
+- 加入 [Discord 社区](https://discord.gg/zerochain)

@@ -7,7 +7,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-BIN_PATH="${ROOT_DIR}/target/debug/zerocchain"
+BIN_PATH="${ROOT_DIR}/target/debug/zerochain"
 LOG_DIR="${ROOT_DIR}/artifacts/p2p-3node-logs"
 TMP_RUN_DIR="$(mktemp -d "${ROOT_DIR}/artifacts/p2p-3node-run.XXXXXX")"
 

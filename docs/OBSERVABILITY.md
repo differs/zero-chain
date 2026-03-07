@@ -2,7 +2,7 @@
 
 本项目当前已支持：
 
-1. **Tracing (OTel)**：`zerocchain` 可将 tracing 导出到 OTLP。
+1. **Tracing (OTel)**：`zerochain` 可将 tracing 导出到 OTLP。
 2. **Metrics (Prometheus text via RPC)**：`zero_getMetrics` 返回 Prometheus 格式文本。
 
 ---
@@ -23,7 +23,7 @@ docker compose up -d
 ## 2) 以 OTel 模式启动节点
 
 ```bash
-zerocchain --otel-enabled --otel-endpoint http://127.0.0.1:4317 --network testnet run
+zerochain --otel-enabled --otel-endpoint http://127.0.0.1:4317 --network testnet run
 ```
 
 你也可以配合脚本：

@@ -7,7 +7,7 @@ license.workspace = true
 description = "ZeroChain CLI and node implementation"
 
 [[bin]]
-name = "zerocchain"
+name = "zerochain"
 path = "src/main.rs"
 
 [dependencies]

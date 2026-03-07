@@ -16,7 +16,7 @@ mod commands;
 
 /// ZeroChain CLI
 #[derive(Parser)]
-#[command(name = "zerocchain")]
+#[command(name = "zerochain")]
 #[command(author = "ZeroChain Team")]
 #[command(version = "0.1.0")]
 #[command(about = "ZeroChain blockchain node and client", long_about = None)]
@@ -26,7 +26,7 @@ struct Cli {
     log_level: String,
 
     /// Data directory
-    #[arg(short, long, default_value = "~/.zerocchain")]
+    #[arg(short, long, default_value = "~/.zerochain")]
     data_dir: String,
 
     /// Network ID
@@ -490,7 +490,7 @@ fn init_otel_tracer(endpoint: &str) -> Result<opentelemetry_sdk::trace::Tracer> 
         .tracing()
         .with_exporter(exporter)
         .with_trace_config(opentelemetry_sdk::trace::Config::default().with_resource(
-            opentelemetry_sdk::Resource::new(vec![KeyValue::new("service.name", "zerocchain")]),
+            opentelemetry_sdk::Resource::new(vec![KeyValue::new("service.name", "zerochain")]),
         ))
         .install_batch(opentelemetry_sdk::runtime::Tokio)
         .map_err(|e| anyhow::anyhow!("failed to init otel tracer: {e}"))?;

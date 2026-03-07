@@ -489,7 +489,7 @@ fn load_wallet_file(path: &Path) -> Result<WalletFile> {
     let version = v.get("version").and_then(|x| x.as_u64()).unwrap_or(1);
     if version == 1 {
         anyhow::bail!(
-            "wallet format v1 detected. Run: zerocchain wallet migrate-v1 --passphrase <new-passphrase>"
+            "wallet format v1 detected. Run: zerochain wallet migrate-v1 --passphrase <new-passphrase>"
         );
     }
 

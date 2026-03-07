@@ -3,8 +3,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BIN="${ROOT_DIR}/target/release/zerocchain"
-BASE_DIR="${HOME}/.zerocchain/testnet"
+BIN="${ROOT_DIR}/target/release/zerochain"
+BASE_DIR="${HOME}/.zerochain/testnet"
 LOG_DIR="${BASE_DIR}/logs"
 PID_DIR="${BASE_DIR}/pids"
 
