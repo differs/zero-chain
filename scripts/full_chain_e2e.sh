@@ -145,6 +145,7 @@ echo "==> Start node"
   --mine \
   --coinbase "${COINBASE_NATIVE}" \
   --rpc-coinbase "${COINBASE_NATIVE}" \
+  --rpc-enable-eth-write-rpcs \
   --http-port "${NODE_RPC_PORT}" \
   --ws-port "${NODE_WS_PORT}" \
   >"${NODE_LOG}" 2>&1 &

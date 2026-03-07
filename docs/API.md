@@ -46,6 +46,16 @@ zerocchain run \
   --rpc-rate-limit-per-minute 600
 ```
 
+### Ethereum 写接口策略
+
+默认情况下，`eth_sendTransaction` / `eth_sendRawTransaction` 处于禁用状态（避免 EVM 写路径主导主链共识）。
+
+开发联调若需临时兼容，可显式开启：
+
+```bash
+zerocchain run --rpc-enable-eth-write-rpcs
+```
+
 ### P2P 发现与同步基线
 
 `zerocchain run` 的 P2P 参数（节选）：

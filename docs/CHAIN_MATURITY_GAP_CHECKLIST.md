@@ -93,6 +93,7 @@
 11. 新增 P2P 治理能力：每 IP 连接上限、连接频控、gossip 频控、黑名单持久化、bootnode 自动重连。
 12. 新增真实同步协议流：`GET_HEADERS/HEADERS`、`GET_BLOCK_BODY/BLOCK_BODY`、`GET_STATE_SNAPSHOT/STATE_SNAPSHOT` 三阶段校验与推进。
 13. 新增 RPC 安全基线：静态 token 鉴权（Bearer / `x-zero-token`）+ 每客户端每分钟限流。
+14. `eth_sendTransaction` / `eth_sendRawTransaction` 默认禁用（仅可通过显式开关启用开发兼容），避免 EVM 写路径与主链演进目标冲突。
 
 ## 8. 下一批建议立即整改（按优先级）
 

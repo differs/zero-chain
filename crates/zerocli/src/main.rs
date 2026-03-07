@@ -97,6 +97,10 @@ enum Commands {
         #[arg(long)]
         rpc_auth_token: Option<String>,
 
+        /// Enable Ethereum write RPCs (`eth_sendTransaction` / `eth_sendRawTransaction`) for dev compatibility.
+        #[arg(long, default_value_t = false)]
+        rpc_enable_eth_write_rpcs: bool,
+
         /// RPC rate limit budget per client per minute, 0 to disable
         #[arg(long, default_value = "600")]
         rpc_rate_limit_per_minute: u32,
@@ -339,6 +343,7 @@ async fn main() -> Result<()> {
             rpc_network_id,
             rpc_coinbase,
             rpc_auth_token,
+            rpc_enable_eth_write_rpcs,
             rpc_rate_limit_per_minute,
             p2p_listen_addr,
             p2p_listen_port,
@@ -379,6 +384,7 @@ async fn main() -> Result<()> {
                 chain_id,
                 network_id: rpc_network_id,
                 coinbase: rpc_coinbase,
+                enable_eth_write_rpcs: rpc_enable_eth_write_rpcs,
                 auth_token: rpc_auth_token,
                 rate_limit_per_minute: rpc_rate_limit_per_minute,
                 ..api_config.http_rpc
@@ -397,6 +403,14 @@ async fn main() -> Result<()> {
                 "   rpc auth: {}",
                 if api_config.http_rpc.auth_token.is_some() {
                     "enabled"
+                } else {
+                    "disabled"
+                }
+            );
+            println!(
+                "   eth write rpcs: {}",
+                if api_config.http_rpc.enable_eth_write_rpcs {
+                    "enabled (dev)"
                 } else {
                     "disabled"
                 }

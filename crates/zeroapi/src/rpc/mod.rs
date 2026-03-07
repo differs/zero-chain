@@ -135,6 +135,9 @@ pub struct RpcConfig {
     pub network_id: u64,
     /// Coinbase returned by eth_coinbase.
     pub coinbase: String,
+    /// Allow state-mutating Ethereum write RPCs (`eth_sendTransaction`, `eth_sendRawTransaction`).
+    /// Disabled by default for yellowpaper-aligned mainnet behavior.
+    pub enable_eth_write_rpcs: bool,
     /// Optional static auth token for all JSON-RPC requests.
     pub auth_token: Option<String>,
     /// Per-client request budget per rolling minute. `0` means disabled.
@@ -178,6 +181,7 @@ impl Default for RpcConfig {
             chain_id: 10086,
             network_id: 10086,
             coinbase: "ZER0x0000000000000000000000000000000000000000".to_string(),
+            enable_eth_write_rpcs: false,
             auth_token: None,
             rate_limit_per_minute: 600,
         }
@@ -739,10 +743,25 @@ impl RpcApi {
         Ok(serde_json::json!(null))
     }
 
+    fn ensure_eth_write_rpc_enabled(&self) -> Result<(), RpcErrorObject> {
+        if self.config.enable_eth_write_rpcs {
+            return Ok(());
+        }
+
+        Err(RpcErrorObject {
+            code: -32010,
+            message: "Ethereum write RPCs are disabled".to_string(),
+            data: Some(serde_json::json!({
+                "hint": "enable --rpc-enable-eth-write-rpcs for development compatibility"
+            })),
+        })
+    }
+
     fn eth_send_raw_transaction(
         &self,
         params: Option<Vec<serde_json::Value>>,
     ) -> Result<serde_json::Value, RpcErrorObject> {
+        self.ensure_eth_write_rpc_enabled()?;
         let params = params.ok_or(RpcErrorObject::invalid_params("Missing params".to_string()))?;
 
         let tx_data = params
@@ -769,6 +788,7 @@ impl RpcApi {
         &self,
         params: Option<Vec<serde_json::Value>>,
     ) -> Result<serde_json::Value, RpcErrorObject> {
+        self.ensure_eth_write_rpc_enabled()?;
         let params = params.ok_or(RpcErrorObject::invalid_params("Missing params".to_string()))?;
         let tx = params
             .first()
@@ -2630,7 +2650,32 @@ mod tests {
 
     #[test]
     fn test_eth_send_transaction_moves_balance_between_addresses() {
-        let api = build_test_api_with_persistent_compute();
+        let account_manager = Arc::new(InMemoryAccountManager::new());
+        let tx_pool = Arc::new(TransactionPool::new(
+            TxPoolConfig::default(),
+            account_manager,
+        ));
+        let state_db = Arc::new(StateDb::new(Hash::zero()));
+        let db = Arc::new(MemDatabase::new());
+        let persistent_store = Arc::new(ComputeStore::new(db));
+
+        let domains = Arc::new(InMemoryDomainRegistry::new());
+        domains.upsert_domain(DomainConfig {
+            domain_id: DomainId(0),
+            name: "main".to_string(),
+            vm: "wasm".to_string(),
+            public: true,
+        });
+        let api = RpcApi::with_persistent_compute(
+            RpcConfig {
+                enable_eth_write_rpcs: true,
+                ..RpcConfig::default()
+            },
+            state_db,
+            tx_pool,
+            persistent_store,
+            domains,
+        );
         let from = parse_address("0x1111111111111111111111111111111111111111").unwrap();
         let to = parse_address("0x2222222222222222222222222222222222222222").unwrap();
 
@@ -2656,6 +2701,19 @@ mod tests {
         assert_eq!(api.state_db.get_balance(&from).as_u64(), 8_000);
         assert_eq!(api.state_db.get_nonce(&from), 1);
         assert_eq!(api.state_db.get_balance(&to).as_u64(), 1_000);
+    }
+
+    #[test]
+    fn test_eth_send_transaction_rejected_when_eth_write_disabled() {
+        let api = build_test_api_with_persistent_compute();
+        let err = api
+            .eth_send_transaction(Some(vec![serde_json::json!({
+                "from": "ZER0x1111111111111111111111111111111111111111",
+                "to": "ZER0x2222222222222222222222222222222222222222",
+                "value": "0x1"
+            })]))
+            .expect_err("eth write should be disabled by default");
+        assert_eq!(err.code, -32010);
     }
 
     #[test]

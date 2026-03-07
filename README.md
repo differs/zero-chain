@@ -140,6 +140,7 @@ curl -s -H "Content-Type: application/json" \
 # discovery v5 / sync baseline:
 # - discovery 已接入 discv5(Kademlia) + ENR 事件流
 # - sync 已启用 header -> body -> state 三阶段请求响应
+# - eth_sendTransaction / eth_sendRawTransaction 默认禁用（如需联调兼容可加 --rpc-enable-eth-write-rpcs）
 # 提示：--bootnode 同时支持 enode:// 与 enr:...（优先用 enr:... 参与 discv5）
 ```
 
