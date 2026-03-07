@@ -37,6 +37,10 @@ struct Cli {
     #[arg(long, default_value = "local")]
     network: String,
 
+    /// JSON-RPC URL used by account/transaction query commands
+    #[arg(long)]
+    rpc_url: Option<String>,
+
     /// Optional node config file (JSON)
     #[arg(long)]
     config: Option<String>,
@@ -262,7 +266,7 @@ enum WalletAction {
 }
 
 #[derive(Subcommand, Debug)]
-enum AccountAction {
+pub(crate) enum AccountAction {
     /// Create new account
     New,
     /// List accounts
@@ -275,7 +279,7 @@ enum AccountAction {
 }
 
 #[derive(Subcommand, Debug)]
-enum TransactionAction {
+pub(crate) enum TransactionAction {
     /// Send transaction
     Send {
         #[arg(short, long)]
@@ -307,6 +311,10 @@ enum BlockAction {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let data_dir = expand_data_dir(&cli.data_dir);
+    let rpc_url = cli
+        .rpc_url
+        .clone()
+        .unwrap_or_else(|| default_rpc_url_for_network(&cli.network));
 
     // Initialize logging / tracing
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
@@ -453,10 +461,10 @@ async fn main() -> Result<()> {
             println!("Default API config written to {}", cfg_path);
         }
         Some(Commands::Account { action }) => {
-            commands::account::handle_account(format!("{:?}", action)).await?;
+            commands::account::handle_account(action, &rpc_url).await?;
         }
         Some(Commands::Transaction { action }) => {
-            commands::transaction::handle_transaction(format!("{:?}", action)).await?;
+            commands::transaction::handle_transaction(action, &rpc_url).await?;
         }
         Some(Commands::Block { action }) => {
             commands::block::handle_block(format!("{:?}", action)).await?;
@@ -660,5 +668,14 @@ fn parse_u64_decimal_or_hex(value: &str) -> Result<u64> {
     } else {
         v.parse::<u64>()
             .map_err(|e| anyhow::anyhow!("invalid integer '{value}': {e}"))
+    }
+}
+
+fn default_rpc_url_for_network(network: &str) -> String {
+    match network.to_ascii_lowercase().as_str() {
+        "testnet" => "http://127.0.0.1:18545".to_string(),
+        "devnet" => "http://127.0.0.1:28545".to_string(),
+        "mainnet" | "local" => "http://127.0.0.1:8545".to_string(),
+        _ => "http://127.0.0.1:8545".to_string(),
     }
 }

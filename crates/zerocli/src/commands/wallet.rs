@@ -115,7 +115,12 @@ struct SessionFile {
 struct UnlockedSession {
     account_name: String,
     expires_unix_secs: u64,
-    key_hash_hex: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    session_token_hash_hex: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    encrypted_secret: Option<EncryptedSecret>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    key_hash_hex: Option<String>,
 }
 
 pub async fn handle_wallet(data_dir: &str, cmd: WalletCommand) -> Result<()> {
@@ -297,16 +302,15 @@ pub async fn handle_wallet(data_dir: &str, cmd: WalletCommand) -> Result<()> {
         } => {
             let account = find_account(&wallet, &name)?;
             let secret = decrypt_secret(&account.encrypted_private_key, &passphrase)?;
-            save_unlocked_session(data_dir, &name, &secret, ttl_secs)?;
+            let session_token = save_unlocked_session(data_dir, &name, &secret, ttl_secs)?;
             let env_name = format!(
                 "ZEROCHAIN_WALLET_UNLOCK_{}",
                 name.to_uppercase().replace('-', "_")
             );
             println!("✅ account unlocked: {} (ttl={}s)", name, ttl_secs);
             println!(
-                "Set shell session key to enable signing without passphrase:\n  export {}=0x{}",
-                env_name,
-                hex::encode(secret)
+                "Set shell session token to enable signing without passphrase:\n  export {}={}",
+                env_name, session_token
             );
         }
         WalletCommand::MigrateV1 { .. } => unreachable!("handled before wallet load"),
@@ -622,20 +626,26 @@ fn save_unlocked_session(
     name: &str,
     secret: &[u8; 32],
     ttl_secs: u64,
-) -> Result<()> {
+) -> Result<String> {
     let path = session_file_path(data_dir);
     let mut session_file = load_session_file(&path)?;
     prune_expired_sessions(&mut session_file);
 
-    let key_hash_hex = hex::encode(keccak256(secret));
+    let session_token = generate_session_token();
+    let token_bytes = parse_fixed_32_hex(&session_token)?;
+    let token_hash_hex = hex::encode(keccak256(&token_bytes));
+    let encrypted_secret = encrypt_secret(secret, &session_token)?;
 
     session_file.sessions.retain(|s| s.account_name != name);
     session_file.sessions.push(UnlockedSession {
         account_name: name.to_string(),
         expires_unix_secs: now_unix_secs().saturating_add(ttl_secs),
-        key_hash_hex,
+        session_token_hash_hex: Some(token_hash_hex),
+        encrypted_secret: Some(encrypted_secret),
+        key_hash_hex: None,
     });
-    save_session_file(&path, &session_file)
+    save_session_file(&path, &session_file)?;
+    Ok(session_token)
 }
 
 fn load_unlocked_session(data_dir: &str, name: &str) -> Result<[u8; 32]> {
@@ -649,8 +659,8 @@ fn load_unlocked_session(data_dir: &str, name: &str) -> Result<[u8; 32]> {
             env_name
         )
     })?;
-    let secret = parse_fixed_32_hex(&env_secret)
-        .map_err(|_| anyhow::anyhow!("invalid unlocked session secret in env: {}", env_name))?;
+    let token = parse_fixed_32_hex(&env_secret)
+        .map_err(|_| anyhow::anyhow!("invalid unlocked session token in env: {}", env_name))?;
 
     let path = session_file_path(data_dir);
     let mut session_file = load_session_file(&path)?;
@@ -665,13 +675,39 @@ fn load_unlocked_session(data_dir: &str, name: &str) -> Result<[u8; 32]> {
         })?
         .clone();
 
-    let secret_hash = hex::encode(keccak256(&secret));
-    if secret_hash != sess.key_hash_hex {
-        anyhow::bail!("unlocked session key mismatch or stale env secret");
+    if let Some(token_hash_hex) = sess.session_token_hash_hex.as_deref() {
+        let actual_token_hash = hex::encode(keccak256(&token));
+        if actual_token_hash != token_hash_hex {
+            anyhow::bail!("unlocked session token mismatch or stale env token");
+        }
+        let encrypted_secret = sess
+            .encrypted_secret
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("corrupted unlock session: encrypted secret missing"))?;
+        let secret = decrypt_secret(encrypted_secret, &env_secret).map_err(|_| {
+            anyhow::anyhow!("failed to decrypt unlocked session secret, run wallet unlock again")
+        })?;
+        save_session_file(&path, &session_file)?;
+        return Ok(secret);
     }
 
-    save_session_file(&path, &session_file)?;
-    Ok(secret)
+    // Backward compatibility for old session format where env var stored the raw secret.
+    if let Some(legacy_key_hash) = sess.key_hash_hex.as_deref() {
+        let secret_hash = hex::encode(keccak256(&token));
+        if secret_hash != legacy_key_hash {
+            anyhow::bail!("unlocked session key mismatch or stale env secret");
+        }
+        save_session_file(&path, &session_file)?;
+        return Ok(token);
+    }
+
+    anyhow::bail!("invalid unlock session; run wallet unlock again");
+}
+
+fn generate_session_token() -> String {
+    let mut token = [0u8; 32];
+    OsRng.fill_bytes(&mut token);
+    format!("0x{}", hex::encode(token))
 }
 
 fn prune_expired_sessions(session_file: &mut SessionFile) {
