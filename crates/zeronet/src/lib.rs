@@ -304,19 +304,13 @@ impl NetworkService {
     /// Broadcast transaction to all peers
     pub fn broadcast_transaction(&self, tx_hash: Hash) {
         let message = ProtocolMessage::NewTransaction(tx_hash);
-
-        for peer in self.peer_manager.get_active_peers() {
-            let _ = peer.send(message.clone());
-        }
+        self.broadcast_with_backpressure(message);
     }
 
     /// Broadcast block to all peers
     pub fn broadcast_block(&self, block: zerocore::block::Block) {
         let message = ProtocolMessage::NewBlock(Box::new(block));
-
-        for peer in self.peer_manager.get_active_peers() {
-            let _ = peer.send(message.clone());
-        }
+        self.broadcast_with_backpressure(message);
     }
 
     /// Get connected peer count
@@ -347,6 +341,26 @@ impl NetworkService {
             set_global_peers(self.peer_manager.get_active_peer_infos());
         }
         result
+    }
+
+    fn broadcast_with_backpressure(&self, message: ProtocolMessage) {
+        let mut dropped = Vec::new();
+        for peer in self.peer_manager.get_active_peers() {
+            if peer.send(message.clone()).is_err() {
+                dropped.push(peer.info.peer_id.clone());
+            }
+        }
+
+        if dropped.is_empty() {
+            return;
+        }
+
+        for peer_id in dropped {
+            let _ = self.peer_manager.remove_peer(&peer_id);
+            tracing::warn!("dropped overloaded peer from gossip path: {}", peer_id);
+        }
+        set_global_peer_count(self.peer_manager.peer_count());
+        set_global_peers(self.peer_manager.get_active_peer_infos());
     }
 
     async fn start_listening(&self) -> Result<()> {
@@ -1022,10 +1036,11 @@ async fn write_protocol_message(
             Some(format!("ZERO/GET_STATE_SNAPSHOT {}\n", block_number))
         }
         ProtocolMessage::SyncStateSnapshot(snapshot) => Some(format!(
-            "ZERO/STATE_SNAPSHOT {} {} {}\n",
+            "ZERO/STATE_SNAPSHOT {} {} {} {}\n",
             snapshot.block_number,
             hash_to_hex(&snapshot.state_root),
-            snapshot.account_count
+            snapshot.account_count,
+            hex::encode(&snapshot.state_proof)
         )),
         ProtocolMessage::Transactions(_) | ProtocolMessage::Block(_) => None,
     };
@@ -1146,10 +1161,16 @@ fn parse_sync_state_snapshot(raw: &str) -> std::result::Result<SyncStateSnapshot
         .ok_or_else(|| "missing state snapshot account_count".to_string())?
         .parse::<u64>()
         .map_err(|e| format!("invalid state snapshot account_count: {e}"))?;
+    let state_proof = match parts.next() {
+        Some(raw_proof) => hex::decode(raw_proof)
+            .map_err(|e| format!("invalid state snapshot state_proof hex: {e}"))?,
+        None => Vec::new(),
+    };
     Ok(SyncStateSnapshot {
         block_number,
         state_root,
         account_count,
+        state_proof,
     })
 }
 

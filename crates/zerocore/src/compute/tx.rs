@@ -444,5 +444,5 @@ fn encode_ownership(out: &mut Vec<u8>, owner: &Ownership) {
 }
 
 fn resource_map_is_canonical(resources: &ResourceMap) -> bool {
-    resources.windows(2).all(|pair| pair[0].0 <= pair[1].0)
+    resources.windows(2).all(|pair| pair[0].0 < pair[1].0)
 }

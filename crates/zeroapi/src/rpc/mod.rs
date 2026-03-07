@@ -2694,6 +2694,7 @@ mod tests {
             "chain_id": 10086,
             "network_id": 1,
             "command": "Transfer",
+            "nonce": 1,
             "input_set": [format!("0x{}", hex::encode([0x92u8; 32]))],
             "read_set": [],
             "output_proposals": [{
@@ -3368,6 +3369,7 @@ mod tests {
             "chain_id": 10086,
             "network_id": 1,
             "command": "Transfer",
+            "nonce": 2,
             "input_set": [format!("0x{}", hex::encode([0xD2u8; 32]))],
             "read_set": [],
             "output_proposals": [{
@@ -3464,6 +3466,7 @@ mod tests {
             "chain_id": 10086,
             "network_id": 1,
             "command": "Transfer",
+            "nonce": 3,
             "input_set": [format!("0x{}", hex::encode([0xF2u8; 32]))],
             "read_set": [],
             "output_proposals": [{
@@ -3540,6 +3543,7 @@ mod tests {
             "chain_id": 10086,
             "network_id": 1,
             "command": "Transfer",
+            "nonce": 4,
             "input_set": [format!("0x{}", hex::encode([0xABu8; 32]))],
             "read_set": [],
             "output_proposals": [{

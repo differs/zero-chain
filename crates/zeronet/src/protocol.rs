@@ -23,6 +23,8 @@ pub struct SyncStateSnapshot {
     pub block_number: u64,
     pub state_root: Hash,
     pub account_count: u64,
+    /// Opaque proof bytes for state-root verification.
+    pub state_proof: Vec<u8>,
 }
 
 /// Protocol message types

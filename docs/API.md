@@ -421,6 +421,13 @@ Witness 签名格式支持两种：
   - `payload`、`deadline_unix_secs`
   - `chain_id`、`network_id`
   - `witness.threshold`
+- 合法性规则（P0）：
+  - 当 `command != Mint` 且设置了 `chain_id` 或 `network_id` 时，`nonce` 必填且 `> 0`
+  - `metadata` 键必须唯一且非空（键值长度受限）
+  - `Mint` 交易 `fee` 必须为 `0`
+- `lock` 脚本执行入口（P0 最小子集）：
+  - 当前支持表达式：`ALLOW`、`REQUIRE_SIG`、`REQUIRE_SECP256K1`、`REQUIRE_ED25519`、`PAYLOAD_EQ:<hex>`
+  - 失败时返回授权类错误
 - 节点校验规则：`tx_id == keccak256(signing_preimage)`（不满足则返回 `tx_id_mismatch`）
 - 为兼容旧请求，`chain_id`/`network_id` 可省略；省略时按 `null` 参与签名 preimage。
 

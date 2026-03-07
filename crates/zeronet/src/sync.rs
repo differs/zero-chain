@@ -3,6 +3,7 @@
 use crate::protocol::{ProtocolMessage, SyncBlockBody, SyncHeader, SyncStateSnapshot};
 use crate::{NetworkError, Result};
 use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -14,8 +15,31 @@ const SYNC_TICK_SECS: u64 = 2;
 const SYNC_RESPONSE_TIMEOUT_SECS: u64 = 3;
 const SYNC_BATCH_LIMIT: u64 = 8;
 
+/// Serializable sync checkpoint for restart recovery.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncCheckpoint {
+    pub local_height: u64,
+    pub state: SyncState,
+}
+
+/// Pluggable state-proof verifier used by snapshot sync.
+pub trait StateProofVerifier: Send + Sync {
+    fn verify(&self, header: &SyncHeader, snapshot: &SyncStateSnapshot) -> bool;
+}
+
+/// Deterministic verifier used by current sync protocol.
+#[derive(Debug, Default, Clone)]
+pub struct DeterministicStateProofVerifier;
+
+impl StateProofVerifier for DeterministicStateProofVerifier {
+    fn verify(&self, header: &SyncHeader, snapshot: &SyncStateSnapshot) -> bool {
+        snapshot.state_root == derive_state_root(&header.hash)
+            && snapshot.state_proof == derive_state_proof(&header.hash, snapshot.block_number)
+    }
+}
+
 /// Sync state
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SyncState {
     /// Not syncing
     Idle,
@@ -51,10 +75,18 @@ pub struct SyncManager {
     local_height: Arc<RwLock<u64>>,
     inbound_tx: mpsc::Sender<SyncInbound>,
     inbound_rx: RwLock<Option<mpsc::Receiver<SyncInbound>>>,
+    state_proof_verifier: Arc<dyn StateProofVerifier>,
 }
 
 impl SyncManager {
     pub fn new(peer_manager: Arc<crate::PeerManager>) -> Self {
+        Self::new_with_verifier(peer_manager, Arc::new(DeterministicStateProofVerifier))
+    }
+
+    pub fn new_with_verifier(
+        peer_manager: Arc<crate::PeerManager>,
+        state_proof_verifier: Arc<dyn StateProofVerifier>,
+    ) -> Self {
         let (inbound_tx, inbound_rx) = mpsc::channel(512);
         Self {
             state: Arc::new(RwLock::new(SyncState::Idle)),
@@ -64,6 +96,7 @@ impl SyncManager {
             local_height: Arc::new(RwLock::new(0)),
             inbound_tx,
             inbound_rx: RwLock::new(Some(inbound_rx)),
+            state_proof_verifier,
         }
     }
 
@@ -77,6 +110,18 @@ impl SyncManager {
 
     pub fn set_local_height(&self, height: u64) {
         *self.local_height.write() = height;
+    }
+
+    pub fn export_checkpoint(&self) -> SyncCheckpoint {
+        SyncCheckpoint {
+            local_height: self.local_height(),
+            state: self.state(),
+        }
+    }
+
+    pub fn import_checkpoint(&self, checkpoint: &SyncCheckpoint) {
+        *self.local_height.write() = checkpoint.local_height;
+        *self.state.write() = checkpoint.state.clone();
     }
 
     pub fn bump_local_height(&self, delta: u64) -> u64 {
@@ -109,6 +154,7 @@ impl SyncManager {
             block_number,
             state_root: derive_state_root(&block_hash),
             account_count: synthetic_account_count(block_number),
+            state_proof: derive_state_proof(&block_hash, block_number),
         })
     }
 
@@ -152,6 +198,7 @@ impl SyncManager {
         let peer_manager = self.peer_manager.clone();
         let running = self.running.clone();
         let local_height = self.local_height.clone();
+        let state_proof_verifier = self.state_proof_verifier.clone();
 
         let task = tokio::spawn(async move {
             let mut retries = 0u64;
@@ -320,10 +367,10 @@ impl SyncManager {
                     }
                 };
 
-                if snapshot.state_root != derive_state_root(&last_header.hash) {
+                if !state_proof_verifier.verify(last_header, &snapshot) {
                     retries = retries.saturating_add(1);
                     *state.write() = SyncState::Recovering {
-                        reason: "state_root_mismatch".to_string(),
+                        reason: "state_proof_verification_failed".to_string(),
                         retries,
                     };
                     peer_manager.update_score(&peer_id, -20);
@@ -551,6 +598,14 @@ pub(crate) fn derive_state_root(block_hash: &Hash) -> Hash {
     Hash::from_bytes(zerocore::crypto::keccak256(&data))
 }
 
+pub(crate) fn derive_state_proof(block_hash: &Hash, block_number: u64) -> Vec<u8> {
+    let mut data = Vec::with_capacity(64);
+    data.extend_from_slice(b"ZERO-SYNC-P");
+    data.extend_from_slice(block_hash.as_bytes());
+    data.extend_from_slice(&block_number.to_be_bytes());
+    zerocore::crypto::keccak256(&data).to_vec()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -575,6 +630,10 @@ mod tests {
             .expect("state snapshot response");
         assert_eq!(snapshot.block_number, 4);
         assert_eq!(snapshot.state_root, derive_state_root(&headers[2].hash));
+        assert_eq!(
+            snapshot.state_proof,
+            derive_state_proof(&headers[2].hash, snapshot.block_number)
+        );
     }
 
     #[tokio::test]
@@ -624,6 +683,7 @@ mod tests {
                                 block_number,
                                 state_root: derive_state_root(&block_hash),
                                 account_count: 42,
+                                state_proof: derive_state_proof(&block_hash, block_number),
                             },
                         );
                     }
@@ -646,5 +706,28 @@ mod tests {
         sync.stop().await.unwrap();
         responder.abort();
         assert!(sync.local_height() >= 3);
+    }
+
+    #[test]
+    fn checkpoint_roundtrip_restores_height_and_state() {
+        let manager = SyncManager::new(Arc::new(crate::PeerManager::new(4)));
+        manager.set_local_height(12);
+        manager.import_checkpoint(&SyncCheckpoint {
+            local_height: 12,
+            state: SyncState::Recovering {
+                reason: "network_gap".to_string(),
+                retries: 3,
+            },
+        });
+
+        let checkpoint = manager.export_checkpoint();
+        assert_eq!(checkpoint.local_height, 12);
+        assert_eq!(
+            checkpoint.state,
+            SyncState::Recovering {
+                reason: "network_gap".to_string(),
+                retries: 3
+            }
+        );
     }
 }
