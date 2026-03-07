@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::oneshot;
 use tower_http::cors::{Any, CorsLayer};
-use zerocore::account::{InMemoryAccountManager, U256};
+use zerocore::account::{Account, AccountState, InMemoryAccountManager, U256};
 use zerocore::block::{create_genesis_block, Block, BlockHeader};
 use zerocore::compute::domain::DomainRegistry;
 use zerocore::compute::{
@@ -534,7 +534,7 @@ impl RpcApi {
             .as_ref()
             .map(|b| b.header.number)
             .unwrap_or(U256::zero());
-        Ok(serde_json::json!(format!("0x{:x}", number.as_u64())))
+        Ok(serde_json::json!(format_u256_hex(number)))
     }
 
     fn eth_get_balance(
@@ -553,7 +553,7 @@ impl RpcApi {
 
         let balance = self.state_db.get_balance(&address);
 
-        Ok(serde_json::json!(format!("0x{:x}", balance.as_u64())))
+        Ok(serde_json::json!(format_u256_hex(balance)))
     }
 
     fn eth_get_storage_at(
@@ -780,7 +780,7 @@ impl RpcApi {
         // Would get full account info
         Ok(serde_json::json!({
             "address": address_str,
-            "balance": format!("0x{:x}", self.state_db.get_balance(&address).as_u64()),
+            "balance": format_u256_hex(self.state_db.get_balance(&address)),
             "nonce": format!("0x{:x}", self.state_db.get_nonce(&address)),
         }))
     }
@@ -1131,6 +1131,7 @@ impl RpcApi {
             uncles: Vec::new(),
         };
         *self.latest_block.write() = Some(block);
+        self.credit_block_reward(header.coinbase, header.number);
         RPC_METRICS
             .latest_block_height
             .set(header.number.as_u64() as i64);
@@ -1174,6 +1175,29 @@ impl RpcApi {
             .as_ref()
             .filter(|block| block.header.number.as_u64() == number)
             .cloned()
+    }
+
+    fn credit_block_reward(&self, coinbase: Address, block_number: U256) {
+        let reward = block_reward_for_height(block_number.as_u64());
+        if reward.is_zero() {
+            return;
+        }
+
+        let now = current_unix_secs();
+        let mut account = self
+            .state_db
+            .get_account(&coinbase)
+            .unwrap_or_else(|| Account {
+                address: coinbase,
+                state: AccountState::Active,
+                created_at: now,
+                updated_at: now,
+                ..Account::default()
+            });
+
+        account.balance = account.balance.saturating_add(reward);
+        account.updated_at = now;
+        self.state_db.insert_account(coinbase, account);
     }
 
     fn zero_import_block(
@@ -1510,6 +1534,32 @@ fn parse_object_id(s: &str) -> Result<ObjectId, RpcErrorObject> {
 
 fn parse_output_id(s: &str) -> Result<OutputId, RpcErrorObject> {
     Ok(OutputId(parse_hash(s)?))
+}
+
+fn block_reward_for_height(block_number: u64) -> U256 {
+    let mut reward = zerocore::INITIAL_BLOCK_REWARD;
+    let halving_count = block_number / zerocore::HALVING_PERIOD;
+    for _ in 0..halving_count {
+        reward /= 2;
+    }
+    U256::from_u128(reward)
+}
+
+fn format_u256_hex(value: U256) -> String {
+    let bytes = value.to_big_endian();
+    let first_non_zero = bytes.iter().position(|b| *b != 0);
+    match first_non_zero {
+        Some(idx) => {
+            let encoded = hex::encode(&bytes[idx..]);
+            let trimmed = encoded.trim_start_matches('0');
+            if trimmed.is_empty() {
+                "0x0".to_string()
+            } else {
+                format!("0x{}", trimmed)
+            }
+        }
+        None => "0x0".to_string(),
+    }
 }
 
 fn block_to_zero_block_json(block: &Block) -> serde_json::Value {
@@ -2130,6 +2180,69 @@ mod tests {
     }
 
     #[test]
+    fn test_zero_submit_work_credits_coinbase_balance() {
+        let api = build_test_api_with_persistent_compute();
+        let work = api.zero_get_work(None).expect("work should be available");
+        let work_id = work
+            .get("work_id")
+            .and_then(|v| v.as_str())
+            .expect("work_id missing")
+            .to_string();
+        let prev_hash = work
+            .get("prev_hash")
+            .and_then(|v| v.as_str())
+            .expect("prev_hash missing")
+            .to_string();
+        let height = work
+            .get("height")
+            .and_then(|v| v.as_u64())
+            .expect("height missing");
+
+        {
+            let mut jobs = api.mining_jobs.write();
+            if let Some(job) = jobs.get_mut(&work_id) {
+                job.target_leading_zero_bytes = 0;
+            }
+        }
+
+        let prev_hash_bytes =
+            hex::decode(prev_hash.strip_prefix("0x").unwrap_or(&prev_hash)).expect("prev hash hex");
+        let nonce = 123u64;
+        let mut data = Vec::new();
+        data.extend_from_slice(&prev_hash_bytes);
+        data.extend_from_slice(&height.to_be_bytes());
+        data.extend_from_slice(&nonce.to_be_bytes());
+        let digest = zerocore::crypto::keccak256(&data);
+        let hash_hex = format!("0x{}", hex::encode(digest));
+
+        let submit = api
+            .zero_submit_work(Some(vec![serde_json::json!({
+                "work_id": work_id,
+                "nonce": nonce,
+                "hash_hex": hash_hex,
+                "miner": "reward-test-miner"
+            })]))
+            .expect("submit should succeed");
+        assert_eq!(submit.get("accepted").and_then(|v| v.as_bool()), Some(true));
+
+        let coinbase = api
+            .eth_coinbase(None)
+            .expect("coinbase")
+            .as_str()
+            .expect("coinbase str")
+            .to_string();
+        let balance = api
+            .eth_get_balance(Some(vec![
+                serde_json::json!(coinbase),
+                serde_json::json!("latest"),
+            ]))
+            .expect("balance");
+        let expected = format!("0x{:x}", zerocore::INITIAL_BLOCK_REWARD);
+
+        assert_eq!(balance.as_str(), Some(expected.as_str()));
+    }
+
+    #[test]
     fn test_zero_submit_work_rejects_low_difficulty_share() {
         let api = build_test_api_with_persistent_compute();
         let work = api.zero_get_work(None).expect("work should be available");
@@ -2336,6 +2449,12 @@ mod tests {
         let hash = parse_hash("0x0000000000000000000000000000000000000000000000000000000000000001")
             .unwrap();
         assert!(!hash.is_zero());
+    }
+
+    #[test]
+    fn test_format_u256_hex_preserves_values_above_u64() {
+        let value = U256::from_big_endian(&[0x01, 0, 0, 0, 0, 0, 0, 0, 0x01]); // 2^64 + 1
+        assert_eq!(format_u256_hex(value), "0x10000000000000001");
     }
 
     #[test]
