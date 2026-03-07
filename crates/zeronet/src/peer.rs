@@ -181,7 +181,12 @@ impl PeerManager {
         let local_addr: SocketAddr = "0.0.0.0:0".parse().expect("hardcoded address must parse");
 
         let (tx, _rx) = mpsc::channel(64);
-        let info = PeerInfo::new(peer_id.clone(), remote_addr, local_addr, 0);
+        let info = PeerInfo::new(
+            peer_id.clone(),
+            remote_addr,
+            local_addr,
+            node_record.network_id,
+        );
         let peer = Arc::new(Peer::new(info, tx));
 
         self.peers.write().insert(peer_id.clone(), peer);

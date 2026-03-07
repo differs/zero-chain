@@ -24,11 +24,16 @@ use parking_lot::RwLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
+use tokio::time::timeout;
+use uuid::Uuid;
 
 static GLOBAL_PEER_COUNT: AtomicUsize = AtomicUsize::new(0);
+const HANDSHAKE_PREFIX: &str = "ZERO/1";
+const HANDSHAKE_MAX_LEN: usize = 512;
+const HANDSHAKE_TIMEOUT_SECS: u64 = 5;
 
 /// Returns the current process-level peer count.
 pub fn global_peer_count() -> usize {
@@ -103,6 +108,7 @@ impl Default for NetworkConfig {
 /// Network service
 pub struct NetworkService {
     config: NetworkConfig,
+    local_peer_id: String,
     peer_manager: Arc<PeerManager>,
     discovery: Option<Arc<Discovery>>,
     sync_manager: Option<Arc<SyncManager>>,
@@ -113,6 +119,7 @@ pub struct NetworkService {
 impl NetworkService {
     /// Create new network service
     pub fn new(config: NetworkConfig) -> Result<Self> {
+        let local_peer_id = format!("node-{}", Uuid::new_v4().simple());
         let peer_manager = Arc::new(PeerManager::new(config.max_peers));
 
         let discovery = if config.enable_discovery {
@@ -129,6 +136,7 @@ impl NetworkService {
 
         Ok(Self {
             config,
+            local_peer_id,
             peer_manager,
             discovery,
             sync_manager,
@@ -259,18 +267,38 @@ impl NetworkService {
             .await
             .map_err(|e| NetworkError::ConnectionError(format!("bind {bind_addr} failed: {e}")))?;
 
+        let expected_network_id = self.config.network_id;
+        let local_peer_id = self.local_peer_id.clone();
         let peer_manager = self.peer_manager.clone();
         let task = tokio::spawn(async move {
             tracing::info!("P2P listener started on {}", bind_addr);
             loop {
                 match listener.accept().await {
-                    Ok((stream, remote_addr)) => {
-                        let peer_id = format!("inbound-{}-{}", remote_addr, current_timestamp());
+                    Ok((mut stream, remote_addr)) => {
+                        let (remote_network_id, remote_peer_id) = match inbound_handshake(
+                            &mut stream,
+                            expected_network_id,
+                            &local_peer_id,
+                        )
+                        .await
+                        {
+                            Ok(v) => v,
+                            Err(err) => {
+                                tracing::warn!(
+                                    "inbound handshake failed from {}: {}",
+                                    remote_addr,
+                                    err
+                                );
+                                continue;
+                            }
+                        };
+
                         let node_record = NodeRecord {
-                            peer_id: peer_id.clone(),
+                            peer_id: remote_peer_id.clone(),
                             ip: remote_addr.ip().to_string(),
                             tcp_port: remote_addr.port(),
                             udp_port: remote_addr.port(),
+                            network_id: remote_network_id,
                         };
 
                         if let Err(err) = peer_manager.add_peer(node_record) {
@@ -283,7 +311,11 @@ impl NetworkService {
                         }
 
                         set_global_peer_count(peer_manager.peer_count());
-                        tokio::spawn(monitor_peer_socket(peer_manager.clone(), peer_id, stream));
+                        tokio::spawn(monitor_peer_socket(
+                            peer_manager.clone(),
+                            remote_peer_id,
+                            stream,
+                        ));
                     }
                     Err(err) => {
                         tracing::warn!("P2P accept error: {}", err);
@@ -308,8 +340,32 @@ impl NetworkService {
                     )
                     .await
                     {
-                        Ok(Ok(stream)) => {
-                            if let Err(err) = self.add_peer(record.clone()) {
+                        Ok(Ok(mut stream)) => {
+                            let (remote_network_id, remote_peer_id) = match outbound_handshake(
+                                &mut stream,
+                                self.config.network_id,
+                                &self.local_peer_id,
+                            )
+                            .await
+                            {
+                                Ok(v) => v,
+                                Err(err) => {
+                                    tracing::warn!(
+                                        "bootnode handshake failed {}: {}",
+                                        bootnode,
+                                        err
+                                    );
+                                    continue;
+                                }
+                            };
+                            let node_record = NodeRecord {
+                                peer_id: remote_peer_id.clone(),
+                                ip: record.ip.clone(),
+                                tcp_port: record.tcp_port,
+                                udp_port: record.udp_port,
+                                network_id: remote_network_id,
+                            };
+                            if let Err(err) = self.add_peer(node_record) {
                                 tracing::warn!(
                                     "Failed to register bootnode {} as peer: {}",
                                     bootnode,
@@ -319,7 +375,7 @@ impl NetworkService {
                             }
                             tokio::spawn(monitor_peer_socket(
                                 self.peer_manager.clone(),
-                                record.peer_id.clone(),
+                                remote_peer_id,
                                 stream,
                             ));
                         }
@@ -357,6 +413,114 @@ async fn monitor_peer_socket(
 
     let _ = peer_manager.remove_peer(&peer_id);
     set_global_peer_count(peer_manager.peer_count());
+}
+
+async fn inbound_handshake(
+    stream: &mut TcpStream,
+    expected_network_id: u64,
+    local_peer_id: &str,
+) -> Result<(u64, String)> {
+    let (remote_network_id, remote_peer_id) = read_handshake(stream).await?;
+    if remote_network_id != expected_network_id {
+        return Err(NetworkError::ProtocolError(format!(
+            "network id mismatch: expected {}, got {}",
+            expected_network_id, remote_network_id
+        )));
+    }
+    send_handshake(stream, expected_network_id, local_peer_id).await?;
+    Ok((remote_network_id, remote_peer_id))
+}
+
+async fn outbound_handshake(
+    stream: &mut TcpStream,
+    expected_network_id: u64,
+    local_peer_id: &str,
+) -> Result<(u64, String)> {
+    send_handshake(stream, expected_network_id, local_peer_id).await?;
+    let (remote_network_id, remote_peer_id) = read_handshake(stream).await?;
+    if remote_network_id != expected_network_id {
+        return Err(NetworkError::ProtocolError(format!(
+            "network id mismatch: expected {}, got {}",
+            expected_network_id, remote_network_id
+        )));
+    }
+    Ok((remote_network_id, remote_peer_id))
+}
+
+async fn send_handshake(stream: &mut TcpStream, network_id: u64, peer_id: &str) -> Result<()> {
+    if peer_id.trim().is_empty() {
+        return Err(NetworkError::ProtocolError(
+            "empty peer id in handshake".to_string(),
+        ));
+    }
+    let line = format!("{HANDSHAKE_PREFIX} {network_id} {peer_id}\n");
+    if line.len() > HANDSHAKE_MAX_LEN {
+        return Err(NetworkError::ProtocolError(
+            "handshake payload too large".to_string(),
+        ));
+    }
+    timeout(
+        std::time::Duration::from_secs(HANDSHAKE_TIMEOUT_SECS),
+        stream.write_all(line.as_bytes()),
+    )
+    .await
+    .map_err(|_| NetworkError::ConnectionError("handshake write timeout".to_string()))?
+    .map_err(NetworkError::IO)?;
+    Ok(())
+}
+
+async fn read_handshake(stream: &mut TcpStream) -> Result<(u64, String)> {
+    let mut line = Vec::with_capacity(128);
+    let read_result = timeout(
+        std::time::Duration::from_secs(HANDSHAKE_TIMEOUT_SECS),
+        async {
+            loop {
+                let mut b = [0u8; 1];
+                let n = stream.read(&mut b).await?;
+                if n == 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "peer closed during handshake",
+                    ));
+                }
+                if b[0] == b'\n' {
+                    break;
+                }
+                line.push(b[0]);
+                if line.len() > HANDSHAKE_MAX_LEN {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "handshake line too long",
+                    ));
+                }
+            }
+            Ok::<(), std::io::Error>(())
+        },
+    )
+    .await
+    .map_err(|_| NetworkError::ConnectionError("handshake read timeout".to_string()))?;
+    read_result.map_err(NetworkError::IO)?;
+
+    let line = String::from_utf8(line)
+        .map_err(|e| NetworkError::ProtocolError(format!("invalid handshake utf8: {e}")))?;
+    let mut parts = line.split_whitespace();
+    let prefix = parts.next().unwrap_or_default();
+    let network_id_str = parts.next().unwrap_or_default();
+    let peer_id = parts.next().unwrap_or_default();
+    if prefix != HANDSHAKE_PREFIX {
+        return Err(NetworkError::ProtocolError(format!(
+            "invalid handshake prefix: {prefix}"
+        )));
+    }
+    if peer_id.is_empty() {
+        return Err(NetworkError::ProtocolError(
+            "missing peer id in handshake".to_string(),
+        ));
+    }
+    let network_id = network_id_str.parse::<u64>().map_err(|e| {
+        NetworkError::ProtocolError(format!("invalid network id in handshake: {e}"))
+    })?;
+    Ok((network_id, peer_id.to_string()))
 }
 
 fn current_timestamp() -> u64 {

@@ -21,6 +21,8 @@ pub struct NodeRecord {
     pub tcp_port: u16,
     /// UDP port
     pub udp_port: u16,
+    /// Network ID announced by remote peer (0 if unknown)
+    pub network_id: u64,
 }
 
 impl NodeRecord {
@@ -50,6 +52,7 @@ impl NodeRecord {
             ip,
             tcp_port: port,
             udp_port: port,
+            network_id: 0,
         })
     }
 
@@ -138,6 +141,7 @@ impl Discovery {
                             ip: addr.ip().to_string(),
                             tcp_port: addr.port(),
                             udp_port: addr.port(),
+                            network_id: 0,
                         };
                         let _ = insert_node_record(&node_id, &buckets, &nodes, node);
                         let _ = socket.send_to(b"zero-discovery:ack", addr).await;
