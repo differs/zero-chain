@@ -46,6 +46,22 @@ zerocchain run \
   --rpc-rate-limit-per-minute 600
 ```
 
+### P2P 发现与同步基线
+
+`zerocchain run` 的 P2P 参数（节选）：
+
+- `--p2p-listen-addr`
+- `--p2p-listen-port`
+- `--bootnode`（可重复，支持 `enode://...` 与 `enr:...`）
+- `--max-peers`
+- `--disable-discovery`
+- `--disable-sync`
+
+当前默认行为：
+
+- 发现层：启用 `discv5`（Kademlia 路由表 + ENR 事件流 + 周期 `find_node`）。
+- 同步层：启用三阶段请求响应链路：`GET_HEADERS/HEADERS` -> `GET_BLOCK_BODY/BLOCK_BODY` -> `GET_STATE_SNAPSHOT/STATE_SNAPSHOT`。
+
 ### CLI 多网络运行（mainnet/testnet/devnet/local）
 
 `zerocchain run` 已支持按网络 profile 启动：
@@ -61,7 +77,7 @@ zerocchain run \
 
 - `--chain-id <hex|dec>` 覆盖 `eth_chainId`
 - `--rpc-network-id <dec>` 覆盖 `net_version`
-- `--rpc-coinbase <0x...>` 覆盖 `eth_coinbase`
+- `--rpc-coinbase <ZER0x...|0x...>` 覆盖 `eth_coinbase`
 
 示例：
 
@@ -465,7 +481,7 @@ curl -X POST http://localhost:8545 \
     "prev_hash": "0x...",
     "height": 42,
     "target_leading_zero_bytes": 2,
-    "coinbase": "0x0000000000000000000000000000000000000000"
+    "coinbase": "ZER0x0000000000000000000000000000000000000000"
   }
 }
 ```

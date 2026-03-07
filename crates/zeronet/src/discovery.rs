@@ -1,14 +1,20 @@
-//! Node discovery module using Kademlia DHT
+//! Node discovery module backed by discovery v5 (Kademlia routing table).
 
 use crate::{NetworkConfig, NetworkError, Result};
+use discv5::{
+    enr::{self, CombinedKey, NodeId},
+    ConfigBuilder, Discv5, Enr, Event, ListenConfig,
+};
 use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::net::UdpSocket;
 use tokio::task::JoinHandle;
-use zerocore::crypto::{Hash, PublicKey};
+use tokio::time::{interval, Duration, MissedTickBehavior};
+use zerocore::crypto::Hash;
+
+const DISCOVERY_QUERY_INTERVAL_SECS: u64 = 12;
 
 /// Node record
 #[derive(Clone, Debug)]
@@ -59,6 +65,18 @@ impl NodeRecord {
     pub fn to_enode(&self) -> String {
         format!("enode://{}@{}:{}", self.peer_id, self.ip, self.tcp_port)
     }
+
+    pub fn from_bootnode(raw: &str, network_id: u64) -> Result<Self> {
+        if let Ok(node) = Self::from_enode(raw) {
+            return Ok(node);
+        }
+
+        let enr = raw
+            .parse::<Enr>()
+            .map_err(|_| NetworkError::ProtocolError("Invalid bootnode format".into()))?;
+        node_record_from_enr(&enr, network_id)
+            .ok_or_else(|| NetworkError::ProtocolError("bootnode ENR missing address".into()))
+    }
 }
 
 /// Kademlia bucket
@@ -88,8 +106,10 @@ pub struct Discovery {
     nodes: Arc<RwLock<HashMap<String, NodeRecord>>>,
     /// Background running flag
     running: Arc<AtomicBool>,
-    /// Background UDP task
+    /// Background task for discv5 event/query loop
     task: RwLock<Option<JoinHandle<()>>>,
+    /// Base64 ENR for observability/debugging.
+    local_enr: Arc<RwLock<Option<String>>>,
 }
 
 impl Discovery {
@@ -106,7 +126,12 @@ impl Discovery {
             nodes: Arc::new(RwLock::new(HashMap::new())),
             running: Arc::new(AtomicBool::new(false)),
             task: RwLock::new(None),
+            local_enr: Arc::new(RwLock::new(None)),
         })
+    }
+
+    pub fn local_enr_base64(&self) -> Option<String> {
+        self.local_enr.read().clone()
     }
 
     pub async fn start(&self) -> Result<()> {
@@ -114,44 +139,97 @@ impl Discovery {
             return Ok(());
         }
 
-        let bind_addr = format!("{}:{}", self.config.listen_addr, self.config.listen_port);
-        let socket = UdpSocket::bind(&bind_addr)
-            .await
-            .map_err(|e| NetworkError::ConnectionError(format!("discovery bind failed: {e}")))?;
+        // Seed discovery table with statically configured bootnodes.
+        for bootnode in &self.config.bootnodes {
+            if let Ok(node) = NodeRecord::from_bootnode(bootnode, self.config.network_id) {
+                let _ = self.add_node(node);
+            }
+        }
 
-        tracing::info!("Starting discovery service on {}", bind_addr);
+        let listen_ip = self
+            .config
+            .listen_addr
+            .parse::<IpAddr>()
+            .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+        let listen_config = ListenConfig::from_ip(listen_ip, self.config.listen_port);
+
+        let enr_key = CombinedKey::generate_secp256k1();
+        let enr = build_local_enr(&self.config, &enr_key);
+        *self.local_enr.write() = Some(enr.to_base64());
+
+        let config = ConfigBuilder::new(listen_config).build();
+        let mut discv5: Discv5 = Discv5::new(enr, enr_key, config)
+            .map_err(|e| NetworkError::ConnectionError(format!("discv5 init failed: {e}")))?;
+
+        for bootnode in &self.config.bootnodes {
+            if let Some(enr) = parse_bootnode_as_enr(bootnode) {
+                if let Err(err) = discv5.add_enr(enr) {
+                    tracing::debug!(
+                        "discovery add_enr failed for bootnode {}: {}",
+                        bootnode,
+                        err
+                    );
+                }
+            }
+        }
+
+        discv5
+            .start()
+            .await
+            .map_err(|e| NetworkError::ConnectionError(format!("discv5 start failed: {e}")))?;
+        let mut events = discv5.event_stream().await.map_err(|e| {
+            NetworkError::ConnectionError(format!("discv5 event stream failed: {e}"))
+        })?;
 
         let running = self.running.clone();
         let buckets = self.buckets.clone();
         let nodes = self.nodes.clone();
         let node_id = self.node_id.clone();
+        let network_id = self.config.network_id;
+
         let task = tokio::spawn(async move {
-            let mut buf = [0u8; 512];
+            tracing::info!("Starting discovery service via discv5");
+            let mut query_tick = interval(Duration::from_secs(DISCOVERY_QUERY_INTERVAL_SECS));
+            query_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
             while running.load(Ordering::Relaxed) {
-                match socket.recv_from(&mut buf).await {
-                    Ok((len, addr)) => {
-                        let msg = String::from_utf8_lossy(&buf[..len]);
-                        let peer_id = msg
-                            .strip_prefix("zero-discovery:")
-                            .map(|s| s.trim().to_string())
-                            .filter(|s| !s.is_empty())
-                            .unwrap_or_else(|| format!("udp-{}", addr));
-                        let node = NodeRecord {
-                            peer_id,
-                            ip: addr.ip().to_string(),
-                            tcp_port: addr.port(),
-                            udp_port: addr.port(),
-                            network_id: 0,
-                        };
-                        let _ = insert_node_record(&node_id, &buckets, &nodes, node);
-                        let _ = socket.send_to(b"zero-discovery:ack", addr).await;
+                tokio::select! {
+                    _ = query_tick.tick() => {
+                        if let Err(err) = discv5.find_node(NodeId::random()).await {
+                            tracing::debug!("discovery find_node failed: {}", err);
+                        }
                     }
-                    Err(err) => {
-                        tracing::debug!("discovery recv error: {}", err);
+                    ev = events.recv() => {
+                        match ev {
+                            Some(Event::Discovered(enr)) => {
+                                if let Some(node) = node_record_from_enr(&enr, network_id) {
+                                    let _ = insert_node_record(&node_id, &buckets, &nodes, node);
+                                }
+                            }
+                            Some(Event::EnrAdded { enr, .. }) => {
+                                if let Some(node) = node_record_from_enr(&enr, network_id) {
+                                    let _ = insert_node_record(&node_id, &buckets, &nodes, node);
+                                }
+                            }
+                            Some(Event::SessionEstablished(enr, _)) => {
+                                if let Some(node) = node_record_from_enr(&enr, network_id) {
+                                    let _ = insert_node_record(&node_id, &buckets, &nodes, node);
+                                }
+                            }
+                            Some(Event::SocketUpdated(addr)) => {
+                                tracing::debug!("discovery socket updated: {}", addr);
+                            }
+                            Some(Event::NodeInserted { .. }) | Some(Event::TalkRequest(_)) => {}
+                            None => {
+                                tracing::warn!("discovery event stream closed");
+                                break;
+                            }
+                        }
                     }
                 }
             }
         });
+
         *self.task.write() = Some(task);
         Ok(())
     }
@@ -224,6 +302,79 @@ impl Discovery {
     }
 }
 
+fn build_local_enr(config: &NetworkConfig, enr_key: &CombinedKey) -> Enr {
+    let mut builder = enr::Enr::builder();
+
+    let advertised_ip = config
+        .external_addr
+        .as_ref()
+        .and_then(|raw| parse_maybe_socket_ip(raw))
+        .or_else(|| parse_maybe_socket_ip(&config.listen_addr));
+
+    if let Some(ip) = advertised_ip {
+        match ip {
+            IpAddr::V4(ip4) => {
+                builder.ip4(ip4);
+                builder.tcp4(config.listen_port);
+                builder.udp4(config.listen_port);
+            }
+            IpAddr::V6(ip6) => {
+                builder.ip6(ip6);
+                builder.tcp6(config.listen_port);
+                builder.udp6(config.listen_port);
+            }
+        }
+    } else {
+        // Keep port fields so peers can still connect when IP gets auto-updated.
+        builder.udp4(config.listen_port);
+        builder.tcp4(config.listen_port);
+    }
+
+    builder
+        .build(enr_key)
+        .expect("local ENR construction must succeed")
+}
+
+fn parse_maybe_socket_ip(raw: &str) -> Option<IpAddr> {
+    raw.parse::<SocketAddr>()
+        .map(|addr| addr.ip())
+        .or_else(|_| raw.parse::<IpAddr>())
+        .ok()
+        .filter(|ip| !ip.is_unspecified())
+}
+
+fn parse_bootnode_as_enr(raw: &str) -> Option<Enr> {
+    raw.parse::<Enr>().ok()
+}
+
+fn node_record_from_enr(enr: &Enr, network_id: u64) -> Option<NodeRecord> {
+    if let Some(ip4) = enr.ip4() {
+        let tcp_port = enr.tcp4().or_else(|| enr.udp4())?;
+        let udp_port = enr.udp4().unwrap_or(tcp_port);
+        return Some(NodeRecord {
+            peer_id: enr.node_id().to_string(),
+            ip: ip4.to_string(),
+            tcp_port,
+            udp_port,
+            network_id,
+        });
+    }
+
+    if let Some(ip6) = enr.ip6() {
+        let tcp_port = enr.tcp6().or_else(|| enr.udp6())?;
+        let udp_port = enr.udp6().unwrap_or(tcp_port);
+        return Some(NodeRecord {
+            peer_id: enr.node_id().to_string(),
+            ip: ip6.to_string(),
+            tcp_port,
+            udp_port,
+            network_id,
+        });
+    }
+
+    None
+}
+
 fn insert_node_record(
     local_node_id: &str,
     buckets: &RwLock<Vec<KBucket>>,
@@ -240,6 +391,7 @@ fn insert_node_record(
     // Check if already exists
     if bucket.nodes.iter().any(|n| n.peer_id == node.peer_id) {
         bucket.last_updated = current_timestamp();
+        nodes.write().insert(node.peer_id.clone(), node);
         return false;
     }
 
@@ -285,6 +437,55 @@ fn current_timestamp() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_secs()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_node_record_from_enode_roundtrip() {
+        let record = NodeRecord::from_enode("enode://peer123@127.0.0.1:30303").unwrap();
+        assert_eq!(record.peer_id, "peer123");
+        assert_eq!(record.ip, "127.0.0.1");
+        assert_eq!(record.tcp_port, 30303);
+        assert_eq!(record.to_enode(), "enode://peer123@127.0.0.1:30303");
+    }
+
+    #[test]
+    fn test_extract_node_record_from_enr() {
+        let key = CombinedKey::generate_secp256k1();
+        let enr = {
+            let mut builder = enr::Enr::builder();
+            builder.ip4(std::net::Ipv4Addr::LOCALHOST);
+            builder.udp4(19000);
+            builder.tcp4(19001);
+            builder.build(&key).unwrap()
+        };
+
+        let node = node_record_from_enr(&enr, 10086).expect("enr should convert");
+        assert_eq!(node.ip, "127.0.0.1");
+        assert_eq!(node.udp_port, 19000);
+        assert_eq!(node.tcp_port, 19001);
+        assert_eq!(node.network_id, 10086);
+    }
+
+    #[test]
+    fn test_bootnode_enr_support() {
+        let key = CombinedKey::generate_secp256k1();
+        let enr = {
+            let mut builder = enr::Enr::builder();
+            builder.ip4(std::net::Ipv4Addr::LOCALHOST);
+            builder.udp4(20000);
+            builder.tcp4(20001);
+            builder.build(&key).unwrap()
+        };
+        let node = NodeRecord::from_bootnode(&enr.to_base64(), 2026).unwrap();
+        assert_eq!(node.ip, "127.0.0.1");
+        assert_eq!(node.udp_port, 20000);
+        assert_eq!(node.tcp_port, 20001);
+        assert_eq!(node.network_id, 2026);
+    }
 }

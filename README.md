@@ -101,7 +101,7 @@ cargo test
 ./target/release/zerocchain --network mainnet run
 
 # Run a mining node
-./target/release/zerocchain run --mine --coinbase 0xYourAddress
+./target/release/zerocchain run --mine --coinbase ZER0xYourAddress
 
 # Override chain/network id at runtime
 ./target/release/zerocchain --network mainnet run --chain-id 0x276e --rpc-network-id 10086
@@ -136,6 +136,11 @@ curl -s -H "Content-Type: application/json" \
   -H "Authorization: Bearer replace-with-long-token" \
   -d '{"jsonrpc":"2.0","id":1,"method":"zero_peers","params":[]}' \
   http://127.0.0.1:8545
+
+# discovery v5 / sync baseline:
+# - discovery 已接入 discv5(Kademlia) + ENR 事件流
+# - sync 已启用 header -> body -> state 三阶段请求响应
+# 提示：--bootnode 同时支持 enode:// 与 enr:...（优先用 enr:... 参与 discv5）
 ```
 
 ### CLI Commands
@@ -300,7 +305,7 @@ cargo audit
 - [x] EVM implementation
 - [x] PoW consensus
 - [x] P2P networking (basic discovery + peer connectivity)
-- [ ] State sync
+- [x] State sync (header/body/state baseline)
 - [ ] Light client
 - [ ] Sharding support
 

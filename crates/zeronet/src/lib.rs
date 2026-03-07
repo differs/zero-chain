@@ -17,7 +17,10 @@ pub mod sync;
 
 pub use discovery::{Discovery, NodeRecord};
 pub use peer::{Peer, PeerInfo, PeerManager, PeerStatus};
-pub use protocol::{BlockMessage, Protocol, ProtocolMessage, TxMessage};
+pub use protocol::{
+    BlockMessage, Protocol, ProtocolMessage, SyncBlockBody, SyncHeader, SyncStateSnapshot,
+    TxMessage,
+};
 pub use sync::{SyncManager, SyncState};
 
 use once_cell::sync::Lazy;
@@ -47,12 +50,14 @@ const HANDSHAKE_MAX_LEN: usize = 512;
 const HANDSHAKE_TIMEOUT_SECS: u64 = 5;
 const HEARTBEAT_PING: &[u8] = b"ZERO/PING\n";
 const HEARTBEAT_PONG: &[u8] = b"ZERO/PONG\n";
-const CONTROL_FRAME_MAX_LEN: usize = 1024;
+const CONTROL_FRAME_MAX_LEN: usize = 8192;
 const HEARTBEAT_INTERVAL_SECS: u64 = 15;
 const PEER_IDLE_TIMEOUT_SECS: u64 = 45;
 const PEER_SEND_BUFFER: usize = 256;
 const DEFAULT_DEDUP_TTL_SECS: u64 = 5 * 60;
 const MAX_DEDUP_ENTRIES: usize = 8192;
+const DISCOVERY_DIAL_INTERVAL_SECS: u64 = 5;
+const SYNC_HEAD_ANNOUNCE_INTERVAL_SECS: u64 = 10;
 
 /// Returns the current process-level peer count.
 pub fn global_peer_count() -> usize {
@@ -126,6 +131,10 @@ pub struct NetworkConfig {
     pub max_gossip_per_peer_per_minute: u32,
     /// Retry interval for reconnecting bootnodes.
     pub bootnode_retry_interval_secs: u64,
+    /// For development/mining mode, periodically advance local sync head.
+    pub sync_auto_advance: bool,
+    /// Interval in seconds for auto-advancing sync head.
+    pub sync_auto_advance_interval_secs: u64,
 }
 
 impl Default for NetworkConfig {
@@ -147,6 +156,8 @@ impl Default for NetworkConfig {
             max_inbound_rate_per_minute: 120,
             max_gossip_per_peer_per_minute: 240,
             bootnode_retry_interval_secs: 15,
+            sync_auto_advance: false,
+            sync_auto_advance_interval_secs: 3,
         }
     }
 }
@@ -161,6 +172,8 @@ pub struct NetworkService {
     is_running: RwLock<bool>,
     listener_task: RwLock<Option<JoinHandle<()>>>,
     bootnode_task: RwLock<Option<JoinHandle<()>>>,
+    discovery_dial_task: RwLock<Option<JoinHandle<()>>>,
+    sync_head_task: RwLock<Option<JoinHandle<()>>>,
 }
 
 impl NetworkService {
@@ -194,6 +207,8 @@ impl NetworkService {
             is_running: RwLock::new(false),
             listener_task: RwLock::new(None),
             bootnode_task: RwLock::new(None),
+            discovery_dial_task: RwLock::new(None),
+            sync_head_task: RwLock::new(None),
         })
     }
 
@@ -220,11 +235,18 @@ impl NetworkService {
         // Start discovery
         if let Some(discovery) = &self.discovery {
             discovery.start().await?;
+            if let Some(local_enr) = discovery.local_enr_base64() {
+                tracing::info!("discovery local ENR: {}", local_enr);
+            }
+            self.start_discovery_dialer(discovery.clone());
         }
 
         // Start sync
         if let Some(sync) = &self.sync_manager {
             sync.start_default().await?;
+            if self.config.sync_auto_advance {
+                self.start_sync_head_advancer(sync.clone());
+            }
         }
 
         *self.is_running.write() = true;
@@ -258,6 +280,12 @@ impl NetworkService {
             task.abort();
         }
         if let Some(task) = self.bootnode_task.write().take() {
+            task.abort();
+        }
+        if let Some(task) = self.discovery_dial_task.write().take() {
+            task.abort();
+        }
+        if let Some(task) = self.sync_head_task.write().take() {
             task.abort();
         }
 
@@ -334,6 +362,7 @@ impl NetworkService {
         let max_inbound_rate_per_minute = self.config.max_inbound_rate_per_minute.max(1);
         let max_gossip_per_peer_per_minute = self.config.max_gossip_per_peer_per_minute.max(1);
         let ban_duration_secs = self.config.ban_duration_secs;
+        let sync_manager = self.sync_manager.clone();
 
         let task = tokio::spawn(async move {
             let mut inbound_windows: HashMap<String, VecDeque<u64>> = HashMap::new();
@@ -421,6 +450,7 @@ impl NetworkService {
                             rx,
                             ban_duration_secs,
                             max_gossip_per_peer_per_minute,
+                            sync_manager.clone(),
                         ));
                     }
                     Err(err) => {
@@ -447,6 +477,7 @@ impl NetworkService {
         let peer_manager = self.peer_manager.clone();
         let ban_duration_secs = self.config.ban_duration_secs;
         let max_gossip_per_peer_per_minute = self.config.max_gossip_per_peer_per_minute.max(1);
+        let sync_manager = self.sync_manager.clone();
 
         let task = tokio::spawn(async move {
             let mut ticker = interval(std::time::Duration::from_secs(retry_secs));
@@ -462,6 +493,7 @@ impl NetworkService {
                         peer_manager.clone(),
                         ban_duration_secs,
                         max_gossip_per_peer_per_minute,
+                        sync_manager.clone(),
                     )
                     .await
                     {
@@ -483,12 +515,64 @@ impl NetworkService {
                 self.peer_manager.clone(),
                 self.config.ban_duration_secs,
                 self.config.max_gossip_per_peer_per_minute.max(1),
+                self.sync_manager.clone(),
             )
             .await
             {
                 tracing::warn!("Failed to connect bootnode {}: {}", bootnode, err);
             }
         }
+    }
+
+    fn start_discovery_dialer(&self, discovery: Arc<Discovery>) {
+        let peer_manager = self.peer_manager.clone();
+        let expected_network_id = self.config.network_id;
+        let local_peer_id = self.local_peer_id.clone();
+        let ban_duration_secs = self.config.ban_duration_secs;
+        let max_gossip_per_peer_per_minute = self.config.max_gossip_per_peer_per_minute.max(1);
+        let sync_manager = self.sync_manager.clone();
+
+        let task = tokio::spawn(async move {
+            let mut ticker = interval(std::time::Duration::from_secs(DISCOVERY_DIAL_INTERVAL_SECS));
+            ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                for node in discovery.get_random_nodes(32) {
+                    if node.network_id != 0 && node.network_id != expected_network_id {
+                        continue;
+                    }
+                    if let Err(err) = connect_node_record(
+                        node,
+                        expected_network_id,
+                        &local_peer_id,
+                        peer_manager.clone(),
+                        ban_duration_secs,
+                        max_gossip_per_peer_per_minute,
+                        sync_manager.clone(),
+                    )
+                    .await
+                    {
+                        tracing::debug!("discovery dial skipped: {}", err);
+                    }
+                }
+            }
+        });
+
+        *self.discovery_dial_task.write() = Some(task);
+    }
+
+    fn start_sync_head_advancer(&self, sync: Arc<SyncManager>) {
+        let interval_secs = self.config.sync_auto_advance_interval_secs.max(1);
+        let task = tokio::spawn(async move {
+            let mut ticker = interval(std::time::Duration::from_secs(interval_secs));
+            ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                let head = sync.bump_local_height(1);
+                tracing::debug!("sync auto-advanced local head to {}", head);
+            }
+        });
+        *self.sync_head_task.write() = Some(task);
     }
 }
 
@@ -499,9 +583,30 @@ async fn connect_single_bootnode(
     peer_manager: Arc<PeerManager>,
     ban_duration_secs: u64,
     max_gossip_per_peer_per_minute: u32,
+    sync_manager: Option<Arc<SyncManager>>,
 ) -> Result<()> {
-    let record = NodeRecord::from_enode(bootnode)?;
+    let record = NodeRecord::from_bootnode(bootnode, expected_network_id)?;
+    connect_node_record(
+        record,
+        expected_network_id,
+        local_peer_id,
+        peer_manager,
+        ban_duration_secs,
+        max_gossip_per_peer_per_minute,
+        sync_manager,
+    )
+    .await
+}
 
+async fn connect_node_record(
+    record: NodeRecord,
+    expected_network_id: u64,
+    local_peer_id: &str,
+    peer_manager: Arc<PeerManager>,
+    ban_duration_secs: u64,
+    max_gossip_per_peer_per_minute: u32,
+    sync_manager: Option<Arc<SyncManager>>,
+) -> Result<()> {
     if peer_manager.get_peer(&record.peer_id).is_some() {
         return Ok(());
     }
@@ -517,9 +622,17 @@ async fn connect_single_bootnode(
     let mut stream =
         tokio::time::timeout(std::time::Duration::from_secs(5), TcpStream::connect(&addr))
             .await
-            .map_err(|_| NetworkError::ConnectionError(format!("connect timeout: {}", bootnode)))?
+            .map_err(|_| {
+                NetworkError::ConnectionError(format!(
+                    "connect timeout: {}:{}",
+                    record.ip, record.tcp_port
+                ))
+            })?
             .map_err(|e| {
-                NetworkError::ConnectionError(format!("connect failed {}: {e}", bootnode))
+                NetworkError::ConnectionError(format!(
+                    "connect failed {}:{}: {e}",
+                    record.ip, record.tcp_port
+                ))
             })?;
 
     let (remote_network_id, remote_peer_id) =
@@ -545,6 +658,7 @@ async fn connect_single_bootnode(
         rx,
         ban_duration_secs,
         max_gossip_per_peer_per_minute,
+        sync_manager,
     ));
 
     Ok(())
@@ -557,10 +671,15 @@ async fn monitor_peer_socket(
     mut outbound_rx: mpsc::Receiver<ProtocolMessage>,
     ban_duration_secs: u64,
     max_gossip_per_peer_per_minute: u32,
+    sync_manager: Option<Arc<SyncManager>>,
 ) {
     let _ = peer_manager.touch_peer(&peer_id);
     let mut heartbeat = interval(std::time::Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
     heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut sync_head_announce = interval(std::time::Duration::from_secs(
+        SYNC_HEAD_ANNOUNCE_INTERVAL_SECS,
+    ));
+    sync_head_announce.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut inbound_window: VecDeque<u64> = VecDeque::new();
 
     loop {
@@ -577,6 +696,19 @@ async fn monitor_peer_socket(
                 {
                     tracing::info!("peer {} considered stale, disconnecting", peer_id);
                     break;
+                }
+            }
+            _ = sync_head_announce.tick() => {
+                if let Some(sync) = &sync_manager {
+                    if let Err(err) = write_protocol_message(
+                        &mut stream,
+                        ProtocolMessage::AnnounceHead(sync.local_height()),
+                    )
+                    .await
+                    {
+                        tracing::debug!("sync head announce failed for {}: {}", peer_id, err);
+                        break;
+                    }
                 }
             }
             frame = read_control_frame(&mut stream) => {
@@ -619,6 +751,51 @@ async fn monitor_peer_socket(
                         let _ = peer_manager.touch_peer(&peer_id);
                         let _ = peer_manager.update_peer_height(&peer_id, height);
                     }
+                    Ok(ControlFrame::SyncGetHeaders { start, limit }) => {
+                        let _ = peer_manager.touch_peer(&peer_id);
+                        if let Some(sync) = &sync_manager {
+                            let headers = sync.build_headers_response(start, limit);
+                            let _ = write_protocol_message(&mut stream, ProtocolMessage::SyncHeaders(headers)).await;
+                        }
+                    }
+                    Ok(ControlFrame::SyncHeaders(headers)) => {
+                        let _ = peer_manager.touch_peer(&peer_id);
+                        if let Some(sync) = &sync_manager {
+                            sync.handle_sync_headers(peer_id.clone(), headers);
+                        }
+                    }
+                    Ok(ControlFrame::SyncGetBlockBody { block_hash }) => {
+                        let _ = peer_manager.touch_peer(&peer_id);
+                        if let Some(sync) = &sync_manager {
+                            if let Some(body) = sync.build_block_body_response(&block_hash) {
+                                let _ = write_protocol_message(&mut stream, ProtocolMessage::SyncBlockBody(body)).await;
+                            }
+                        }
+                    }
+                    Ok(ControlFrame::SyncBlockBody(body)) => {
+                        let _ = peer_manager.touch_peer(&peer_id);
+                        if let Some(sync) = &sync_manager {
+                            sync.handle_sync_block_body(peer_id.clone(), body);
+                        }
+                    }
+                    Ok(ControlFrame::SyncGetStateSnapshot { block_number }) => {
+                        let _ = peer_manager.touch_peer(&peer_id);
+                        if let Some(sync) = &sync_manager {
+                            if let Some(snapshot) = sync.build_state_snapshot_response(block_number) {
+                                let _ = write_protocol_message(
+                                    &mut stream,
+                                    ProtocolMessage::SyncStateSnapshot(snapshot),
+                                )
+                                .await;
+                            }
+                        }
+                    }
+                    Ok(ControlFrame::SyncStateSnapshot(snapshot)) => {
+                        let _ = peer_manager.touch_peer(&peer_id);
+                        if let Some(sync) = &sync_manager {
+                            sync.handle_sync_state_snapshot(peer_id.clone(), snapshot);
+                        }
+                    }
                     Ok(ControlFrame::Disconnect(reason)) => {
                         tracing::debug!("peer {} requested disconnect: {}", peer_id, reason);
                         break;
@@ -659,6 +836,12 @@ enum ControlFrame {
     Tx(Hash),
     BlockHash(Hash),
     Head(u64),
+    SyncGetHeaders { start: u64, limit: u64 },
+    SyncHeaders(Vec<SyncHeader>),
+    SyncGetBlockBody { block_hash: Hash },
+    SyncBlockBody(SyncBlockBody),
+    SyncGetStateSnapshot { block_number: u64 },
+    SyncStateSnapshot(SyncStateSnapshot),
     Disconnect(String),
     Other(String),
     Eof,
@@ -707,6 +890,69 @@ async fn read_control_frame(stream: &mut TcpStream) -> std::io::Result<ControlFr
             "invalid tx hash frame",
         ));
     }
+    if let Some(raw) = normalized.strip_prefix("ZERO/GET_HEADERS ") {
+        let mut parts = raw.split_whitespace();
+        let start = parts
+            .next()
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "missing headers start")
+            })?
+            .parse::<u64>()
+            .map_err(|err| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("invalid headers start: {err}"),
+                )
+            })?;
+        let limit = parts
+            .next()
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "missing headers limit")
+            })?
+            .parse::<u64>()
+            .map_err(|err| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("invalid headers limit: {err}"),
+                )
+            })?;
+        return Ok(ControlFrame::SyncGetHeaders { start, limit });
+    }
+    if let Some(raw) = normalized.strip_prefix("ZERO/HEADERS ") {
+        return Ok(ControlFrame::SyncHeaders(parse_sync_headers(raw).map_err(
+            |err| std::io::Error::new(std::io::ErrorKind::InvalidData, err),
+        )?));
+    }
+    if let Some(raw) = normalized.strip_prefix("ZERO/GET_BLOCK_BODY ") {
+        if let Some(block_hash) = parse_hash(raw.trim()) {
+            return Ok(ControlFrame::SyncGetBlockBody { block_hash });
+        }
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid get block body hash frame",
+        ));
+    }
+    if let Some(raw) = normalized.strip_prefix("ZERO/BLOCK_BODY ") {
+        return Ok(ControlFrame::SyncBlockBody(
+            parse_sync_block_body(raw)
+                .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?,
+        ));
+    }
+    if let Some(raw) = normalized.strip_prefix("ZERO/GET_STATE_SNAPSHOT ") {
+        let block_number = raw.trim().parse::<u64>().map_err(|err| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid state snapshot block number: {err}"),
+            )
+        })?;
+        return Ok(ControlFrame::SyncGetStateSnapshot { block_number });
+    }
+    if let Some(raw) = normalized.strip_prefix("ZERO/STATE_SNAPSHOT ") {
+        return Ok(ControlFrame::SyncStateSnapshot(
+            parse_sync_state_snapshot(raw)
+                .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?,
+        ));
+    }
     if let Some(raw) = normalized.strip_prefix("ZERO/BLOCK ") {
         if let Some(hash) = parse_hash(raw.trim()) {
             return Ok(ControlFrame::BlockHash(hash));
@@ -749,6 +995,7 @@ async fn write_protocol_message(
         ProtocolMessage::NewBlockHash(block_hash) => {
             Some(format!("ZERO/BLOCK {}\n", hash_to_hex(&block_hash)))
         }
+        ProtocolMessage::AnnounceHead(height) => Some(format!("ZERO/HEAD {}\n", height)),
         ProtocolMessage::GetBlock(block_hash) => {
             Some(format!("ZERO/GETBLOCK {}\n", hash_to_hex(&block_hash)))
         }
@@ -756,6 +1003,30 @@ async fn write_protocol_message(
             let joined = hashes.iter().map(hash_to_hex).collect::<Vec<_>>().join(",");
             Some(format!("ZERO/GETTX {}\n", joined))
         }
+        ProtocolMessage::SyncGetHeaders { start, limit } => {
+            Some(format!("ZERO/GET_HEADERS {} {}\n", start, limit))
+        }
+        ProtocolMessage::SyncHeaders(headers) => {
+            Some(format!("ZERO/HEADERS {}\n", format_sync_headers(&headers)))
+        }
+        ProtocolMessage::SyncGetBlockBody { block_hash } => Some(format!(
+            "ZERO/GET_BLOCK_BODY {}\n",
+            hash_to_hex(&block_hash)
+        )),
+        ProtocolMessage::SyncBlockBody(body) => Some(format!(
+            "ZERO/BLOCK_BODY {} {}\n",
+            hash_to_hex(&body.block_hash),
+            body.tx_count
+        )),
+        ProtocolMessage::SyncGetStateSnapshot { block_number } => {
+            Some(format!("ZERO/GET_STATE_SNAPSHOT {}\n", block_number))
+        }
+        ProtocolMessage::SyncStateSnapshot(snapshot) => Some(format!(
+            "ZERO/STATE_SNAPSHOT {} {} {}\n",
+            snapshot.block_number,
+            hash_to_hex(&snapshot.state_root),
+            snapshot.account_count
+        )),
         ProtocolMessage::Transactions(_) | ProtocolMessage::Block(_) => None,
     };
 
@@ -785,6 +1056,101 @@ fn parse_hash(raw: &str) -> Option<Hash> {
 
 fn hash_to_hex(hash: &Hash) -> String {
     format!("0x{}", hex::encode(hash.as_bytes()))
+}
+
+fn format_sync_headers(headers: &[SyncHeader]) -> String {
+    headers
+        .iter()
+        .map(|header| {
+            format!(
+                "{}@{}@{}",
+                header.number,
+                hash_to_hex(&header.hash),
+                hash_to_hex(&header.parent_hash)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn parse_sync_headers(raw: &str) -> std::result::Result<Vec<SyncHeader>, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    trimmed
+        .split(',')
+        .map(|item| {
+            let mut parts = item.split('@');
+            let number = parts
+                .next()
+                .ok_or_else(|| "missing header number".to_string())?
+                .parse::<u64>()
+                .map_err(|e| format!("invalid header number: {e}"))?;
+            let hash = parse_hash(
+                parts
+                    .next()
+                    .ok_or_else(|| "missing header hash".to_string())?,
+            )
+            .ok_or_else(|| "invalid header hash".to_string())?;
+            let parent_hash = parse_hash(
+                parts
+                    .next()
+                    .ok_or_else(|| "missing header parent hash".to_string())?,
+            )
+            .ok_or_else(|| "invalid header parent hash".to_string())?;
+            Ok(SyncHeader {
+                number,
+                hash,
+                parent_hash,
+            })
+        })
+        .collect::<std::result::Result<Vec<_>, String>>()
+}
+
+fn parse_sync_block_body(raw: &str) -> std::result::Result<SyncBlockBody, String> {
+    let mut parts = raw.split_whitespace();
+    let block_hash = parse_hash(
+        parts
+            .next()
+            .ok_or_else(|| "missing block body hash".to_string())?,
+    )
+    .ok_or_else(|| "invalid block body hash".to_string())?;
+    let tx_count = parts
+        .next()
+        .ok_or_else(|| "missing block body tx_count".to_string())?
+        .parse::<u32>()
+        .map_err(|e| format!("invalid block body tx_count: {e}"))?;
+    Ok(SyncBlockBody {
+        block_hash,
+        tx_count,
+    })
+}
+
+fn parse_sync_state_snapshot(raw: &str) -> std::result::Result<SyncStateSnapshot, String> {
+    let mut parts = raw.split_whitespace();
+    let block_number = parts
+        .next()
+        .ok_or_else(|| "missing state snapshot block_number".to_string())?
+        .parse::<u64>()
+        .map_err(|e| format!("invalid state snapshot block_number: {e}"))?;
+    let state_root = parse_hash(
+        parts
+            .next()
+            .ok_or_else(|| "missing state snapshot state_root".to_string())?,
+    )
+    .ok_or_else(|| "invalid state snapshot state_root".to_string())?;
+    let account_count = parts
+        .next()
+        .ok_or_else(|| "missing state snapshot account_count".to_string())?
+        .parse::<u64>()
+        .map_err(|e| format!("invalid state snapshot account_count: {e}"))?;
+    Ok(SyncStateSnapshot {
+        block_number,
+        state_root,
+        account_count,
+    })
 }
 
 fn allow_ip_rate(

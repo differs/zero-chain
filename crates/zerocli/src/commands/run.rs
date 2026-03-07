@@ -78,7 +78,7 @@ pub async fn run_node(
     // Start mining task if enabled
     if mine {
         let coinbase_addr =
-            coinbase.unwrap_or_else(|| "0x0000000000000000000000000000000000000000".to_string());
+            coinbase.unwrap_or_else(|| "ZER0x0000000000000000000000000000000000000000".to_string());
         println!("   🎯 Starting mining with coinbase: {}", coinbase_addr);
 
         // Spawn mining task
@@ -182,6 +182,8 @@ pub async fn run_node(
         max_inbound_rate_per_minute: p2p_max_inbound_rate_per_minute,
         max_gossip_per_peer_per_minute: p2p_max_gossip_per_peer_per_minute,
         bootnode_retry_interval_secs: p2p_bootnode_retry_interval_secs,
+        sync_auto_advance: mine,
+        sync_auto_advance_interval_secs: 2,
         ..NetworkConfig::default()
     };
     let network_service = NetworkService::new(network_cfg)?;

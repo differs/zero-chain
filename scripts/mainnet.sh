@@ -15,14 +15,14 @@ WS_PORT=8546
 usage() {
     cat <<'EOF'
 Usage:
-  scripts/mainnet.sh start [--mine] [--coinbase 0x...] [--clean-data]
+  scripts/mainnet.sh start [--mine] [--coinbase ZER0x...|0x...] [--clean-data]
   scripts/mainnet.sh stop
   scripts/mainnet.sh status
   scripts/mainnet.sh logs
 
 Examples:
   scripts/mainnet.sh start
-  scripts/mainnet.sh start --mine --coinbase 0x0000000000000000000000000000000000000001
+  scripts/mainnet.sh start --mine --coinbase ZER0x0000000000000000000000000000000000000001
   scripts/mainnet.sh status
   scripts/mainnet.sh logs
   scripts/mainnet.sh stop

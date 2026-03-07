@@ -242,7 +242,7 @@ ws_addr = "127.0.0.1"
 [mining]
 enabled = true
 threads = 2
-coinbase = "0x0000000000000000000000000000000000000000"
+coinbase = "ZER0x0000000000000000000000000000000000000000"
 
 [logging]
 level = "info"

@@ -1,11 +1,18 @@
-//! Sync module - minimal catch-up/recovery manager.
+//! Sync module - header/body/state request-response sync manager.
 
-use crate::Result;
+use crate::protocol::{ProtocolMessage, SyncBlockBody, SyncHeader, SyncStateSnapshot};
+use crate::{NetworkError, Result};
 use parking_lot::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tokio::time::{interval, MissedTickBehavior};
+use tokio::time::{interval, timeout, Duration, MissedTickBehavior};
+use zerocore::crypto::Hash;
+
+const SYNC_TICK_SECS: u64 = 2;
+const SYNC_RESPONSE_TIMEOUT_SECS: u64 = 3;
+const SYNC_BATCH_LIMIT: u64 = 8;
 
 /// Sync state
 #[derive(Clone, Debug, PartialEq)]
@@ -20,21 +27,43 @@ pub enum SyncState {
     Complete,
 }
 
+enum SyncInbound {
+    Headers {
+        peer_id: String,
+        headers: Vec<SyncHeader>,
+    },
+    BlockBody {
+        peer_id: String,
+        body: SyncBlockBody,
+    },
+    StateSnapshot {
+        peer_id: String,
+        snapshot: SyncStateSnapshot,
+    },
+}
+
 /// Sync manager
 pub struct SyncManager {
     state: Arc<RwLock<SyncState>>,
     peer_manager: Arc<crate::PeerManager>,
     running: Arc<AtomicBool>,
     task: RwLock<Option<JoinHandle<()>>>,
+    local_height: Arc<RwLock<u64>>,
+    inbound_tx: mpsc::Sender<SyncInbound>,
+    inbound_rx: RwLock<Option<mpsc::Receiver<SyncInbound>>>,
 }
 
 impl SyncManager {
     pub fn new(peer_manager: Arc<crate::PeerManager>) -> Self {
+        let (inbound_tx, inbound_rx) = mpsc::channel(512);
         Self {
             state: Arc::new(RwLock::new(SyncState::Idle)),
             peer_manager,
             running: Arc::new(AtomicBool::new(false)),
             task: RwLock::new(None),
+            local_height: Arc::new(RwLock::new(0)),
+            inbound_tx,
+            inbound_rx: RwLock::new(Some(inbound_rx)),
         }
     }
 
@@ -42,18 +71,91 @@ impl SyncManager {
         self.state.read().clone()
     }
 
+    pub fn local_height(&self) -> u64 {
+        *self.local_height.read()
+    }
+
+    pub fn set_local_height(&self, height: u64) {
+        *self.local_height.write() = height;
+    }
+
+    pub fn bump_local_height(&self, delta: u64) -> u64 {
+        let mut local = self.local_height.write();
+        *local = local.saturating_add(delta);
+        *local
+    }
+
+    pub fn build_headers_response(&self, start: u64, limit: u64) -> Vec<SyncHeader> {
+        headers_for_head(self.local_height(), start, limit)
+    }
+
+    pub fn build_block_body_response(&self, block_hash: &Hash) -> Option<SyncBlockBody> {
+        let head = self.local_height();
+        let number = find_block_number_for_hash(head, block_hash)?;
+        Some(SyncBlockBody {
+            block_hash: *block_hash,
+            tx_count: synthetic_tx_count(number),
+        })
+    }
+
+    pub fn build_state_snapshot_response(&self, block_number: u64) -> Option<SyncStateSnapshot> {
+        let local_head = self.local_height();
+        if block_number > local_head {
+            return None;
+        }
+
+        let block_hash = synthetic_hash_at(block_number);
+        Some(SyncStateSnapshot {
+            block_number,
+            state_root: derive_state_root(&block_hash),
+            account_count: synthetic_account_count(block_number),
+        })
+    }
+
+    pub fn handle_sync_headers(&self, peer_id: String, headers: Vec<SyncHeader>) {
+        if let Err(err) = self
+            .inbound_tx
+            .try_send(SyncInbound::Headers { peer_id, headers })
+        {
+            tracing::debug!("dropping sync headers due to full channel: {}", err);
+        }
+    }
+
+    pub fn handle_sync_block_body(&self, peer_id: String, body: SyncBlockBody) {
+        if let Err(err) = self
+            .inbound_tx
+            .try_send(SyncInbound::BlockBody { peer_id, body })
+        {
+            tracing::debug!("dropping sync block body due to full channel: {}", err);
+        }
+    }
+
+    pub fn handle_sync_state_snapshot(&self, peer_id: String, snapshot: SyncStateSnapshot) {
+        if let Err(err) = self
+            .inbound_tx
+            .try_send(SyncInbound::StateSnapshot { peer_id, snapshot })
+        {
+            tracing::debug!("dropping sync state snapshot due to full channel: {}", err);
+        }
+    }
+
     pub async fn start(&self, target: u64) -> Result<()> {
         if self.running.swap(true, Ordering::SeqCst) {
             return Ok(());
         }
 
+        let mut inbound_rx = self.inbound_rx.write().take().ok_or_else(|| {
+            NetworkError::ConnectionError("sync inbound channel already taken".into())
+        })?;
+
         let state = self.state.clone();
         let peer_manager = self.peer_manager.clone();
         let running = self.running.clone();
+        let local_height = self.local_height.clone();
+
         let task = tokio::spawn(async move {
             let mut retries = 0u64;
-            let mut local_head = 0u64;
-            let mut ticker = interval(std::time::Duration::from_secs(5));
+            let mut ticker = interval(Duration::from_secs(SYNC_TICK_SECS));
             ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
             while running.load(Ordering::Relaxed) {
@@ -69,22 +171,183 @@ impl SyncManager {
                     continue;
                 }
 
+                let local = *local_height.read();
                 let target_head = peer_manager.highest_peer_height().max(target);
-                if local_head >= target_head {
+                if local >= target_head {
                     *state.write() = SyncState::Complete;
                     continue;
                 }
 
-                local_head = (local_head + 64).min(target_head);
+                let Some(peer) = peer_manager.get_best_peers(1).into_iter().next() else {
+                    retries = retries.saturating_add(1);
+                    *state.write() = SyncState::Recovering {
+                        reason: "no_best_peer".to_string(),
+                        retries,
+                    };
+                    continue;
+                };
+                let peer_id = peer.info.peer_id.clone();
+
+                let request_start = local.saturating_add(1);
+                let request_limit = (target_head.saturating_sub(local))
+                    .min(SYNC_BATCH_LIMIT)
+                    .max(1);
+                if peer
+                    .send(ProtocolMessage::SyncGetHeaders {
+                        start: request_start,
+                        limit: request_limit,
+                    })
+                    .is_err()
+                {
+                    retries = retries.saturating_add(1);
+                    *state.write() = SyncState::Recovering {
+                        reason: "headers_request_failed".to_string(),
+                        retries,
+                    };
+                    peer_manager.update_score(&peer_id, -8);
+                    continue;
+                }
+
+                let headers = match wait_for_headers(
+                    &mut inbound_rx,
+                    &peer_id,
+                    request_start,
+                    Duration::from_secs(SYNC_RESPONSE_TIMEOUT_SECS),
+                )
+                .await
+                {
+                    Ok(headers) => headers,
+                    Err(err) => {
+                        retries = retries.saturating_add(1);
+                        *state.write() = SyncState::Recovering {
+                            reason: format!("headers_timeout:{err}"),
+                            retries,
+                        };
+                        peer_manager.update_score(&peer_id, -8);
+                        continue;
+                    }
+                };
+
+                if let Err(err) = validate_headers(request_start, &headers) {
+                    retries = retries.saturating_add(1);
+                    *state.write() = SyncState::Recovering {
+                        reason: format!("invalid_headers:{err}"),
+                        retries,
+                    };
+                    peer_manager.update_score(&peer_id, -20);
+                    continue;
+                }
+
+                let mut body_ok = true;
+                for header in &headers {
+                    if peer
+                        .send(ProtocolMessage::SyncGetBlockBody {
+                            block_hash: header.hash,
+                        })
+                        .is_err()
+                    {
+                        body_ok = false;
+                        break;
+                    }
+
+                    match wait_for_block_body(
+                        &mut inbound_rx,
+                        &peer_id,
+                        &header.hash,
+                        Duration::from_secs(SYNC_RESPONSE_TIMEOUT_SECS),
+                    )
+                    .await
+                    {
+                        Ok(_body) => {}
+                        Err(_err) => {
+                            body_ok = false;
+                            break;
+                        }
+                    }
+                }
+
+                if !body_ok {
+                    retries = retries.saturating_add(1);
+                    *state.write() = SyncState::Recovering {
+                        reason: "block_body_stage_failed".to_string(),
+                        retries,
+                    };
+                    peer_manager.update_score(&peer_id, -10);
+                    continue;
+                }
+
+                let Some(last_header) = headers.last() else {
+                    retries = retries.saturating_add(1);
+                    *state.write() = SyncState::Recovering {
+                        reason: "empty_header_batch".to_string(),
+                        retries,
+                    };
+                    continue;
+                };
+
+                if peer
+                    .send(ProtocolMessage::SyncGetStateSnapshot {
+                        block_number: last_header.number,
+                    })
+                    .is_err()
+                {
+                    retries = retries.saturating_add(1);
+                    *state.write() = SyncState::Recovering {
+                        reason: "state_request_failed".to_string(),
+                        retries,
+                    };
+                    peer_manager.update_score(&peer_id, -8);
+                    continue;
+                }
+
+                let snapshot = match wait_for_state_snapshot(
+                    &mut inbound_rx,
+                    &peer_id,
+                    last_header.number,
+                    Duration::from_secs(SYNC_RESPONSE_TIMEOUT_SECS),
+                )
+                .await
+                {
+                    Ok(snapshot) => snapshot,
+                    Err(err) => {
+                        retries = retries.saturating_add(1);
+                        *state.write() = SyncState::Recovering {
+                            reason: format!("state_timeout:{err}"),
+                            retries,
+                        };
+                        peer_manager.update_score(&peer_id, -10);
+                        continue;
+                    }
+                };
+
+                if snapshot.state_root != derive_state_root(&last_header.hash) {
+                    retries = retries.saturating_add(1);
+                    *state.write() = SyncState::Recovering {
+                        reason: "state_root_mismatch".to_string(),
+                        retries,
+                    };
+                    peer_manager.update_score(&peer_id, -20);
+                    continue;
+                }
+
+                *local_height.write() = last_header.number;
                 *state.write() = SyncState::Syncing {
-                    current: local_head,
+                    current: last_header.number,
                     target: target_head,
                 };
+                peer_manager.update_score(&peer_id, 4);
+
+                if last_header.number >= target_head {
+                    *state.write() = SyncState::Complete;
+                }
             }
         });
 
         *self.task.write() = Some(task);
-        *self.state.write() = SyncState::Syncing { current: 0, target };
+        *self.state.write() = SyncState::Syncing {
+            current: self.local_height(),
+            target,
+        };
         Ok(())
     }
 
@@ -103,5 +366,285 @@ impl SyncManager {
 
     pub async fn complete_sync(&self) {
         *self.state.write() = SyncState::Complete;
+    }
+}
+
+fn headers_for_head(head: u64, start: u64, limit: u64) -> Vec<SyncHeader> {
+    if limit == 0 || start > head {
+        return Vec::new();
+    }
+
+    let end = head.min(start.saturating_add(limit).saturating_sub(1));
+    let mut out = Vec::new();
+    let mut parent = if start == 0 {
+        Hash::zero()
+    } else {
+        synthetic_hash_at(start.saturating_sub(1))
+    };
+
+    for number in start..=end {
+        let hash = derive_header_hash(number, &parent);
+        out.push(SyncHeader {
+            number,
+            hash,
+            parent_hash: parent,
+        });
+        parent = hash;
+    }
+
+    out
+}
+
+fn validate_headers(
+    expected_start: u64,
+    headers: &[SyncHeader],
+) -> std::result::Result<(), String> {
+    if headers.is_empty() {
+        return Err("empty headers".to_string());
+    }
+
+    if headers[0].number != expected_start {
+        return Err(format!(
+            "first header number mismatch: expected {}, got {}",
+            expected_start, headers[0].number
+        ));
+    }
+
+    for (idx, header) in headers.iter().enumerate() {
+        if idx > 0 {
+            let prev = &headers[idx - 1];
+            if header.number != prev.number.saturating_add(1) {
+                return Err("non_contiguous_header_numbers".to_string());
+            }
+            if header.parent_hash != prev.hash {
+                return Err("parent_hash_mismatch".to_string());
+            }
+        }
+
+        let expected_hash = derive_header_hash(header.number, &header.parent_hash);
+        if header.hash != expected_hash {
+            return Err("header_hash_verification_failed".to_string());
+        }
+    }
+
+    Ok(())
+}
+
+async fn wait_for_headers(
+    rx: &mut mpsc::Receiver<SyncInbound>,
+    peer_id: &str,
+    expected_start: u64,
+    deadline: Duration,
+) -> std::result::Result<Vec<SyncHeader>, String> {
+    let recv = async {
+        loop {
+            match rx.recv().await {
+                Some(SyncInbound::Headers {
+                    peer_id: inbound_peer,
+                    headers,
+                }) if inbound_peer == peer_id => return Ok(headers),
+                Some(_) => continue,
+                None => return Err("sync channel closed".to_string()),
+            }
+        }
+    };
+
+    let headers = timeout(deadline, recv)
+        .await
+        .map_err(|_| "timeout".to_string())??;
+    if headers.first().map(|h| h.number).unwrap_or_default() != expected_start {
+        return Err("unexpected_headers_start".to_string());
+    }
+
+    Ok(headers)
+}
+
+async fn wait_for_block_body(
+    rx: &mut mpsc::Receiver<SyncInbound>,
+    peer_id: &str,
+    expected_hash: &Hash,
+    deadline: Duration,
+) -> std::result::Result<SyncBlockBody, String> {
+    timeout(deadline, async {
+        loop {
+            match rx.recv().await {
+                Some(SyncInbound::BlockBody {
+                    peer_id: inbound_peer,
+                    body,
+                }) if inbound_peer == peer_id && body.block_hash == *expected_hash => {
+                    return Ok(body)
+                }
+                Some(_) => continue,
+                None => return Err("sync channel closed".to_string()),
+            }
+        }
+    })
+    .await
+    .map_err(|_| "timeout".to_string())?
+}
+
+async fn wait_for_state_snapshot(
+    rx: &mut mpsc::Receiver<SyncInbound>,
+    peer_id: &str,
+    expected_number: u64,
+    deadline: Duration,
+) -> std::result::Result<SyncStateSnapshot, String> {
+    timeout(deadline, async {
+        loop {
+            match rx.recv().await {
+                Some(SyncInbound::StateSnapshot {
+                    peer_id: inbound_peer,
+                    snapshot,
+                }) if inbound_peer == peer_id && snapshot.block_number == expected_number => {
+                    return Ok(snapshot)
+                }
+                Some(_) => continue,
+                None => return Err("sync channel closed".to_string()),
+            }
+        }
+    })
+    .await
+    .map_err(|_| "timeout".to_string())?
+}
+
+fn synthetic_hash_at(number: u64) -> Hash {
+    let mut parent = Hash::zero();
+    for height in 0..=number {
+        parent = derive_header_hash(height, &parent);
+    }
+    parent
+}
+
+fn find_block_number_for_hash(head: u64, target_hash: &Hash) -> Option<u64> {
+    let mut parent = Hash::zero();
+    for number in 0..=head {
+        let hash = derive_header_hash(number, &parent);
+        if &hash == target_hash {
+            return Some(number);
+        }
+        parent = hash;
+    }
+    None
+}
+
+fn synthetic_tx_count(number: u64) -> u32 {
+    // Keep body metadata deterministic but non-constant.
+    ((number % 9) + 1) as u32
+}
+
+fn synthetic_account_count(number: u64) -> u64 {
+    1_000u64.saturating_add(number.saturating_mul(13))
+}
+
+pub(crate) fn derive_header_hash(number: u64, parent_hash: &Hash) -> Hash {
+    let mut data = Vec::with_capacity(48);
+    data.extend_from_slice(b"ZERO-SYNC-H");
+    data.extend_from_slice(&number.to_be_bytes());
+    data.extend_from_slice(parent_hash.as_bytes());
+    Hash::from_bytes(zerocore::crypto::keccak256(&data))
+}
+
+pub(crate) fn derive_state_root(block_hash: &Hash) -> Hash {
+    let mut data = Vec::with_capacity(48);
+    data.extend_from_slice(b"ZERO-SYNC-S");
+    data.extend_from_slice(block_hash.as_bytes());
+    Hash::from_bytes(zerocore::crypto::keccak256(&data))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_synthetic_responses() {
+        let manager = SyncManager::new(Arc::new(crate::PeerManager::new(4)));
+        manager.set_local_height(6);
+
+        let headers = manager.build_headers_response(2, 3);
+        assert_eq!(headers.len(), 3);
+        assert_eq!(headers[0].number, 2);
+        assert_eq!(headers[2].number, 4);
+
+        let body = manager
+            .build_block_body_response(&headers[1].hash)
+            .expect("block body response");
+        assert_eq!(body.block_hash, headers[1].hash);
+
+        let snapshot = manager
+            .build_state_snapshot_response(4)
+            .expect("state snapshot response");
+        assert_eq!(snapshot.block_number, 4);
+        assert_eq!(snapshot.state_root, derive_state_root(&headers[2].hash));
+    }
+
+    #[tokio::test]
+    async fn test_sync_progresses_with_real_request_response_flow() {
+        let peer_manager = Arc::new(crate::PeerManager::new(8));
+        let sync = Arc::new(SyncManager::new(peer_manager.clone()));
+
+        let (tx, mut rx) = mpsc::channel(32);
+        peer_manager
+            .add_peer_with_sender(
+                crate::NodeRecord {
+                    peer_id: "peer-sync-a".to_string(),
+                    ip: "127.0.0.1".to_string(),
+                    tcp_port: 30303,
+                    udp_port: 30303,
+                    network_id: 10086,
+                },
+                tx,
+            )
+            .unwrap();
+        let _ = peer_manager.update_peer_height("peer-sync-a", 3);
+
+        sync.start_default().await.unwrap();
+
+        let sync_clone = sync.clone();
+        let responder = tokio::spawn(async move {
+            while let Some(msg) = rx.recv().await {
+                match msg {
+                    ProtocolMessage::SyncGetHeaders { start, limit } => {
+                        let headers = headers_for_head(3, start, limit);
+                        sync_clone.handle_sync_headers("peer-sync-a".to_string(), headers);
+                    }
+                    ProtocolMessage::SyncGetBlockBody { block_hash } => {
+                        sync_clone.handle_sync_block_body(
+                            "peer-sync-a".to_string(),
+                            SyncBlockBody {
+                                block_hash,
+                                tx_count: 2,
+                            },
+                        );
+                    }
+                    ProtocolMessage::SyncGetStateSnapshot { block_number } => {
+                        let block_hash = synthetic_hash_at(block_number);
+                        sync_clone.handle_sync_state_snapshot(
+                            "peer-sync-a".to_string(),
+                            SyncStateSnapshot {
+                                block_number,
+                                state_root: derive_state_root(&block_hash),
+                                account_count: 42,
+                            },
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        timeout(Duration::from_secs(10), async {
+            loop {
+                if sync.state() == SyncState::Complete && sync.local_height() >= 3 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("sync should complete");
+
+        sync.stop().await.unwrap();
+        responder.abort();
+        assert!(sync.local_height() >= 3);
     }
 }

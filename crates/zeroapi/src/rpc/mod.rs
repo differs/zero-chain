@@ -177,7 +177,7 @@ impl Default for RpcConfig {
             compute_db_path: "./data/compute-db".to_string(),
             chain_id: 10086,
             network_id: 10086,
-            coinbase: "0x0000000000000000000000000000000000000000".to_string(),
+            coinbase: "ZER0x0000000000000000000000000000000000000000".to_string(),
             auth_token: None,
             rate_limit_per_minute: 600,
         }
@@ -193,8 +193,8 @@ impl RpcConfig {
         if self.network_id == 0 {
             return Err("network_id must be non-zero".to_string());
         }
-        if Address::from_hex(&self.coinbase).is_err() {
-            return Err("coinbase must be a valid 20-byte hex address".to_string());
+        if parse_address(&self.coinbase).is_err() {
+            return Err("coinbase must be a valid 20-byte address (ZER0x... or 0x...)".to_string());
         }
         if let Some(token) = &self.auth_token {
             if token.trim().is_empty() {
@@ -644,7 +644,9 @@ impl RpcApi {
         &self,
         _params: Option<Vec<serde_json::Value>>,
     ) -> Result<serde_json::Value, RpcErrorObject> {
-        Ok(serde_json::json!(self.config.coinbase.clone()))
+        let addr = parse_address(&self.config.coinbase)
+            .map_err(|e| RpcErrorObject::internal_error(format!("invalid coinbase: {e}")))?;
+        Ok(serde_json::json!(format_zero_address(addr)))
     }
 
     fn eth_mining(
@@ -1108,7 +1110,10 @@ impl RpcApi {
             "prev_hash": format!("0x{}", hex::encode(work.prev_hash.as_bytes())),
             "height": work.height,
             "target_leading_zero_bytes": work.target_leading_zero_bytes,
-            "coinbase": self.config.coinbase,
+            "coinbase": format_zero_address(
+                parse_address(&self.config.coinbase)
+                    .map_err(|e| RpcErrorObject::internal_error(format!("invalid coinbase: {e}")))?,
+            ),
         }))
     }
 
@@ -1188,8 +1193,8 @@ impl RpcApi {
             version: 1,
             parent_hash,
             uncle_hashes: Vec::new(),
-            coinbase: Address::from_hex(&self.config.coinbase)
-                .map_err(|e| RpcErrorObject::internal_error(format!("invalid coinbase: {e:?}")))?,
+            coinbase: parse_address(&self.config.coinbase)
+                .map_err(|e| RpcErrorObject::internal_error(format!("invalid coinbase: {e}")))?,
             state_root: Hash::zero(),
             transactions_root: Hash::zero(),
             receipts_root: Hash::zero(),
