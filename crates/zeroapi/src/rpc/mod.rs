@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tokio::sync::oneshot;
 use tower_http::cors::{Any, CorsLayer};
 use zerocore::account::{InMemoryAccountManager, U256};
-use zerocore::block::{Block, BlockHeader};
+use zerocore::block::{create_genesis_block, Block, BlockHeader};
 use zerocore::compute::domain::DomainRegistry;
 use zerocore::compute::{
     BasicTxExecutor, Command, ComputeTx, DefaultAuthorizationPolicy, DomainConfig, DomainId,
@@ -50,12 +50,18 @@ impl RpcMetrics {
         )
         .expect("method_errors metric");
         let mining_shares_accepted = IntCounterVec::new(
-            prometheus::Opts::new("zero_mining_shares_accepted_total", "Accepted mining shares"),
+            prometheus::Opts::new(
+                "zero_mining_shares_accepted_total",
+                "Accepted mining shares",
+            ),
             &["source"],
         )
         .expect("mining_shares_accepted metric");
         let mining_shares_rejected = IntCounterVec::new(
-            prometheus::Opts::new("zero_mining_shares_rejected_total", "Rejected mining shares"),
+            prometheus::Opts::new(
+                "zero_mining_shares_rejected_total",
+                "Rejected mining shares",
+            ),
             &["reason"],
         )
         .expect("mining_shares_rejected metric");
@@ -653,15 +659,59 @@ impl RpcApi {
         &self,
         params: Option<Vec<serde_json::Value>>,
     ) -> Result<serde_json::Value, RpcErrorObject> {
-        // Simplified - would fetch from blockchain
-        Ok(serde_json::json!(null))
+        let params = params.ok_or(RpcErrorObject::invalid_params("Missing params".to_string()))?;
+        let block_param = params
+            .first()
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcErrorObject::invalid_params("Missing block selector".to_string()))?;
+        let full_transactions = params.get(1).and_then(|v| v.as_bool()).unwrap_or(false);
+
+        let block = match block_param {
+            "latest" => Some(self.current_head_block()),
+            "earliest" => Some(create_genesis_block()),
+            "pending" => None,
+            raw => {
+                let number = raw.strip_prefix("0x").unwrap_or(raw);
+                let number = u64::from_str_radix(number, 16).map_err(|e| {
+                    RpcErrorObject::invalid_params(format!("Invalid block number: {e}"))
+                })?;
+                self.block_by_number(number)
+            }
+        };
+
+        Ok(block
+            .as_ref()
+            .map(|block| block_to_eth_json(block, full_transactions))
+            .unwrap_or(serde_json::Value::Null))
     }
 
     fn eth_get_block_by_hash(
         &self,
         params: Option<Vec<serde_json::Value>>,
     ) -> Result<serde_json::Value, RpcErrorObject> {
-        Ok(serde_json::json!(null))
+        let params = params.ok_or(RpcErrorObject::invalid_params("Missing params".to_string()))?;
+        let hash = params
+            .first()
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcErrorObject::invalid_params("Missing block hash".to_string()))?;
+        let hash = parse_hash(hash)?;
+        let full_transactions = params.get(1).and_then(|v| v.as_bool()).unwrap_or(false);
+
+        let genesis = create_genesis_block();
+        let block = if genesis.header.hash == hash {
+            Some(genesis)
+        } else {
+            self.latest_block
+                .read()
+                .as_ref()
+                .filter(|block| block.header.hash == hash)
+                .cloned()
+        };
+
+        Ok(block
+            .as_ref()
+            .map(|block| block_to_eth_json(block, full_transactions))
+            .unwrap_or(serde_json::Value::Null))
     }
 
     fn eth_get_transaction_by_hash(
@@ -1104,22 +1154,26 @@ impl RpcApi {
         &self,
         _params: Option<Vec<serde_json::Value>>,
     ) -> Result<serde_json::Value, RpcErrorObject> {
-        let latest = self.latest_block.read();
-        if let Some(block) = latest.as_ref() {
-            Ok(serde_json::json!({
-                "hash": format!("0x{}", hex::encode(block.header.hash.as_bytes())),
-                "parent_hash": format!("0x{}", hex::encode(block.header.parent_hash.as_bytes())),
-                "number": format!("0x{:x}", block.header.number.as_u64()),
-                "timestamp": block.header.timestamp,
-                "difficulty": format!("0x{:x}", block.header.difficulty.as_u64()),
-                "nonce": block.header.nonce,
-                "coinbase": block.header.coinbase.to_checksum_hex(),
-                "mix_hash": format!("0x{}", hex::encode(block.header.mix_hash.as_bytes())),
-                "extra_data": format!("0x{}", hex::encode(&block.header.extra_data)),
-            }))
-        } else {
-            Ok(serde_json::Value::Null)
+        Ok(block_to_zero_block_json(&self.current_head_block()))
+    }
+
+    fn current_head_block(&self) -> Block {
+        self.latest_block
+            .read()
+            .clone()
+            .unwrap_or_else(create_genesis_block)
+    }
+
+    fn block_by_number(&self, number: u64) -> Option<Block> {
+        if number == 0 {
+            return Some(create_genesis_block());
         }
+
+        self.latest_block
+            .read()
+            .as_ref()
+            .filter(|block| block.header.number.as_u64() == number)
+            .cloned()
     }
 
     fn zero_import_block(
@@ -1139,16 +1193,19 @@ impl RpcApi {
         let timestamp = block
             .get("timestamp")
             .and_then(|v| v.as_u64())
-            .ok_or_else(|| RpcErrorObject::invalid_params("timestamp missing or invalid".to_string()))?;
+            .ok_or_else(|| {
+                RpcErrorObject::invalid_params("timestamp missing or invalid".to_string())
+            })?;
         let difficulty_u64 = parse_u64_hex_field(block, "difficulty")?;
-        let nonce = block
-            .get("nonce")
-            .and_then(|v| v.as_u64())
-            .ok_or_else(|| RpcErrorObject::invalid_params("nonce missing or invalid".to_string()))?;
+        let nonce = block.get("nonce").and_then(|v| v.as_u64()).ok_or_else(|| {
+            RpcErrorObject::invalid_params("nonce missing or invalid".to_string())
+        })?;
         let coinbase = block
             .get("coinbase")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| RpcErrorObject::invalid_params("coinbase missing or invalid".to_string()))?;
+            .ok_or_else(|| {
+                RpcErrorObject::invalid_params("coinbase missing or invalid".to_string())
+            })?;
         let coinbase = parse_address(coinbase)?;
         let mix_hash = parse_hash_field(block, "mix_hash")?;
         let extra_data = parse_bytes_hex_opt(block.get("extra_data"))?.unwrap_or_default();
@@ -1320,13 +1377,20 @@ impl RpcServer {
         let app = Router::new()
             .route("/", post(handle_rpc_request))
             .layer(DefaultBodyLimit::max(self.config.max_request_size))
-            .layer(CorsLayer::new().allow_origin(Any).allow_headers(Any).allow_methods(Any))
+            .layer(
+                CorsLayer::new()
+                    .allow_origin(Any)
+                    .allow_headers(Any)
+                    .allow_methods(Any),
+            )
             .with_state(api);
 
         let bind_addr = format!("{}:{}", self.config.address, self.config.port);
         let listener = tokio::net::TcpListener::bind(&bind_addr)
             .await
-            .map_err(|e| crate::ApiError::IO(std::io::Error::new(std::io::ErrorKind::AddrInUse, e)))?;
+            .map_err(|e| {
+                crate::ApiError::IO(std::io::Error::new(std::io::ErrorKind::AddrInUse, e))
+            })?;
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
         *self.shutdown_tx.lock() = Some(shutdown_tx);
@@ -1446,6 +1510,52 @@ fn parse_object_id(s: &str) -> Result<ObjectId, RpcErrorObject> {
 
 fn parse_output_id(s: &str) -> Result<OutputId, RpcErrorObject> {
     Ok(OutputId(parse_hash(s)?))
+}
+
+fn block_to_zero_block_json(block: &Block) -> serde_json::Value {
+    serde_json::json!({
+        "hash": format!("0x{}", hex::encode(block.header.hash.as_bytes())),
+        "parent_hash": format!("0x{}", hex::encode(block.header.parent_hash.as_bytes())),
+        "number": format!("0x{:x}", block.header.number.as_u64()),
+        "timestamp": block.header.timestamp,
+        "difficulty": format!("0x{:x}", block.header.difficulty.as_u64()),
+        "nonce": block.header.nonce,
+        "coinbase": block.header.coinbase.to_checksum_hex(),
+        "mix_hash": format!("0x{}", hex::encode(block.header.mix_hash.as_bytes())),
+        "extra_data": format!("0x{}", hex::encode(&block.header.extra_data)),
+    })
+}
+
+fn block_to_eth_json(block: &Block, _full_transactions: bool) -> serde_json::Value {
+    let transactions = block
+        .transactions
+        .iter()
+        .map(|tx| serde_json::Value::String(format!("0x{}", hex::encode(tx.hash().as_bytes()))))
+        .collect::<Vec<_>>();
+
+    serde_json::json!({
+        "number": format!("0x{:x}", block.header.number.as_u64()),
+        "hash": format!("0x{}", hex::encode(block.header.hash.as_bytes())),
+        "parentHash": format!("0x{}", hex::encode(block.header.parent_hash.as_bytes())),
+        "nonce": format!("0x{:x}", block.header.nonce),
+        "sha3Uncles": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
+        "logsBloom": format!("0x{}", "0".repeat(512)),
+        "transactionsRoot": format!("0x{}", hex::encode(block.header.transactions_root.as_bytes())),
+        "stateRoot": format!("0x{}", hex::encode(block.header.state_root.as_bytes())),
+        "receiptsRoot": format!("0x{}", hex::encode(block.header.receipts_root.as_bytes())),
+        "miner": block.header.coinbase.to_checksum_hex(),
+        "difficulty": format!("0x{:x}", block.header.difficulty.as_u64()),
+        "totalDifficulty": format!("0x{:x}", block.header.difficulty.as_u64()),
+        "extraData": format!("0x{}", hex::encode(&block.header.extra_data)),
+        "size": "0x0",
+        "gasLimit": format!("0x{:x}", block.header.gas_limit),
+        "gasUsed": format!("0x{:x}", block.header.gas_used),
+        "timestamp": format!("0x{:x}", block.header.timestamp),
+        "transactions": transactions,
+        "uncles": [],
+        "mixHash": format!("0x{}", hex::encode(block.header.mix_hash.as_bytes())),
+        "baseFeePerGas": format!("0x{:x}", block.header.base_fee_per_gas.as_u64())
+    })
 }
 
 fn object_output_to_json(output: ObjectOutput) -> serde_json::Value {
@@ -2063,7 +2173,8 @@ mod tests {
             }
         }
 
-        let prev_hash_bytes = hex::decode(prev_hash.strip_prefix("0x").unwrap_or(&prev_hash)).unwrap();
+        let prev_hash_bytes =
+            hex::decode(prev_hash.strip_prefix("0x").unwrap_or(&prev_hash)).unwrap();
         let nonce = 7u64;
         let mut data = Vec::new();
         data.extend_from_slice(&prev_hash_bytes);
@@ -2087,15 +2198,44 @@ mod tests {
     }
 
     #[test]
+    fn test_zero_get_latest_block_defaults_to_genesis() {
+        let api = build_test_api_with_persistent_compute();
+
+        let latest = api.zero_get_latest_block(None).expect("latest block");
+        assert_eq!(latest.get("number").and_then(|v| v.as_str()), Some("0x0"));
+        assert!(latest.get("hash").and_then(|v| v.as_str()).is_some());
+    }
+
+    #[test]
+    fn test_eth_get_block_by_number_returns_genesis_before_mining() {
+        let api = build_test_api_with_persistent_compute();
+
+        let block = api
+            .eth_get_block_by_number(Some(vec![
+                serde_json::json!("0x0"),
+                serde_json::json!(true),
+            ]))
+            .expect("genesis block");
+
+        assert_eq!(block.get("number").and_then(|v| v.as_str()), Some("0x0"));
+        assert_eq!(
+            block
+                .get("transactions")
+                .and_then(|v| v.as_array())
+                .map(|txs| txs.len()),
+            Some(0)
+        );
+    }
+
+    #[test]
     fn test_zero_submit_work_rejects_stale_work_id() {
         let api = build_test_api_with_persistent_compute();
-        let submit = api
-            .zero_submit_work(Some(vec![serde_json::json!({
-                "work_id": "work-stale-1",
-                "nonce": 1,
-                "hash_hex": "0x00",
-                "miner": "test-miner"
-            })]));
+        let submit = api.zero_submit_work(Some(vec![serde_json::json!({
+            "work_id": "work-stale-1",
+            "nonce": 1,
+            "hash_hex": "0x00",
+            "miner": "test-miner"
+        })]));
         let err = submit.expect_err("stale work id should error");
         assert_eq!(err.code, -32602);
         assert_eq!(err.message, "Invalid params");
@@ -2116,7 +2256,8 @@ mod tests {
                 job.target_leading_zero_bytes = 0;
             }
         }
-        let prev_hash_bytes = hex::decode(prev_hash.strip_prefix("0x").unwrap_or(&prev_hash)).unwrap();
+        let prev_hash_bytes =
+            hex::decode(prev_hash.strip_prefix("0x").unwrap_or(&prev_hash)).unwrap();
         let nonce = 9u64;
         let mut data = Vec::new();
         data.extend_from_slice(&prev_hash_bytes);

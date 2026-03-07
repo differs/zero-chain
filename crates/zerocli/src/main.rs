@@ -375,11 +375,9 @@ fn init_otel_tracer(endpoint: &str) -> Result<opentelemetry_sdk::trace::Tracer> 
     let tracer = opentelemetry_otlp::new_pipeline()
         .tracing()
         .with_exporter(exporter)
-        .with_trace_config(
-            opentelemetry_sdk::trace::Config::default().with_resource(
-                opentelemetry_sdk::Resource::new(vec![KeyValue::new("service.name", "zerocchain")]),
-            ),
-        )
+        .with_trace_config(opentelemetry_sdk::trace::Config::default().with_resource(
+            opentelemetry_sdk::Resource::new(vec![KeyValue::new("service.name", "zerocchain")]),
+        ))
         .install_batch(opentelemetry_sdk::runtime::Tokio)
         .map_err(|e| anyhow::anyhow!("failed to init otel tracer: {e}"))?;
 
