@@ -33,6 +33,10 @@ const MAX_MINING_JOBS: usize = 2_048;
 const MAX_MINING_JOB_AGE_SECS: u64 = 300;
 const MAX_MINER_EXTRA_DATA_BYTES: usize = 64;
 const MAX_SEEN_MINING_SUBMISSIONS: usize = 16_384;
+const TARGET_BLOCK_INTERVAL_SECS: u64 = 10;
+const MIN_MINING_DIFFICULTY: u128 = 250_000;
+const BASE_MINING_DIFFICULTY: u128 = 1_000_000;
+const MAX_MINING_DIFFICULTY: u128 = 16_000_000;
 
 struct RpcMetrics {
     registry: Registry,
@@ -1134,6 +1138,12 @@ impl RpcApi {
     ) -> Result<serde_json::Value, RpcErrorObject> {
         let now = current_unix_secs();
         let latest = self.latest_block.read();
+        let target_leading_zero_bytes = latest
+            .as_ref()
+            .map(|b| leading_zero_target_from_difficulty(b.header.difficulty))
+            .unwrap_or_else(|| {
+                leading_zero_target_from_difficulty(U256::from_u128(BASE_MINING_DIFFICULTY))
+            });
         let (prev_hash, height) = match latest.as_ref() {
             Some(b) => (b.header.hash, b.header.number.as_u64().saturating_add(1)),
             None => (Hash::zero(), 1),
@@ -1144,7 +1154,7 @@ impl RpcApi {
             work_id: work_id.clone(),
             prev_hash,
             height,
-            target_leading_zero_bytes: 2,
+            target_leading_zero_bytes,
             created_at_secs: now,
         };
         {
@@ -1313,11 +1323,16 @@ impl RpcApi {
         let parent = self.latest_block.read().as_ref().map(|b| b.header.clone());
         let parent_hash = parent.as_ref().map(|h| h.hash).unwrap_or(Hash::zero());
         let parent_number = parent.as_ref().map(|h| h.number).unwrap_or(U256::zero());
-        let difficulty = parent
+        let parent_difficulty = parent
             .as_ref()
             .map(|h| h.difficulty)
-            .unwrap_or(U256::from_u128(1_000_000));
+            .unwrap_or(U256::from_u128(BASE_MINING_DIFFICULTY));
         let timestamp = current_unix_secs();
+        let parent_timestamp = parent
+            .as_ref()
+            .map(|h| h.timestamp)
+            .unwrap_or_else(|| timestamp.saturating_sub(TARGET_BLOCK_INTERVAL_SECS));
+        let difficulty = adjust_mining_difficulty(parent_difficulty, parent_timestamp, timestamp);
 
         let mut header = BlockHeader {
             version: 1,
@@ -1534,6 +1549,34 @@ impl RpcApi {
             "hash": format!("0x{}", hex::encode(header.hash.as_bytes())),
         }))
     }
+}
+
+fn leading_zero_target_from_difficulty(difficulty: U256) -> usize {
+    let raw = difficulty.as_u64() as u128;
+    if raw >= 8_000_000 {
+        4
+    } else if raw >= 2_000_000 {
+        3
+    } else {
+        2
+    }
+}
+
+fn adjust_mining_difficulty(parent_difficulty: U256, parent_timestamp: u64, now: u64) -> U256 {
+    let elapsed = now.saturating_sub(parent_timestamp);
+    let mut next = parent_difficulty.as_u64() as u128;
+    if next == 0 {
+        next = BASE_MINING_DIFFICULTY;
+    }
+
+    if elapsed <= TARGET_BLOCK_INTERVAL_SECS / 2 {
+        next = next.saturating_mul(110) / 100;
+    } else if elapsed >= TARGET_BLOCK_INTERVAL_SECS.saturating_mul(2) {
+        next = next.saturating_mul(90) / 100;
+    }
+
+    let bounded = next.clamp(MIN_MINING_DIFFICULTY, MAX_MINING_DIFFICULTY);
+    U256::from_u128(bounded)
 }
 
 fn current_unix_secs() -> u64 {
