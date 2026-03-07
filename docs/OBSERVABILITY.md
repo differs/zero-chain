@@ -67,3 +67,28 @@ curl -s http://127.0.0.1:8545 \
 - submitWork reject rate 异常上升
 - block height 停滞
 - RPC error rate > 阈值
+
+---
+
+## 5) 公网 P2P 长稳监控（Soak）
+
+当需要验证公网节点长期连通（例如连续 72 小时）时，使用脚本：
+
+```bash
+scripts/public_node_soak_monitor.sh start
+```
+
+默认行为：
+
+- 每 `60s` 采样一次
+- 连续运行 `72h`
+- 同时采集本地节点（`http://127.0.0.1:29645`）与远端节点（通过 SSH 在远端访问 `127.0.0.1:28545`）的 `zero_peers`/`web3_clientVersion` 健康数据
+- 输出 CSV 到 `artifacts/public-node-soak-monitor/<timestamp>/samples.csv`
+
+常用命令：
+
+```bash
+scripts/public_node_soak_monitor.sh status
+scripts/public_node_soak_monitor.sh logs
+scripts/public_node_soak_monitor.sh stop
+```
