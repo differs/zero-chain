@@ -1,12 +1,12 @@
 # ZeroChain
 
-A next-generation blockchain with hybrid account model, EVM compatibility, and PoW consensus.
+A next-generation blockchain with native UTXO Compute consensus and PoW security.
 
 ## Features
 
-- **Hybrid Account Model**: Combines balance-based and UTXO models for flexibility and privacy
-- **EVM Compatible**: Full Ethereum Virtual Machine compatibility with custom precompiles
-- **Dual Signature Model**: EVM path uses secp256k1; native compute path supports ed25519
+- **UTXO Compute Canonical Path**: L1 execution and consensus use native object-style UTXO Compute
+- **EVM at L2 Boundary**: EVM compatibility is positioned as an upper-layer/L2 concern, not L1 consensus logic
+- **Dual Signature Model**: Native compute supports ed25519 and secp256k1 for ownership/auth
 - **PoW Consensus**: ASIC-resistant mining with RandomX and ProgPoW algorithms
 - **Account Abstraction**: Built-in smart contract wallet support
 - **High Performance**: Parallel transaction execution and optimized state management
@@ -24,7 +24,7 @@ A next-generation blockchain with hybrid account model, EVM compatibility, and P
 ├─────────────────────────────────────────┤
 │  Core Protocol                          │
 │  ├── Account Manager (Hybrid)           │
-│  ├── EVM Engine                         │
+│  ├── Native Compute Engine              │
 │  ├── PoW Consensus                      │
 │  ├── Transaction Pool                   │
 │  └── State Machine                      │

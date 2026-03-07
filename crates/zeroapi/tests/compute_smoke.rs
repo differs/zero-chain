@@ -1,7 +1,7 @@
 use zeroapi::rpc::{ComputeBackend, JsonRpcRequest, RpcConfig, RpcServer};
 use zerocore::compute::{
     Command, ComputeTx, DomainId, ObjectId, ObjectKind, ObjectReadRef, OutputId, OutputProposal,
-    Ownership, TxId, TxSignature, TxWitness, Version,
+    Ownership, Script, TxId, TxSignature, TxWitness, Version,
 };
 use zerocore::crypto::{Hash, Signature};
 
@@ -36,8 +36,19 @@ async fn compute_submit_result_output_smoke() {
             predecessor: None,
             version: Version(1),
             state: vec![0x01],
+            state_root: None,
+            resources: vec![],
+            lock: Script::default(),
             logic: None,
+            created_at: 0,
+            ttl: None,
+            rent_reserve: None,
+            flags: 0,
+            extensions: vec![],
         }],
+        fee: 0,
+        nonce: None,
+        metadata: vec![],
         payload: vec![],
         deadline_unix_secs: None,
         chain_id: Some(10086),

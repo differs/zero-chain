@@ -312,8 +312,24 @@ curl -X POST http://localhost:8545 \
         "predecessor":null,
         "version":1,
         "state":"0x010203",
-        "logic":null
+        "state_root":null,
+        "resources":[
+          {
+            "asset_id":"0x8888888888888888888888888888888888888888888888888888888888888888",
+            "value":{"type":"Amount","amount":"0x64"}
+          }
+        ],
+        "lock":{"vm":1,"code":"0x"},
+        "logic":null,
+        "created_at":0,
+        "ttl":null,
+        "rent_reserve":null,
+        "flags":0,
+        "extensions":[]
       }],
+      "fee":0,
+      "nonce":null,
+      "metadata":[],
       "payload":"0x",
       "deadline_unix_secs":null,
       "witness":{
@@ -401,6 +417,7 @@ Witness 签名格式支持两种：
 - 签名 preimage 绑定字段包括：
   - `domain_id`、`command`
   - `input_set`、`read_set`、`output_proposals`
+  - `fee`、`nonce`、`metadata`
   - `payload`、`deadline_unix_secs`
   - `chain_id`、`network_id`
   - `witness.threshold`

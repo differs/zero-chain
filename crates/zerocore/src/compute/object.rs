@@ -1,12 +1,47 @@
 //! Object and output definitions for UTXO Compute v1.1.
 
-use std::collections::BTreeMap;
-
 use serde::{Deserialize, Serialize};
 
-use crate::crypto::Address;
+use crate::crypto::{Address, Hash};
 
 use super::primitives::{DomainId, ObjectId, OutputId, Version};
+
+/// Asset/resource identifier.
+pub type AssetId = Hash;
+
+/// Heterogeneous resource value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ResourceValue {
+    /// Fungible amount.
+    Amount(u128),
+    /// Arbitrary data payload.
+    Data(Vec<u8>),
+    /// Reference to another logical object.
+    Ref(ObjectId),
+    /// Batch references to logical objects.
+    RefBatch(Vec<ObjectId>),
+}
+
+/// Deterministic resource map sorted by `AssetId`.
+pub type ResourceMap = Vec<(AssetId, ResourceValue)>;
+
+/// VM-typed script payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Script {
+    /// VM type: 0=BitcoinScript, 1=WASM, etc.
+    pub vm: u8,
+    /// Script bytecode.
+    pub code: Vec<u8>,
+}
+
+impl Default for Script {
+    fn default() -> Self {
+        Self {
+            vm: 1,
+            code: Vec::new(),
+        }
+    }
+}
 
 /// Object ownership model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,10 +94,24 @@ pub struct ObjectOutput {
     pub predecessor: Option<OutputId>,
     /// Deterministic state payload.
     pub state: Vec<u8>,
-    /// Optional executable payload (e.g. WASM blob id or code bytes).
-    pub logic: Option<Vec<u8>>,
+    /// Optional state commitment root for large off-chain state.
+    pub state_root: Option<Hash>,
     /// Resource accounting tags/values.
-    pub resources: BTreeMap<String, u128>,
+    pub resources: ResourceMap,
+    /// Ownership/locking script.
+    pub lock: Script,
+    /// Optional executable logic script.
+    pub logic: Option<Script>,
+    /// Created-at height/timestamp.
+    pub created_at: u64,
+    /// Optional output TTL.
+    pub ttl: Option<u64>,
+    /// Optional rent reserve for lifecycle economics.
+    pub rent_reserve: Option<u128>,
+    /// Feature flags bitmap.
+    pub flags: u32,
+    /// Forward-compatible extension tuples.
+    pub extensions: Vec<(String, Vec<u8>)>,
     /// Whether output has been consumed.
     pub spent: bool,
 }

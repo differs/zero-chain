@@ -5,9 +5,12 @@ use serde::{Deserialize, Serialize};
 use crate::crypto::{keccak256, Hash, Signature};
 
 use super::{
-    object::{ObjectKind, Ownership},
+    object::{ObjectKind, Ownership, ResourceMap, ResourceValue, Script},
     primitives::{DomainId, ObjectId, OutputId, TxId, Version},
 };
+
+/// Canonical extensible metadata tuple list.
+pub type Metadata = Vec<(String, Vec<u8>)>;
 
 /// Read-set reference with expected version hash binding.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,8 +42,24 @@ pub struct OutputProposal {
     pub version: Version,
     /// Deterministic state blob.
     pub state: Vec<u8>,
+    /// Optional state commitment root.
+    pub state_root: Option<Hash>,
+    /// Resource accounting tags/values.
+    pub resources: ResourceMap,
+    /// Ownership/locking script.
+    pub lock: Script,
     /// Optional executable logic payload.
-    pub logic: Option<Vec<u8>>,
+    pub logic: Option<Script>,
+    /// Created-at height/timestamp.
+    pub created_at: u64,
+    /// Optional output TTL.
+    pub ttl: Option<u64>,
+    /// Optional rent reserve.
+    pub rent_reserve: Option<u128>,
+    /// Feature flags bitmap.
+    pub flags: u32,
+    /// Forward-compatible extension tuples.
+    pub extensions: Metadata,
 }
 
 /// Transaction command type.
@@ -129,6 +148,12 @@ pub struct ComputeTx {
     pub read_set: Vec<ObjectReadRef>,
     /// Output proposals to be committed atomically.
     pub output_proposals: Vec<OutputProposal>,
+    /// Fee paid to miners in native token.
+    pub fee: u64,
+    /// Optional anti-replay nonce.
+    pub nonce: Option<u64>,
+    /// Metadata (cross-domain proofs, hints, etc.).
+    pub metadata: Metadata,
     /// User payload / ABI-encoded command args.
     pub payload: Vec<u8>,
     /// Optional absolute expiration timestamp.
@@ -158,6 +183,12 @@ impl ComputeTx {
             return false;
         }
 
+        for proposal in &self.output_proposals {
+            if !resource_map_is_canonical(&proposal.resources) {
+                return false;
+            }
+        }
+
         true
     }
 
@@ -176,6 +207,17 @@ impl ComputeTx {
         encode_output_ids(&mut out, &self.input_set);
         encode_read_set(&mut out, &self.read_set);
         encode_output_proposals(&mut out, &self.output_proposals);
+        out.extend_from_slice(&self.fee.to_be_bytes());
+
+        match self.nonce {
+            Some(nonce) => {
+                out.push(1);
+                out.extend_from_slice(&nonce.to_be_bytes());
+            }
+            None => out.push(0),
+        }
+
+        encode_metadata(&mut out, &self.metadata);
 
         encode_bytes(&mut out, &self.payload);
 
@@ -302,14 +344,82 @@ fn encode_output_proposals(out: &mut Vec<u8>, proposals: &[OutputProposal]) {
 
         out.extend_from_slice(&p.version.0.to_be_bytes());
         encode_bytes(out, &p.state);
+        match p.state_root {
+            Some(root) => {
+                out.push(1);
+                out.extend_from_slice(root.as_bytes());
+            }
+            None => out.push(0),
+        }
+        encode_resource_map(out, &p.resources);
+        encode_script(out, &p.lock);
 
         match &p.logic {
             Some(logic) => {
                 out.push(1);
-                encode_bytes(out, logic);
+                encode_script(out, logic);
             }
             None => out.push(0),
         }
+
+        out.extend_from_slice(&p.created_at.to_be_bytes());
+        match p.ttl {
+            Some(ttl) => {
+                out.push(1);
+                out.extend_from_slice(&ttl.to_be_bytes());
+            }
+            None => out.push(0),
+        }
+        match p.rent_reserve {
+            Some(rent) => {
+                out.push(1);
+                out.extend_from_slice(&rent.to_be_bytes());
+            }
+            None => out.push(0),
+        }
+        out.extend_from_slice(&p.flags.to_be_bytes());
+        encode_metadata(out, &p.extensions);
+    }
+}
+
+fn encode_script(out: &mut Vec<u8>, script: &Script) {
+    out.push(script.vm);
+    encode_bytes(out, &script.code);
+}
+
+fn encode_resource_map(out: &mut Vec<u8>, resources: &ResourceMap) {
+    encode_len(out, resources.len());
+    for (asset_id, value) in resources {
+        out.extend_from_slice(asset_id.as_bytes());
+        match value {
+            ResourceValue::Amount(v) => {
+                out.push(1);
+                out.extend_from_slice(&v.to_be_bytes());
+            }
+            ResourceValue::Data(bytes) => {
+                out.push(2);
+                encode_bytes(out, bytes);
+            }
+            ResourceValue::Ref(object_id) => {
+                out.push(3);
+                out.extend_from_slice(object_id.0.as_bytes());
+            }
+            ResourceValue::RefBatch(object_ids) => {
+                out.push(4);
+                encode_len(out, object_ids.len());
+                for object_id in object_ids {
+                    out.extend_from_slice(object_id.0.as_bytes());
+                }
+            }
+        }
+    }
+}
+
+fn encode_metadata(out: &mut Vec<u8>, metadata: &Metadata) {
+    encode_len(out, metadata.len());
+    for (key, value) in metadata {
+        encode_bytes(out, key.as_bytes());
+        encode_bytes(out, value);
     }
 }
 
@@ -331,4 +441,8 @@ fn encode_ownership(out: &mut Vec<u8>, owner: &Ownership) {
             out.extend_from_slice(pubkey);
         }
     }
+}
+
+fn resource_map_is_canonical(resources: &ResourceMap) -> bool {
+    resources.windows(2).all(|pair| pair[0].0 <= pair[1].0)
 }

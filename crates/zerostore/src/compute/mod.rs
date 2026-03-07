@@ -123,12 +123,11 @@ fn tx_result_key(tx_id: TxId) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     use zerocore::compute::{
         execution::ObjectStore,
-        object::{ObjectKind, Ownership},
+        object::{ObjectKind, Ownership, Script},
         primitives::{DomainId, ObjectId, OutputId, TxId, Version},
     };
     use zerocore::crypto::Hash;
@@ -151,8 +150,15 @@ mod tests {
             owner: Ownership::Shared,
             predecessor: None,
             state: vec![1, 2, 3],
+            state_root: None,
+            resources: vec![],
+            lock: Script::default(),
             logic: None,
-            resources: BTreeMap::new(),
+            created_at: 0,
+            ttl: None,
+            rent_reserve: None,
+            flags: 0,
+            extensions: vec![],
             spent: false,
         };
 

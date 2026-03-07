@@ -17,8 +17,8 @@ use zerocore::compute::domain::DomainRegistry;
 use zerocore::compute::{
     BasicTxExecutor, Command, ComputeTx, DefaultAuthorizationPolicy, DomainConfig, DomainId,
     InMemoryDomainRegistry, InMemoryObjectStore, NoopResourcePolicy, ObjectId, ObjectKind,
-    ObjectOutput, ObjectStore, OutputId, OutputProposal, Ownership, SignatureScheme, TxSignature,
-    TxWitness, Version,
+    ObjectOutput, ObjectStore, OutputId, OutputProposal, Ownership, ResourceMap, ResourceValue,
+    Script, SignatureScheme, TxSignature, TxWitness, Version,
 };
 use zerocore::crypto::{Address, Hash};
 use zerocore::crypto::{PrivateKey, Signature};
@@ -1848,6 +1848,10 @@ fn format_u256_hex(value: U256) -> String {
     }
 }
 
+fn format_u128_hex(value: u128) -> String {
+    format!("0x{:x}", value)
+}
+
 fn format_zero_address(address: Address) -> String {
     let lower_hex = hex::encode(address.as_bytes());
     let hash = zerocore::crypto::keccak256(lower_hex.as_bytes());
@@ -1923,11 +1927,95 @@ fn object_output_to_json(output: ObjectOutput) -> serde_json::Value {
         "version": output.version.0,
         "domain_id": output.domain_id.0,
         "kind": format!("{:?}", output.kind),
+        "owner": ownership_to_json(&output.owner),
         "spent": output.spent,
         "predecessor": output.predecessor.map(|p| format!("0x{}", hex::encode(p.0.as_bytes()))),
         "state": format!("0x{}", hex::encode(output.state)),
-        "logic": output.logic.map(|b| format!("0x{}", hex::encode(b))),
+        "state_root": output
+            .state_root
+            .map(|root| format!("0x{}", hex::encode(root.as_bytes()))),
+        "resources": resource_map_to_json(&output.resources),
+        "lock": script_to_json(&output.lock),
+        "logic": output.logic.as_ref().map(script_to_json),
+        "created_at": output.created_at,
+        "ttl": output.ttl,
+        "rent_reserve": output.rent_reserve.map(format_u128_hex),
+        "flags": output.flags,
+        "extensions": metadata_to_json(&output.extensions),
     })
+}
+
+fn ownership_to_json(owner: &Ownership) -> serde_json::Value {
+    match owner {
+        Ownership::Shared => serde_json::json!({ "type": "Shared" }),
+        Ownership::Address(address) => serde_json::json!({
+            "type": "Address",
+            "address": format_zero_address(*address),
+        }),
+        Ownership::Program(address) => serde_json::json!({
+            "type": "Program",
+            "address": format_zero_address(*address),
+        }),
+        Ownership::NativeEd25519(public_key) => serde_json::json!({
+            "type": "NativeEd25519",
+            "public_key": format!("0x{}", hex::encode(public_key)),
+        }),
+    }
+}
+
+fn script_to_json(script: &Script) -> serde_json::Value {
+    serde_json::json!({
+        "vm": script.vm,
+        "code": format!("0x{}", hex::encode(&script.code)),
+    })
+}
+
+fn resource_map_to_json(resources: &ResourceMap) -> serde_json::Value {
+    let values = resources
+        .iter()
+        .map(|(asset_id, value)| {
+            let value = match value {
+                ResourceValue::Amount(amount) => serde_json::json!({
+                    "type": "Amount",
+                    "amount": format_u128_hex(*amount),
+                }),
+                ResourceValue::Data(data) => serde_json::json!({
+                    "type": "Data",
+                    "data": format!("0x{}", hex::encode(data)),
+                }),
+                ResourceValue::Ref(object_id) => serde_json::json!({
+                    "type": "Ref",
+                    "object_id": format!("0x{}", hex::encode(object_id.0.as_bytes())),
+                }),
+                ResourceValue::RefBatch(object_ids) => serde_json::json!({
+                    "type": "RefBatch",
+                    "object_ids": object_ids
+                        .iter()
+                        .map(|id| format!("0x{}", hex::encode(id.0.as_bytes())))
+                        .collect::<Vec<_>>(),
+                }),
+            };
+            serde_json::json!({
+                "asset_id": format!("0x{}", hex::encode(asset_id.as_bytes())),
+                "value": value,
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::Value::Array(values)
+}
+
+fn metadata_to_json(metadata: &[(String, Vec<u8>)]) -> serde_json::Value {
+    serde_json::Value::Array(
+        metadata
+            .iter()
+            .map(|(key, value)| {
+                serde_json::json!({
+                    "key": key,
+                    "value": format!("0x{}", hex::encode(value)),
+                })
+            })
+            .collect::<Vec<_>>(),
+    )
 }
 
 fn parse_compute_tx(value: serde_json::Value) -> Result<ComputeTx, RpcErrorObject> {
@@ -1949,6 +2037,9 @@ fn parse_compute_tx(value: serde_json::Value) -> Result<ComputeTx, RpcErrorObjec
 
     let read_set = parse_read_set(obj.get("read_set"))?;
     let output_proposals = parse_output_proposals(obj.get("output_proposals"))?;
+    let fee = parse_u64_opt(obj.get("fee"))?.unwrap_or(0);
+    let nonce = parse_u64_opt(obj.get("nonce"))?;
+    let metadata = parse_metadata(obj.get("metadata"))?;
 
     let payload = parse_bytes_hex_opt(obj.get("payload"))?.unwrap_or_default();
     let deadline_unix_secs = obj.get("deadline_unix_secs").and_then(|v| v.as_u64());
@@ -1969,6 +2060,9 @@ fn parse_compute_tx(value: serde_json::Value) -> Result<ComputeTx, RpcErrorObjec
         input_set,
         read_set,
         output_proposals,
+        fee,
+        nonce,
+        metadata,
         payload,
         deadline_unix_secs,
         chain_id,
@@ -2230,7 +2324,15 @@ fn parse_output_proposals(
                 .ok_or_else(|| RpcErrorObject::invalid_params("version missing".to_string()))?,
         );
         let state = parse_bytes_hex_opt(obj.get("state"))?.unwrap_or_default();
-        let logic = parse_bytes_hex_opt(obj.get("logic"))?;
+        let state_root = parse_hash_opt(obj.get("state_root"))?;
+        let resources = parse_resource_map(obj.get("resources"))?;
+        let lock = parse_script(obj.get("lock"))?.unwrap_or_default();
+        let logic = parse_script(obj.get("logic"))?;
+        let created_at = parse_u64_opt(obj.get("created_at"))?.unwrap_or(0);
+        let ttl = parse_u64_opt(obj.get("ttl"))?;
+        let rent_reserve = parse_u128_opt(obj.get("rent_reserve"))?;
+        let flags = parse_u32_opt(obj.get("flags"))?.unwrap_or(0);
+        let extensions = parse_metadata(obj.get("extensions"))?;
         out.push(OutputProposal {
             output_id,
             object_id,
@@ -2240,7 +2342,15 @@ fn parse_output_proposals(
             predecessor,
             version,
             state,
+            state_root,
+            resources,
+            lock,
             logic,
+            created_at,
+            ttl,
+            rent_reserve,
+            flags,
+            extensions,
         });
     }
 
@@ -2302,6 +2412,201 @@ fn parse_u32_field(
     u32::try_from(v).map_err(|_| RpcErrorObject::invalid_params(format!("{key} overflow")))
 }
 
+fn parse_u64_opt(v: Option<&serde_json::Value>) -> Result<Option<u64>, RpcErrorObject> {
+    match v {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::Number(num)) => num
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| RpcErrorObject::invalid_params("expected u64".to_string())),
+        Some(serde_json::Value::String(s)) => {
+            let raw = s.trim();
+            let parsed = if let Some(hex) = raw.strip_prefix("0x") {
+                u64::from_str_radix(hex, 16)
+            } else {
+                raw.parse::<u64>()
+            }
+            .map_err(|e| RpcErrorObject::invalid_params(format!("invalid u64 value: {e}")))?;
+            Ok(Some(parsed))
+        }
+        _ => Err(RpcErrorObject::invalid_params(
+            "expected u64/hex string/null".to_string(),
+        )),
+    }
+}
+
+fn parse_u32_opt(v: Option<&serde_json::Value>) -> Result<Option<u32>, RpcErrorObject> {
+    let Some(raw) = parse_u64_opt(v)? else {
+        return Ok(None);
+    };
+    Ok(Some(u32::try_from(raw).map_err(|_| {
+        RpcErrorObject::invalid_params("u32 overflow".to_string())
+    })?))
+}
+
+fn parse_u128_opt(v: Option<&serde_json::Value>) -> Result<Option<u128>, RpcErrorObject> {
+    match v {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::Number(num)) => {
+            if let Some(v) = num.as_u64() {
+                return Ok(Some(v as u128));
+            }
+            Err(RpcErrorObject::invalid_params("expected u128".to_string()))
+        }
+        Some(serde_json::Value::String(s)) => {
+            let raw = s.trim();
+            let parsed = if let Some(hex) = raw.strip_prefix("0x") {
+                u128::from_str_radix(hex, 16)
+            } else {
+                raw.parse::<u128>()
+            }
+            .map_err(|e| RpcErrorObject::invalid_params(format!("invalid u128 value: {e}")))?;
+            Ok(Some(parsed))
+        }
+        _ => Err(RpcErrorObject::invalid_params(
+            "expected u128/hex string/null".to_string(),
+        )),
+    }
+}
+
+fn parse_hash_opt(v: Option<&serde_json::Value>) -> Result<Option<Hash>, RpcErrorObject> {
+    match v {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(s)) => Ok(Some(parse_hash(s)?)),
+        _ => Err(RpcErrorObject::invalid_params(
+            "expected hash hex string or null".to_string(),
+        )),
+    }
+}
+
+fn parse_script(v: Option<&serde_json::Value>) -> Result<Option<Script>, RpcErrorObject> {
+    let Some(v) = v else {
+        return Ok(None);
+    };
+    if v.is_null() {
+        return Ok(None);
+    }
+    let obj = v
+        .as_object()
+        .ok_or_else(|| RpcErrorObject::invalid_params("script must be object".to_string()))?;
+    let vm = parse_u64_opt(obj.get("vm"))?.unwrap_or(1);
+    let vm = u8::try_from(vm)
+        .map_err(|_| RpcErrorObject::invalid_params("script.vm overflow".to_string()))?;
+    let code = parse_bytes_hex_opt(obj.get("code"))?.unwrap_or_default();
+    Ok(Some(Script { vm, code }))
+}
+
+fn parse_resource_map(v: Option<&serde_json::Value>) -> Result<ResourceMap, RpcErrorObject> {
+    let Some(v) = v else {
+        return Ok(vec![]);
+    };
+    let arr = v
+        .as_array()
+        .ok_or_else(|| RpcErrorObject::invalid_params("resources must be array".to_string()))?;
+    let mut out = Vec::with_capacity(arr.len());
+    for item in arr {
+        let obj = item.as_object().ok_or_else(|| {
+            RpcErrorObject::invalid_params("resource item must be object".to_string())
+        })?;
+        let asset_id = parse_hash(
+            obj.get("asset_id")
+                .and_then(|x| x.as_str())
+                .ok_or_else(|| RpcErrorObject::invalid_params("asset_id missing".to_string()))?,
+        )?;
+        let value_obj = obj
+            .get("value")
+            .and_then(|x| x.as_object())
+            .ok_or_else(|| RpcErrorObject::invalid_params("resource.value missing".to_string()))?;
+        let value_type = value_obj
+            .get("type")
+            .and_then(|x| x.as_str())
+            .ok_or_else(|| {
+                RpcErrorObject::invalid_params("resource.value.type missing".to_string())
+            })?;
+        let value = match value_type {
+            "Amount" => {
+                ResourceValue::Amount(parse_u128_opt(value_obj.get("amount"))?.ok_or_else(
+                    || RpcErrorObject::invalid_params("resource amount missing".to_string()),
+                )?)
+            }
+            "Data" => ResourceValue::Data(parse_bytes_hex_opt(value_obj.get("data"))?.ok_or_else(
+                || RpcErrorObject::invalid_params("resource data missing".to_string()),
+            )?),
+            "Ref" => {
+                let object_id = parse_hash(
+                    value_obj
+                        .get("object_id")
+                        .and_then(|x| x.as_str())
+                        .ok_or_else(|| {
+                            RpcErrorObject::invalid_params("resource object_id missing".to_string())
+                        })?,
+                )?;
+                ResourceValue::Ref(ObjectId(object_id))
+            }
+            "RefBatch" => {
+                let refs = value_obj
+                    .get("object_ids")
+                    .and_then(|x| x.as_array())
+                    .ok_or_else(|| {
+                        RpcErrorObject::invalid_params(
+                            "resource object_ids must be array".to_string(),
+                        )
+                    })?
+                    .iter()
+                    .map(|v| {
+                        let s = v.as_str().ok_or_else(|| {
+                            RpcErrorObject::invalid_params(
+                                "resource object_ids item must be string".to_string(),
+                            )
+                        })?;
+                        Ok(ObjectId(parse_hash(s)?))
+                    })
+                    .collect::<Result<Vec<_>, RpcErrorObject>>()?;
+                ResourceValue::RefBatch(refs)
+            }
+            other => {
+                return Err(RpcErrorObject::invalid_params(format!(
+                    "unsupported resource value type: {other}"
+                )));
+            }
+        };
+        out.push((asset_id, value));
+    }
+    out.sort_by_key(|(asset_id, _)| *asset_id);
+    for pair in out.windows(2) {
+        if pair[0].0 == pair[1].0 {
+            return Err(RpcErrorObject::invalid_params(
+                "duplicate asset_id in resources".to_string(),
+            ));
+        }
+    }
+    Ok(out)
+}
+
+fn parse_metadata(v: Option<&serde_json::Value>) -> Result<Vec<(String, Vec<u8>)>, RpcErrorObject> {
+    let Some(v) = v else {
+        return Ok(vec![]);
+    };
+    let arr = v
+        .as_array()
+        .ok_or_else(|| RpcErrorObject::invalid_params("metadata must be array".to_string()))?;
+    let mut out = Vec::with_capacity(arr.len());
+    for item in arr {
+        let obj = item.as_object().ok_or_else(|| {
+            RpcErrorObject::invalid_params("metadata item must be object".to_string())
+        })?;
+        let key = obj
+            .get("key")
+            .and_then(|x| x.as_str())
+            .ok_or_else(|| RpcErrorObject::invalid_params("metadata key missing".to_string()))?
+            .to_string();
+        let value = parse_bytes_hex_opt(obj.get("value"))?
+            .ok_or_else(|| RpcErrorObject::invalid_params("metadata value missing".to_string()))?;
+        out.push((key, value));
+    }
+    Ok(out)
+}
+
 fn parse_bytes_hex_opt(v: Option<&serde_json::Value>) -> Result<Option<Vec<u8>>, RpcErrorObject> {
     match v {
         None | Some(serde_json::Value::Null) => Ok(None),
@@ -2320,7 +2625,6 @@ fn parse_bytes_hex_opt(v: Option<&serde_json::Value>) -> Result<Option<Vec<u8>>,
 mod tests {
     use super::*;
     use ed25519_dalek::Signer as _;
-    use std::collections::BTreeMap;
     use std::sync::Arc;
     use zerostore::db::MemDatabase;
 
@@ -2912,8 +3216,15 @@ mod tests {
             owner: Ownership::Shared,
             predecessor: None,
             state: vec![0xAA, 0xBB],
+            state_root: None,
+            resources: vec![],
+            lock: Script::default(),
             logic: None,
-            resources: BTreeMap::new(),
+            created_at: 0,
+            ttl: None,
+            rent_reserve: None,
+            flags: 0,
+            extensions: vec![],
             spent: false,
         };
 
@@ -3087,8 +3398,15 @@ mod tests {
             ),
             predecessor: None,
             state: vec![1],
+            state_root: None,
+            resources: vec![],
+            lock: Script::default(),
             logic: None,
-            resources: BTreeMap::new(),
+            created_at: 0,
+            ttl: None,
+            rent_reserve: None,
+            flags: 0,
+            extensions: vec![],
             spent: false,
         };
         api.compute_store.insert_output(input).unwrap();
@@ -3127,8 +3445,15 @@ mod tests {
             ),
             predecessor: None,
             state: vec![1],
+            state_root: None,
+            resources: vec![],
+            lock: Script::default(),
             logic: None,
-            resources: BTreeMap::new(),
+            created_at: 0,
+            ttl: None,
+            rent_reserve: None,
+            flags: 0,
+            extensions: vec![],
             spent: false,
         };
         api.compute_store.insert_output(input).unwrap();
@@ -3196,8 +3521,15 @@ mod tests {
             owner: Ownership::Address(owner_addr),
             predecessor: None,
             state: vec![1],
+            state_root: None,
+            resources: vec![],
+            lock: Script::default(),
             logic: None,
-            resources: BTreeMap::new(),
+            created_at: 0,
+            ttl: None,
+            rent_reserve: None,
+            flags: 0,
+            extensions: vec![],
             spent: false,
         };
         api.compute_store.insert_output(input).unwrap();
