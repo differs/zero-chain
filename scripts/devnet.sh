@@ -15,7 +15,7 @@ WS_PORT=28546
 usage() {
     cat <<'EOF'
 Usage:
-  scripts/devnet.sh start [--mine] [--coinbase ZER0x...|0x...] [--clean-data]
+  scripts/devnet.sh start [--mine] [--coinbase ZER0x...] [--clean-data]
   scripts/devnet.sh stop
   scripts/devnet.sh status
   scripts/devnet.sh logs

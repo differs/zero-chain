@@ -202,7 +202,7 @@ impl RpcConfig {
             return Err("network_id must be non-zero".to_string());
         }
         if parse_address(&self.coinbase).is_err() {
-            return Err("coinbase must be a valid 20-byte address (ZER0x... or 0x...)".to_string());
+            return Err("coinbase must be a valid 20-byte address with ZER0x prefix".to_string());
         }
         if let Some(token) = &self.auth_token {
             if token.trim().is_empty() {
@@ -1631,18 +1631,16 @@ fn build_compute_kv_backend(config: &RpcConfig) -> Arc<dyn KeyValueDB> {
 
 fn parse_address(s: &str) -> Result<Address, RpcErrorObject> {
     let raw = s.trim();
-    let body = raw
-        .strip_prefix("ZER0x")
-        .or_else(|| raw.strip_prefix("0x"))
-        .unwrap_or(raw);
-    let bytes = hex::decode(body)
-        .map_err(|e| RpcErrorObject::invalid_params(format!("Invalid address: {}", e)))?;
-
-    if bytes.len() != 20 {
+    let body = raw.strip_prefix("ZER0x").ok_or_else(|| {
+        RpcErrorObject::invalid_params("Address must use ZER0x prefix".to_string())
+    })?;
+    if body.len() != 40 || !body.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(RpcErrorObject::invalid_params(
-            "Address must be 20 bytes".into(),
+            "Address must be 20 bytes".to_string(),
         ));
     }
+    let bytes = hex::decode(body)
+        .map_err(|e| RpcErrorObject::invalid_params(format!("Invalid address: {}", e)))?;
 
     Ok(Address::from_slice(&bytes).unwrap())
 }
@@ -1745,7 +1743,7 @@ fn block_to_zero_block_json(block: &Block) -> serde_json::Value {
         "timestamp": block.header.timestamp,
         "difficulty": format!("0x{:x}", block.header.difficulty.as_u64()),
         "nonce": block.header.nonce,
-        "coinbase": block.header.coinbase.to_checksum_hex(),
+        "coinbase": format_zero_address(block.header.coinbase),
         "mix_hash": format!("0x{}", hex::encode(block.header.mix_hash.as_bytes())),
         "extra_data": format!("0x{}", hex::encode(&block.header.extra_data)),
     })
@@ -2784,8 +2782,8 @@ mod tests {
             persistent_store,
             domains,
         );
-        let from = parse_address("0x1111111111111111111111111111111111111111").unwrap();
-        let to = parse_address("0x2222222222222222222222222222222222222222").unwrap();
+        let from = parse_address("ZER0x1111111111111111111111111111111111111111").unwrap();
+        let to = parse_address("ZER0x2222222222222222222222222222222222222222").unwrap();
 
         let mut from_account = Account {
             address: from,
@@ -2799,8 +2797,8 @@ mod tests {
 
         let tx_hash = api
             .zero_transfer(Some(vec![serde_json::json!({
-                "from": "0x1111111111111111111111111111111111111111",
-                "to": "0x2222222222222222222222222222222222222222",
+                "from": "ZER0x1111111111111111111111111111111111111111",
+                "to": "ZER0x2222222222222222222222222222222222222222",
                 "value": "0x3e8"
             })]))
             .expect("send tx should succeed");
@@ -2960,7 +2958,7 @@ mod tests {
                 "timestamp": latest["timestamp"].as_u64().unwrap_or(1) + 1,
                 "difficulty": latest["difficulty"].as_str().unwrap_or("0x1"),
                 "nonce": 1,
-                "coinbase": latest["coinbase"].as_str().unwrap_or("0x0000000000000000000000000000000000000000"),
+                "coinbase": latest["coinbase"].as_str().unwrap_or("ZER0x0000000000000000000000000000000000000000"),
                 "mix_hash": latest["mix_hash"].as_str().unwrap_or("0x0000000000000000000000000000000000000000000000000000000000000000"),
                 "extra_data": "0x"
             })]))
@@ -3049,14 +3047,14 @@ mod tests {
 
     #[test]
     fn test_parse_address() {
-        let addr = parse_address("0x0000000000000000000000000000000000000001").unwrap();
+        let addr = parse_address("ZER0x0000000000000000000000000000000000000001").unwrap();
         assert!(!addr.is_zero());
     }
 
     #[test]
-    fn test_parse_zero_prefixed_address() {
-        let addr = parse_address("ZER0x0000000000000000000000000000000000000001").unwrap();
-        assert!(!addr.is_zero());
+    fn test_parse_address_rejects_0x_prefix() {
+        let err = parse_address("0x0000000000000000000000000000000000000001");
+        assert!(err.is_err());
     }
 
     #[test]
@@ -3067,7 +3065,7 @@ mod tests {
 
     #[test]
     fn test_format_zero_address_prefix() {
-        let addr = parse_address("0x1111111111111111111111111111111111111111").unwrap();
+        let addr = parse_address("ZER0x1111111111111111111111111111111111111111").unwrap();
         let formatted = format_zero_address(addr);
         assert!(formatted.starts_with("ZER0x"));
         assert_eq!(formatted.len(), 45);
@@ -3261,7 +3259,7 @@ mod tests {
                 "object_id": format!("0x{}", hex::encode([0xD4u8; 32])),
                 "domain_id": 0,
                 "kind": "Asset",
-                "owner": { "type": "Address", "address": "0x1111111111111111111111111111111111111111" },
+                "owner": { "type": "Address", "address": "ZER0x1111111111111111111111111111111111111111" },
                 "predecessor": null,
                 "version": 1,
                 "state": "0x01",
@@ -3358,7 +3356,7 @@ mod tests {
                 "object_id": format!("0x{}", hex::encode([0xF3u8; 32])),
                 "domain_id": 0,
                 "kind": "Asset",
-                "owner": { "type": "Address", "address": "0x2222222222222222222222222222222222222222" },
+                "owner": { "type": "Address", "address": "ZER0x2222222222222222222222222222222222222222" },
                 "predecessor": format!("0x{}", hex::encode([0xF2u8; 32])),
                 "version": 2,
                 "state": "0x01",
@@ -3435,7 +3433,7 @@ mod tests {
                 "object_id": format!("0x{}", hex::encode([0xACu8; 32])),
                 "domain_id": 0,
                 "kind": "Asset",
-                "owner": { "type": "Address", "address": owner_addr.to_checksum_hex() },
+                "owner": { "type": "Address", "address": format_zero_address(owner_addr) },
                 "predecessor": format!("0x{}", hex::encode([0xABu8; 32])),
                 "version": 2,
                 "state": "0x02",
