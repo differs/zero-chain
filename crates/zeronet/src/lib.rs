@@ -22,25 +22,37 @@ pub use sync::{SyncManager, SyncState};
 
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
+use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::{interval, timeout, MissedTickBehavior};
 use uuid::Uuid;
+use zerocore::crypto::Hash;
 
 static GLOBAL_PEER_COUNT: AtomicUsize = AtomicUsize::new(0);
 static GLOBAL_PEER_INFOS: Lazy<RwLock<Vec<PeerInfo>>> = Lazy::new(|| RwLock::new(Vec::new()));
+static SEEN_TX_HASHES: Lazy<RwLock<HashMap<String, u64>>> =
+    Lazy::new(|| RwLock::new(HashMap::new()));
+static SEEN_BLOCK_HASHES: Lazy<RwLock<HashMap<String, u64>>> =
+    Lazy::new(|| RwLock::new(HashMap::new()));
+
 const HANDSHAKE_PREFIX: &str = "ZERO/1";
 const HANDSHAKE_MAX_LEN: usize = 512;
 const HANDSHAKE_TIMEOUT_SECS: u64 = 5;
 const HEARTBEAT_PING: &[u8] = b"ZERO/PING\n";
 const HEARTBEAT_PONG: &[u8] = b"ZERO/PONG\n";
-const CONTROL_FRAME_MAX_LEN: usize = 256;
+const CONTROL_FRAME_MAX_LEN: usize = 1024;
 const HEARTBEAT_INTERVAL_SECS: u64 = 15;
 const PEER_IDLE_TIMEOUT_SECS: u64 = 45;
+const PEER_SEND_BUFFER: usize = 256;
+const DEFAULT_DEDUP_TTL_SECS: u64 = 5 * 60;
+const MAX_DEDUP_ENTRIES: usize = 8192;
 
 /// Returns the current process-level peer count.
 pub fn global_peer_count() -> usize {
@@ -102,6 +114,18 @@ pub struct NetworkConfig {
     pub enable_discovery: bool,
     /// Enable sync
     pub enable_sync: bool,
+    /// Optional persisted banlist path.
+    pub banlist_path: Option<String>,
+    /// Default ban duration for abusive peers.
+    pub ban_duration_secs: u64,
+    /// Maximum active inbound peers accepted per source IP.
+    pub max_inbound_per_ip: u32,
+    /// Maximum inbound connection attempts per IP per minute.
+    pub max_inbound_rate_per_minute: u32,
+    /// Maximum inbound gossip frames per peer per minute.
+    pub max_gossip_per_peer_per_minute: u32,
+    /// Retry interval for reconnecting bootnodes.
+    pub bootnode_retry_interval_secs: u64,
 }
 
 impl Default for NetworkConfig {
@@ -117,6 +141,12 @@ impl Default for NetworkConfig {
             node_name: "ZeroChain/v0.1.0".to_string(),
             enable_discovery: true,
             enable_sync: true,
+            banlist_path: None,
+            ban_duration_secs: 10 * 60,
+            max_inbound_per_ip: 8,
+            max_inbound_rate_per_minute: 120,
+            max_gossip_per_peer_per_minute: 240,
+            bootnode_retry_interval_secs: 15,
         }
     }
 }
@@ -130,13 +160,18 @@ pub struct NetworkService {
     sync_manager: Option<Arc<SyncManager>>,
     is_running: RwLock<bool>,
     listener_task: RwLock<Option<JoinHandle<()>>>,
+    bootnode_task: RwLock<Option<JoinHandle<()>>>,
 }
 
 impl NetworkService {
     /// Create new network service
     pub fn new(config: NetworkConfig) -> Result<Self> {
         let local_peer_id = format!("node-{}", Uuid::new_v4().simple());
-        let peer_manager = Arc::new(PeerManager::new(config.max_peers));
+        let peer_manager = Arc::new(PeerManager::new_with_policy(
+            config.max_peers,
+            config.banlist_path.clone().map(PathBuf::from),
+            config.ban_duration_secs,
+        ));
 
         let discovery = if config.enable_discovery {
             Some(Arc::new(Discovery::new(&config)?))
@@ -158,6 +193,7 @@ impl NetworkService {
             sync_manager,
             is_running: RwLock::new(false),
             listener_task: RwLock::new(None),
+            bootnode_task: RwLock::new(None),
         })
     }
 
@@ -175,9 +211,10 @@ impl NetworkService {
         // Start listening
         self.start_listening().await?;
 
-        // Connect to bootnodes
+        // Connect to bootnodes immediately
         if !self.config.bootnodes.is_empty() {
-            self.connect_bootnodes().await?;
+            self.connect_bootnodes_once().await;
+            self.start_bootnode_reconnector();
         }
 
         // Start discovery
@@ -192,6 +229,7 @@ impl NetworkService {
 
         *self.is_running.write() = true;
         set_global_peer_count(self.peer_manager.peer_count());
+        set_global_peers(self.peer_manager.get_active_peer_infos());
 
         tracing::info!("Network service started");
 
@@ -219,6 +257,9 @@ impl NetworkService {
         if let Some(task) = self.listener_task.write().take() {
             task.abort();
         }
+        if let Some(task) = self.bootnode_task.write().take() {
+            task.abort();
+        }
 
         // Disconnect all peers
         self.peer_manager.disconnect_all_peers();
@@ -233,7 +274,7 @@ impl NetworkService {
     }
 
     /// Broadcast transaction to all peers
-    pub fn broadcast_transaction(&self, tx_hash: zerocore::crypto::Hash) {
+    pub fn broadcast_transaction(&self, tx_hash: Hash) {
         let message = ProtocolMessage::NewTransaction(tx_hash);
 
         for peer in self.peer_manager.get_active_peers() {
@@ -265,6 +306,7 @@ impl NetworkService {
         let result = self.peer_manager.add_peer(node_record);
         if result.is_ok() {
             set_global_peer_count(self.peer_manager.peer_count());
+            set_global_peers(self.peer_manager.get_active_peer_infos());
         }
         result
     }
@@ -274,6 +316,7 @@ impl NetworkService {
         let result = self.peer_manager.remove_peer(peer_id);
         if result.is_ok() {
             set_global_peer_count(self.peer_manager.peer_count());
+            set_global_peers(self.peer_manager.get_active_peer_infos());
         }
         result
     }
@@ -287,11 +330,52 @@ impl NetworkService {
         let expected_network_id = self.config.network_id;
         let local_peer_id = self.local_peer_id.clone();
         let peer_manager = self.peer_manager.clone();
+        let max_inbound_per_ip = self.config.max_inbound_per_ip.max(1);
+        let max_inbound_rate_per_minute = self.config.max_inbound_rate_per_minute.max(1);
+        let max_gossip_per_peer_per_minute = self.config.max_gossip_per_peer_per_minute.max(1);
+        let ban_duration_secs = self.config.ban_duration_secs;
+
         let task = tokio::spawn(async move {
+            let mut inbound_windows: HashMap<String, VecDeque<u64>> = HashMap::new();
             tracing::info!("P2P listener started on {}", bind_addr);
             loop {
                 match listener.accept().await {
                     Ok((mut stream, remote_addr)) => {
+                        peer_manager.cleanup_expired_bans();
+                        let remote_ip = remote_addr.ip().to_string();
+
+                        if peer_manager.is_ip_banned(&remote_ip) {
+                            tracing::warn!("drop inbound from banned ip {}", remote_addr);
+                            continue;
+                        }
+
+                        if peer_manager.connected_peers_for_ip(&remote_ip)
+                            >= max_inbound_per_ip as usize
+                        {
+                            tracing::warn!(
+                                "ip {} exceeded max inbound peers ({})",
+                                remote_ip,
+                                max_inbound_per_ip
+                            );
+                            peer_manager.ban_ip(&remote_ip, ban_duration_secs.min(300));
+                            continue;
+                        }
+
+                        if !allow_ip_rate(
+                            &mut inbound_windows,
+                            &remote_ip,
+                            max_inbound_rate_per_minute,
+                            current_timestamp(),
+                        ) {
+                            tracing::warn!(
+                                "ip {} exceeded inbound connection rate ({} / min)",
+                                remote_ip,
+                                max_inbound_rate_per_minute
+                            );
+                            peer_manager.ban_ip(&remote_ip, ban_duration_secs.min(180));
+                            continue;
+                        }
+
                         let (remote_network_id, remote_peer_id) = match inbound_handshake(
                             &mut stream,
                             expected_network_id,
@@ -318,7 +402,8 @@ impl NetworkService {
                             network_id: remote_network_id,
                         };
 
-                        if let Err(err) = peer_manager.add_peer(node_record) {
+                        let (tx, rx) = mpsc::channel(PEER_SEND_BUFFER);
+                        if let Err(err) = peer_manager.add_peer_with_sender(node_record, tx) {
                             tracing::warn!(
                                 "failed to register inbound peer {}: {}",
                                 remote_addr,
@@ -328,10 +413,14 @@ impl NetworkService {
                         }
 
                         set_global_peer_count(peer_manager.peer_count());
+                        set_global_peers(peer_manager.get_active_peer_infos());
                         tokio::spawn(monitor_peer_socket(
                             peer_manager.clone(),
                             remote_peer_id,
                             stream,
+                            rx,
+                            ban_duration_secs,
+                            max_gossip_per_peer_per_minute,
                         ));
                     }
                     Err(err) => {
@@ -346,86 +435,137 @@ impl NetworkService {
         Ok(())
     }
 
-    async fn connect_bootnodes(&self) -> Result<()> {
-        for bootnode in &self.config.bootnodes {
-            match NodeRecord::from_enode(bootnode) {
-                Ok(record) => {
-                    let addr = format!("{}:{}", record.ip, record.tcp_port);
-                    match tokio::time::timeout(
-                        std::time::Duration::from_secs(5),
-                        TcpStream::connect(&addr),
+    fn start_bootnode_reconnector(&self) {
+        if self.config.bootnodes.is_empty() {
+            return;
+        }
+
+        let bootnodes = self.config.bootnodes.clone();
+        let expected_network_id = self.config.network_id;
+        let local_peer_id = self.local_peer_id.clone();
+        let retry_secs = self.config.bootnode_retry_interval_secs.max(3);
+        let peer_manager = self.peer_manager.clone();
+        let ban_duration_secs = self.config.ban_duration_secs;
+        let max_gossip_per_peer_per_minute = self.config.max_gossip_per_peer_per_minute.max(1);
+
+        let task = tokio::spawn(async move {
+            let mut ticker = interval(std::time::Duration::from_secs(retry_secs));
+            ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                peer_manager.cleanup_expired_bans();
+                for bootnode in &bootnodes {
+                    if let Err(err) = connect_single_bootnode(
+                        bootnode,
+                        expected_network_id,
+                        &local_peer_id,
+                        peer_manager.clone(),
+                        ban_duration_secs,
+                        max_gossip_per_peer_per_minute,
                     )
                     .await
                     {
-                        Ok(Ok(mut stream)) => {
-                            let (remote_network_id, remote_peer_id) = match outbound_handshake(
-                                &mut stream,
-                                self.config.network_id,
-                                &self.local_peer_id,
-                            )
-                            .await
-                            {
-                                Ok(v) => v,
-                                Err(err) => {
-                                    tracing::warn!(
-                                        "bootnode handshake failed {}: {}",
-                                        bootnode,
-                                        err
-                                    );
-                                    continue;
-                                }
-                            };
-                            let node_record = NodeRecord {
-                                peer_id: remote_peer_id.clone(),
-                                ip: record.ip.clone(),
-                                tcp_port: record.tcp_port,
-                                udp_port: record.udp_port,
-                                network_id: remote_network_id,
-                            };
-                            if let Err(err) = self.add_peer(node_record) {
-                                tracing::warn!(
-                                    "Failed to register bootnode {} as peer: {}",
-                                    bootnode,
-                                    err
-                                );
-                                continue;
-                            }
-                            tokio::spawn(monitor_peer_socket(
-                                self.peer_manager.clone(),
-                                remote_peer_id,
-                                stream,
-                            ));
-                        }
-                        Ok(Err(err)) => {
-                            tracing::warn!("Failed to connect bootnode {}: {}", bootnode, err);
-                        }
-                        Err(_) => {
-                            tracing::warn!("Bootnode connect timeout: {}", bootnode);
-                        }
+                        tracing::debug!("bootnode reconnect skipped {}: {}", bootnode, err);
                     }
                 }
-                Err(e) => {
-                    tracing::warn!("Invalid bootnode {}: {}", bootnode, e);
-                }
+            }
+        });
+
+        *self.bootnode_task.write() = Some(task);
+    }
+
+    async fn connect_bootnodes_once(&self) {
+        for bootnode in &self.config.bootnodes {
+            if let Err(err) = connect_single_bootnode(
+                bootnode,
+                self.config.network_id,
+                &self.local_peer_id,
+                self.peer_manager.clone(),
+                self.config.ban_duration_secs,
+                self.config.max_gossip_per_peer_per_minute.max(1),
+            )
+            .await
+            {
+                tracing::warn!("Failed to connect bootnode {}: {}", bootnode, err);
             }
         }
-
-        Ok(())
     }
+}
+
+async fn connect_single_bootnode(
+    bootnode: &str,
+    expected_network_id: u64,
+    local_peer_id: &str,
+    peer_manager: Arc<PeerManager>,
+    ban_duration_secs: u64,
+    max_gossip_per_peer_per_minute: u32,
+) -> Result<()> {
+    let record = NodeRecord::from_enode(bootnode)?;
+
+    if peer_manager.get_peer(&record.peer_id).is_some() {
+        return Ok(());
+    }
+
+    if peer_manager.is_ip_banned(&record.ip) {
+        return Err(NetworkError::ConnectionError(format!(
+            "bootnode ip {} is banned",
+            record.ip
+        )));
+    }
+
+    let addr = format!("{}:{}", record.ip, record.tcp_port);
+    let mut stream =
+        tokio::time::timeout(std::time::Duration::from_secs(5), TcpStream::connect(&addr))
+            .await
+            .map_err(|_| NetworkError::ConnectionError(format!("connect timeout: {}", bootnode)))?
+            .map_err(|e| {
+                NetworkError::ConnectionError(format!("connect failed {}: {e}", bootnode))
+            })?;
+
+    let (remote_network_id, remote_peer_id) =
+        outbound_handshake(&mut stream, expected_network_id, local_peer_id).await?;
+
+    let node_record = NodeRecord {
+        peer_id: remote_peer_id.clone(),
+        ip: record.ip,
+        tcp_port: record.tcp_port,
+        udp_port: record.udp_port,
+        network_id: remote_network_id,
+    };
+
+    let (tx, rx) = mpsc::channel(PEER_SEND_BUFFER);
+    peer_manager.add_peer_with_sender(node_record, tx)?;
+    set_global_peer_count(peer_manager.peer_count());
+    set_global_peers(peer_manager.get_active_peer_infos());
+
+    tokio::spawn(monitor_peer_socket(
+        peer_manager,
+        remote_peer_id,
+        stream,
+        rx,
+        ban_duration_secs,
+        max_gossip_per_peer_per_minute,
+    ));
+
+    Ok(())
 }
 
 async fn monitor_peer_socket(
     peer_manager: Arc<PeerManager>,
     peer_id: String,
     mut stream: TcpStream,
+    mut outbound_rx: mpsc::Receiver<ProtocolMessage>,
+    ban_duration_secs: u64,
+    max_gossip_per_peer_per_minute: u32,
 ) {
     let _ = peer_manager.touch_peer(&peer_id);
-    let mut ticker = interval(std::time::Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
-    ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut heartbeat = interval(std::time::Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
+    heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut inbound_window: VecDeque<u64> = VecDeque::new();
 
     loop {
         tokio::select! {
-            _ = ticker.tick() => {
+            _ = heartbeat.tick() => {
                 if let Err(err) = stream.write_all(HEARTBEAT_PING).await {
                     tracing::debug!("heartbeat write failed for {}: {}", peer_id, err);
                     break;
@@ -451,6 +591,38 @@ async fn monitor_peer_socket(
                     Ok(ControlFrame::Pong) => {
                         let _ = peer_manager.touch_peer(&peer_id);
                     }
+                    Ok(ControlFrame::Tx(tx_hash)) => {
+                        let now = current_timestamp();
+                        if !allow_rate_window(&mut inbound_window, max_gossip_per_peer_per_minute, now) {
+                            tracing::warn!("peer {} exceeded gossip rate limit", peer_id);
+                            peer_manager.ban_peer(&peer_id, ban_duration_secs.min(300));
+                            break;
+                        }
+                        let _ = peer_manager.touch_peer(&peer_id);
+                        if mark_seen_hash(&SEEN_TX_HASHES, hash_to_hex(&tx_hash), now) {
+                            peer_manager.broadcast_except(&peer_id, ProtocolMessage::NewTransaction(tx_hash));
+                        }
+                    }
+                    Ok(ControlFrame::BlockHash(block_hash)) => {
+                        let now = current_timestamp();
+                        if !allow_rate_window(&mut inbound_window, max_gossip_per_peer_per_minute, now) {
+                            tracing::warn!("peer {} exceeded gossip rate limit", peer_id);
+                            peer_manager.ban_peer(&peer_id, ban_duration_secs.min(300));
+                            break;
+                        }
+                        let _ = peer_manager.touch_peer(&peer_id);
+                        if mark_seen_hash(&SEEN_BLOCK_HASHES, hash_to_hex(&block_hash), now) {
+                            peer_manager.broadcast_except(&peer_id, ProtocolMessage::NewBlockHash(block_hash));
+                        }
+                    }
+                    Ok(ControlFrame::Head(height)) => {
+                        let _ = peer_manager.touch_peer(&peer_id);
+                        let _ = peer_manager.update_peer_height(&peer_id, height);
+                    }
+                    Ok(ControlFrame::Disconnect(reason)) => {
+                        tracing::debug!("peer {} requested disconnect: {}", peer_id, reason);
+                        break;
+                    }
                     Ok(ControlFrame::Other(line)) => {
                         tracing::debug!("received non-control frame from {}: {}", peer_id, line);
                         let _ = peer_manager.touch_peer(&peer_id);
@@ -462,22 +634,38 @@ async fn monitor_peer_socket(
                     }
                 }
             }
+            outbound = outbound_rx.recv() => {
+                match outbound {
+                    Some(message) => {
+                        if let Err(err) = write_protocol_message(&mut stream, message).await {
+                            tracing::debug!("write protocol message to {} failed: {}", peer_id, err);
+                            break;
+                        }
+                    }
+                    None => break,
+                }
+            }
         }
     }
 
     let _ = peer_manager.remove_peer(&peer_id);
     set_global_peer_count(peer_manager.peer_count());
+    set_global_peers(peer_manager.get_active_peer_infos());
 }
 
 enum ControlFrame {
     Ping,
     Pong,
+    Tx(Hash),
+    BlockHash(Hash),
+    Head(u64),
+    Disconnect(String),
     Other(String),
     Eof,
 }
 
 async fn read_control_frame(stream: &mut TcpStream) -> std::io::Result<ControlFrame> {
-    let mut line = Vec::with_capacity(32);
+    let mut line = Vec::with_capacity(64);
     loop {
         let mut b = [0u8; 1];
         let read = stream.read(&mut b).await?;
@@ -502,13 +690,151 @@ async fn read_control_frame(stream: &mut TcpStream) -> std::io::Result<ControlFr
             format!("control frame is not utf8: {err}"),
         )
     })?;
+
     let normalized = line.trim();
-    let frame = match normalized {
-        "ZERO/PING" => ControlFrame::Ping,
-        "ZERO/PONG" => ControlFrame::Pong,
-        _ => ControlFrame::Other(normalized.to_string()),
+    if normalized == "ZERO/PING" {
+        return Ok(ControlFrame::Ping);
+    }
+    if normalized == "ZERO/PONG" {
+        return Ok(ControlFrame::Pong);
+    }
+    if let Some(raw) = normalized.strip_prefix("ZERO/TX ") {
+        if let Some(hash) = parse_hash(raw.trim()) {
+            return Ok(ControlFrame::Tx(hash));
+        }
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid tx hash frame",
+        ));
+    }
+    if let Some(raw) = normalized.strip_prefix("ZERO/BLOCK ") {
+        if let Some(hash) = parse_hash(raw.trim()) {
+            return Ok(ControlFrame::BlockHash(hash));
+        }
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid block hash frame",
+        ));
+    }
+    if let Some(raw) = normalized.strip_prefix("ZERO/HEAD ") {
+        let height = raw.trim().parse::<u64>().map_err(|err| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid head height: {err}"),
+            )
+        })?;
+        return Ok(ControlFrame::Head(height));
+    }
+    if let Some(reason) = normalized.strip_prefix("ZERO/DISCONNECT ") {
+        return Ok(ControlFrame::Disconnect(reason.to_string()));
+    }
+
+    Ok(ControlFrame::Other(normalized.to_string()))
+}
+
+async fn write_protocol_message(
+    stream: &mut TcpStream,
+    message: ProtocolMessage,
+) -> std::io::Result<()> {
+    let maybe_line = match message {
+        ProtocolMessage::Disconnect(reason) => {
+            Some(format!("ZERO/DISCONNECT {}\n", sanitize_line(&reason)))
+        }
+        ProtocolMessage::NewTransaction(tx_hash) => {
+            Some(format!("ZERO/TX {}\n", hash_to_hex(&tx_hash)))
+        }
+        ProtocolMessage::NewBlock(block) => {
+            Some(format!("ZERO/BLOCK {}\n", hash_to_hex(&block.header.hash)))
+        }
+        ProtocolMessage::NewBlockHash(block_hash) => {
+            Some(format!("ZERO/BLOCK {}\n", hash_to_hex(&block_hash)))
+        }
+        ProtocolMessage::GetBlock(block_hash) => {
+            Some(format!("ZERO/GETBLOCK {}\n", hash_to_hex(&block_hash)))
+        }
+        ProtocolMessage::GetTransactions(hashes) => {
+            let joined = hashes.iter().map(hash_to_hex).collect::<Vec<_>>().join(",");
+            Some(format!("ZERO/GETTX {}\n", joined))
+        }
+        ProtocolMessage::Transactions(_) | ProtocolMessage::Block(_) => None,
     };
-    Ok(frame)
+
+    if let Some(line) = maybe_line {
+        stream.write_all(line.as_bytes()).await?;
+    }
+    Ok(())
+}
+
+fn sanitize_line(input: &str) -> String {
+    input
+        .chars()
+        .filter(|c| *c != '\n' && *c != '\r')
+        .take(256)
+        .collect()
+}
+
+fn parse_hash(raw: &str) -> Option<Hash> {
+    let bytes = hex::decode(raw.strip_prefix("0x").unwrap_or(raw)).ok()?;
+    if bytes.len() != 32 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&bytes);
+    Some(Hash::from_bytes(out))
+}
+
+fn hash_to_hex(hash: &Hash) -> String {
+    format!("0x{}", hex::encode(hash.as_bytes()))
+}
+
+fn allow_ip_rate(
+    windows: &mut HashMap<String, VecDeque<u64>>,
+    ip: &str,
+    limit_per_minute: u32,
+    now: u64,
+) -> bool {
+    let window = windows.entry(ip.to_string()).or_default();
+    allow_rate_window(window, limit_per_minute, now)
+}
+
+fn allow_rate_window(window: &mut VecDeque<u64>, limit_per_minute: u32, now: u64) -> bool {
+    while let Some(ts) = window.front() {
+        if now.saturating_sub(*ts) > 60 {
+            window.pop_front();
+        } else {
+            break;
+        }
+    }
+
+    if window.len() >= limit_per_minute as usize {
+        return false;
+    }
+
+    window.push_back(now);
+    true
+}
+
+fn mark_seen_hash(seen: &Lazy<RwLock<HashMap<String, u64>>>, key: String, now: u64) -> bool {
+    let mut store = seen.write();
+    store.retain(|_, ts| now.saturating_sub(*ts) <= DEFAULT_DEDUP_TTL_SECS);
+    if store.contains_key(&key) {
+        return false;
+    }
+
+    if store.len() >= MAX_DEDUP_ENTRIES {
+        // Drop oldest half to keep memory bounded.
+        let mut items = store
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect::<Vec<_>>();
+        items.sort_by_key(|(_, ts)| *ts);
+        for (k, _) in items.into_iter().take(MAX_DEDUP_ENTRIES / 2) {
+            store.remove(&k);
+        }
+    }
+
+    store.insert(key, now);
+    true
 }
 
 async fn inbound_handshake(

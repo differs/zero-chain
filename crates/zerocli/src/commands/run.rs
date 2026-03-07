@@ -22,6 +22,12 @@ pub async fn run_node(
     max_peers: u32,
     enable_discovery: bool,
     enable_sync: bool,
+    p2p_banlist_path: Option<String>,
+    p2p_ban_duration_secs: u64,
+    p2p_max_inbound_per_ip: u32,
+    p2p_max_inbound_rate_per_minute: u32,
+    p2p_max_gossip_per_peer_per_minute: u32,
+    p2p_bootnode_retry_interval_secs: u64,
 ) -> Result<()> {
     println!("🚀 Starting ZeroChain node...");
     println!("   Data directory: {}", data_dir);
@@ -42,8 +48,20 @@ pub async fn run_node(
         "   Sync: {}",
         if enable_sync { "enabled" } else { "disabled" }
     );
+    println!(
+        "   P2P DoS guard: max_per_ip={}, inbound_rate/min={}, gossip_rate/min={}",
+        p2p_max_inbound_per_ip, p2p_max_inbound_rate_per_minute, p2p_max_gossip_per_peer_per_minute
+    );
+    println!("   P2P ban duration: {}s", p2p_ban_duration_secs);
+    println!(
+        "   Bootnode reconnect interval: {}s",
+        p2p_bootnode_retry_interval_secs
+    );
     if !bootnodes.is_empty() {
         println!("   Bootnodes: {}", bootnodes.join(", "));
+    }
+    if let Some(ref banlist_path) = p2p_banlist_path {
+        println!("   P2P banlist: {}", banlist_path);
     }
     if let Some(ref cb) = coinbase {
         println!("   Coinbase: {}", cb);
@@ -158,6 +176,12 @@ pub async fn run_node(
         bootnodes,
         enable_discovery,
         enable_sync,
+        banlist_path: p2p_banlist_path,
+        ban_duration_secs: p2p_ban_duration_secs,
+        max_inbound_per_ip: p2p_max_inbound_per_ip,
+        max_inbound_rate_per_minute: p2p_max_inbound_rate_per_minute,
+        max_gossip_per_peer_per_minute: p2p_max_gossip_per_peer_per_minute,
+        bootnode_retry_interval_secs: p2p_bootnode_retry_interval_secs,
         ..NetworkConfig::default()
     };
     let network_service = NetworkService::new(network_cfg)?;

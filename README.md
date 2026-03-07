@@ -120,6 +120,22 @@ cargo test
 curl -s -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"net_peerCount","params":[]}' \
   http://127.0.0.1:28645
+
+# hardened node baseline (rpc auth+rate limit + p2p dos guardrails)
+./target/release/zerocchain run \
+  --rpc-auth-token "replace-with-long-token" \
+  --rpc-rate-limit-per-minute 600 \
+  --p2p-ban-duration-secs 600 \
+  --p2p-max-inbound-per-ip 8 \
+  --p2p-max-inbound-rate-per-minute 120 \
+  --p2p-max-gossip-per-peer-per-minute 240 \
+  --p2p-bootnode-retry-interval-secs 15
+
+# inspect detailed peers
+curl -s -H "Content-Type: application/json" \
+  -H "Authorization: Bearer replace-with-long-token" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"zero_peers","params":[]}' \
+  http://127.0.0.1:8545
 ```
 
 ### CLI Commands

@@ -93,6 +93,14 @@ enum Commands {
         #[arg(long)]
         rpc_coinbase: Option<String>,
 
+        /// Optional static RPC auth token (Bearer or x-zero-token)
+        #[arg(long)]
+        rpc_auth_token: Option<String>,
+
+        /// RPC rate limit budget per client per minute, 0 to disable
+        #[arg(long, default_value = "600")]
+        rpc_rate_limit_per_minute: u32,
+
         /// P2P listen address
         #[arg(long, default_value = "0.0.0.0")]
         p2p_listen_addr: String,
@@ -116,6 +124,30 @@ enum Commands {
         /// Disable sync service
         #[arg(long, default_value_t = false)]
         disable_sync: bool,
+
+        /// Optional persisted banlist path for P2P peers/IPs
+        #[arg(long)]
+        p2p_banlist_path: Option<String>,
+
+        /// Default ban duration in seconds for abusive peers
+        #[arg(long, default_value = "600")]
+        p2p_ban_duration_secs: u64,
+
+        /// Maximum active inbound peers per source IP
+        #[arg(long, default_value = "8")]
+        p2p_max_inbound_per_ip: u32,
+
+        /// Maximum inbound connection attempts per source IP per minute
+        #[arg(long, default_value = "120")]
+        p2p_max_inbound_rate_per_minute: u32,
+
+        /// Maximum inbound gossip frames per peer per minute
+        #[arg(long, default_value = "240")]
+        p2p_max_gossip_per_peer_per_minute: u32,
+
+        /// Retry interval for reconnecting missing bootnodes
+        #[arg(long, default_value = "15")]
+        p2p_bootnode_retry_interval_secs: u64,
     },
 
     /// Initialize data directory
@@ -306,12 +338,20 @@ async fn main() -> Result<()> {
             chain_id,
             rpc_network_id,
             rpc_coinbase,
+            rpc_auth_token,
+            rpc_rate_limit_per_minute,
             p2p_listen_addr,
             p2p_listen_port,
             bootnodes,
             max_peers,
             disable_discovery,
             disable_sync,
+            p2p_banlist_path,
+            p2p_ban_duration_secs,
+            p2p_max_inbound_per_ip,
+            p2p_max_inbound_rate_per_minute,
+            p2p_max_gossip_per_peer_per_minute,
+            p2p_bootnode_retry_interval_secs,
         }) => {
             let mut api_config = if let Some(path) = &cli.config {
                 commands::init::load_api_config(path)?
@@ -339,6 +379,8 @@ async fn main() -> Result<()> {
                 chain_id,
                 network_id: rpc_network_id,
                 coinbase: rpc_coinbase,
+                auth_token: rpc_auth_token,
+                rate_limit_per_minute: rpc_rate_limit_per_minute,
                 ..api_config.http_rpc
             };
             api_config.ws.port = ws_port;
@@ -350,6 +392,18 @@ async fn main() -> Result<()> {
             println!(
                 "   rpc: {}:{}",
                 api_config.http_rpc.address, api_config.http_rpc.port
+            );
+            println!(
+                "   rpc auth: {}",
+                if api_config.http_rpc.auth_token.is_some() {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            );
+            println!(
+                "   rpc rate limit: {} req/min",
+                api_config.http_rpc.rate_limit_per_minute
             );
             println!("   p2p: {}:{}", p2p_listen_addr, p2p_listen_port);
             if !bootnodes.is_empty() {
@@ -369,6 +423,12 @@ async fn main() -> Result<()> {
                 max_peers,
                 !disable_discovery,
                 !disable_sync,
+                p2p_banlist_path,
+                p2p_ban_duration_secs,
+                p2p_max_inbound_per_ip,
+                p2p_max_inbound_rate_per_minute,
+                p2p_max_gossip_per_peer_per_minute,
+                p2p_bootnode_retry_interval_secs,
             )
             .await?;
         }

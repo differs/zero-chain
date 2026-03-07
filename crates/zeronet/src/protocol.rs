@@ -11,6 +11,8 @@ pub enum ProtocolMessage {
     NewTransaction(Hash),
     /// New block announcement
     NewBlock(Box<Block>),
+    /// New block hash announcement
+    NewBlockHash(Hash),
     /// Request transactions
     GetTransactions(Vec<Hash>),
     /// Request block

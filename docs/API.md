@@ -17,6 +17,35 @@
 - `compute_backend = ComputeBackend::Mem`
 - `compute_db_path = "./data/compute-db"`
 
+### RPC 安全基线配置
+
+`RpcConfig` 新增安全字段：
+
+- `auth_token`: 可选静态 token。配置后所有 JSON-RPC 请求都需携带认证头。
+- `rate_limit_per_minute`: 每客户端每分钟请求上限，`0` 表示关闭限流。
+
+支持两种认证头：
+
+- `Authorization: Bearer <token>`
+- `x-zero-token: <token>`
+
+示例：
+
+```bash
+curl -X POST http://localhost:8545 \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer demo-token" \
+  -d '{"jsonrpc":"2.0","method":"web3_clientVersion","params":[],"id":1}'
+```
+
+CLI 启用：
+
+```bash
+zerocchain run \
+  --rpc-auth-token demo-token \
+  --rpc-rate-limit-per-minute 600
+```
+
 ### CLI 多网络运行（mainnet/testnet/devnet/local）
 
 `zerocchain run` 已支持按网络 profile 启动：

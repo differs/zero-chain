@@ -1,11 +1,13 @@
 //! JSON-RPC Server Implementation
 
-use axum::{extract::DefaultBodyLimit, extract::State, routing::post, Json, Router};
+use axum::{
+    extract::DefaultBodyLimit, extract::State, http::HeaderMap, routing::post, Json, Router,
+};
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 use prometheus::{Encoder, IntCounterVec, IntGauge, Registry, TextEncoder};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::sync::oneshot;
 use tower_http::cors::{Any, CorsLayer};
@@ -133,6 +135,10 @@ pub struct RpcConfig {
     pub network_id: u64,
     /// Coinbase returned by eth_coinbase.
     pub coinbase: String,
+    /// Optional static auth token for all JSON-RPC requests.
+    pub auth_token: Option<String>,
+    /// Per-client request budget per rolling minute. `0` means disabled.
+    pub rate_limit_per_minute: u32,
 }
 
 /// Persistent backend for compute storage.
@@ -172,6 +178,8 @@ impl Default for RpcConfig {
             chain_id: 10086,
             network_id: 10086,
             coinbase: "0x0000000000000000000000000000000000000000".to_string(),
+            auth_token: None,
+            rate_limit_per_minute: 600,
         }
     }
 }
@@ -187,6 +195,11 @@ impl RpcConfig {
         }
         if Address::from_hex(&self.coinbase).is_err() {
             return Err("coinbase must be a valid 20-byte hex address".to_string());
+        }
+        if let Some(token) = &self.auth_token {
+            if token.trim().is_empty() {
+                return Err("auth_token cannot be empty".to_string());
+            }
         }
         match self.compute_backend {
             ComputeBackend::Mem => Ok(()),
@@ -1454,6 +1467,51 @@ pub struct RpcServer {
     shutdown_tx: parking_lot::Mutex<Option<oneshot::Sender<()>>>,
 }
 
+#[derive(Clone)]
+struct RpcServerState {
+    api: Arc<RpcApi>,
+    security: Arc<RpcSecurityContext>,
+}
+
+struct RpcSecurityContext {
+    auth_token: Option<String>,
+    rate_limit_per_minute: u32,
+    buckets: parking_lot::Mutex<HashMap<String, VecDeque<u64>>>,
+}
+
+impl RpcSecurityContext {
+    fn new(config: &RpcConfig) -> Self {
+        Self {
+            auth_token: config.auth_token.clone(),
+            rate_limit_per_minute: config.rate_limit_per_minute,
+            buckets: parking_lot::Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn allow_request(&self, client: &str) -> bool {
+        if self.rate_limit_per_minute == 0 {
+            return true;
+        }
+
+        let now = current_unix_secs();
+        let mut buckets = self.buckets.lock();
+        let window = buckets.entry(client.to_string()).or_default();
+        while let Some(ts) = window.front() {
+            if now.saturating_sub(*ts) > 60 {
+                window.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        if window.len() >= self.rate_limit_per_minute as usize {
+            return false;
+        }
+        window.push_back(now);
+        true
+    }
+}
+
 impl RpcServer {
     /// Creates server with validation and returns detailed error on invalid config.
     pub fn try_new(config: RpcConfig) -> Result<Self, crate::ApiError> {
@@ -1505,6 +1563,11 @@ impl RpcServer {
             .cloned()
             .ok_or_else(|| crate::ApiError::Internal("RPC API not initialized".to_string()))?;
 
+        let state = RpcServerState {
+            api,
+            security: Arc::new(RpcSecurityContext::new(&self.config)),
+        };
+
         let app = Router::new()
             .route("/", post(handle_rpc_request))
             .layer(DefaultBodyLimit::max(self.config.max_request_size))
@@ -1514,7 +1577,7 @@ impl RpcServer {
                     .allow_headers(Any)
                     .allow_methods(Any),
             )
-            .with_state(api);
+            .with_state(state);
 
         let bind_addr = format!("{}:{}", self.config.address, self.config.port);
         let listener = tokio::net::TcpListener::bind(&bind_addr)
@@ -1553,10 +1616,79 @@ impl RpcServer {
 }
 
 async fn handle_rpc_request(
-    State(api): State<Arc<RpcApi>>,
+    State(state): State<RpcServerState>,
+    headers: HeaderMap,
     Json(request): Json<JsonRpcRequest>,
 ) -> Json<JsonRpcResponse> {
-    Json(api.handle_request(request).await)
+    if !is_authorized(&headers, state.security.auth_token.as_deref()) {
+        return Json(JsonRpcResponse {
+            jsonrpc: "2.0".into(),
+            result: None,
+            error: Some(RpcErrorObject {
+                code: -32001,
+                message: "Unauthorized".into(),
+                data: None,
+            }),
+            id: request.id,
+        });
+    }
+
+    let client = extract_client_key(&headers);
+    if !state.security.allow_request(&client) {
+        return Json(JsonRpcResponse {
+            jsonrpc: "2.0".into(),
+            result: None,
+            error: Some(RpcErrorObject {
+                code: -32005,
+                message: "Rate limit exceeded".into(),
+                data: Some(serde_json::json!({
+                    "client": client,
+                    "limit_per_minute": state.security.rate_limit_per_minute
+                })),
+            }),
+            id: request.id,
+        });
+    }
+
+    Json(state.api.handle_request(request).await)
+}
+
+fn extract_client_key(headers: &HeaderMap) -> String {
+    if let Some(v) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+        let first = v.split(',').next().unwrap_or_default().trim();
+        if !first.is_empty() {
+            return first.to_string();
+        }
+    }
+    if let Some(v) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
+        let ip = v.trim();
+        if !ip.is_empty() {
+            return ip.to_string();
+        }
+    }
+    "local".to_string()
+}
+
+fn is_authorized(headers: &HeaderMap, expected_token: Option<&str>) -> bool {
+    let Some(expected) = expected_token else {
+        return true;
+    };
+
+    let bearer_ok = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(|v| v.trim() == expected)
+        .unwrap_or(false);
+    if bearer_ok {
+        return true;
+    }
+
+    headers
+        .get("x-zero-token")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.trim() == expected)
+        .unwrap_or(false)
 }
 
 fn build_default_rpc_api(config: RpcConfig) -> RpcApi {
@@ -2633,6 +2765,36 @@ mod tests {
             .zero_peers(Some(vec![serde_json::json!(1)]))
             .expect_err("zero_peers should reject params");
         assert_eq!(err.code, -32602);
+    }
+
+    #[test]
+    fn test_is_authorized_supports_bearer_and_header_token() {
+        let mut headers = HeaderMap::new();
+        assert!(!is_authorized(&headers, Some("abc")));
+
+        headers.insert(
+            "authorization",
+            axum::http::HeaderValue::from_static("Bearer abc"),
+        );
+        assert!(is_authorized(&headers, Some("abc")));
+
+        headers.remove("authorization");
+        headers.insert("x-zero-token", axum::http::HeaderValue::from_static("abc"));
+        assert!(is_authorized(&headers, Some("abc")));
+        assert!(!is_authorized(&headers, Some("def")));
+    }
+
+    #[test]
+    fn test_rate_limiter_enforces_budget() {
+        let cfg = RpcConfig {
+            rate_limit_per_minute: 2,
+            ..RpcConfig::default()
+        };
+        let limiter = RpcSecurityContext::new(&cfg);
+        assert!(limiter.allow_request("127.0.0.1"));
+        assert!(limiter.allow_request("127.0.0.1"));
+        assert!(!limiter.allow_request("127.0.0.1"));
+        assert!(limiter.allow_request("10.0.0.1"));
     }
 
     #[test]

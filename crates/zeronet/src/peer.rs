@@ -1,9 +1,13 @@
 //! Peer management module
 
+use crate::protocol::ProtocolMessage;
 use crate::{set_global_peer_count, set_global_peers, NetworkError, Result};
 use parking_lot::RwLock;
-use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use zerocore::crypto::Hash;
@@ -96,9 +100,6 @@ pub struct Peer {
     known_transactions: RwLock<HashSet<Hash>>,
 }
 
-use crate::protocol::ProtocolMessage;
-use std::collections::HashSet;
-
 impl Peer {
     /// Create new peer
     pub fn new(info: PeerInfo, tx: mpsc::Sender<ProtocolMessage>) -> Self {
@@ -138,8 +139,14 @@ impl Peer {
 
     /// Update activity timestamp
     pub fn update_activity(&self) {
-        // Would update in peer manager
+        // Updated by peer manager
     }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct PersistedBanList {
+    peers: HashMap<PeerId, u64>,
+    ips: HashMap<String, u64>,
 }
 
 /// Peer manager
@@ -150,25 +157,72 @@ pub struct PeerManager {
     peers: RwLock<HashMap<PeerId, Arc<Peer>>>,
     /// Last activity timestamps by peer
     activity: RwLock<HashMap<PeerId, u64>>,
+    /// Last advertised peer heights
+    heights: RwLock<HashMap<PeerId, u64>>,
     /// Peer scores
     scores: RwLock<HashMap<PeerId, i32>>,
+    /// Persisted banlist path
+    banlist_path: Option<PathBuf>,
+    /// Default ban duration in seconds
+    default_ban_duration_secs: u64,
+    /// Temporarily banned peers (peer_id -> expires_at)
+    banned_peers: RwLock<HashMap<PeerId, u64>>,
+    /// Temporarily banned IPs (ip -> expires_at)
+    banned_ips: RwLock<HashMap<String, u64>>,
 }
 
 impl PeerManager {
     /// Create new peer manager
     pub fn new(max_peers: u32) -> Self {
+        Self::new_with_policy(max_peers, None, 600)
+    }
+
+    /// Create peer manager with ban policy and optional persistence file.
+    pub fn new_with_policy(
+        max_peers: u32,
+        banlist_path: Option<PathBuf>,
+        default_ban_duration_secs: u64,
+    ) -> Self {
+        let (persisted_peer_bans, persisted_ip_bans) =
+            load_persisted_bans(banlist_path.as_ref()).unwrap_or_default();
+
         Self {
             max_peers,
             peers: RwLock::new(HashMap::new()),
             activity: RwLock::new(HashMap::new()),
+            heights: RwLock::new(HashMap::new()),
             scores: RwLock::new(HashMap::new()),
+            banlist_path,
+            default_ban_duration_secs,
+            banned_peers: RwLock::new(persisted_peer_bans),
+            banned_ips: RwLock::new(persisted_ip_bans),
         }
     }
 
-    /// Add peer
-    pub fn add_peer(&self, node_record: crate::discovery::NodeRecord) -> Result<()> {
+    /// Add peer with an externally managed outbound message sender.
+    pub fn add_peer_with_sender(
+        &self,
+        node_record: crate::discovery::NodeRecord,
+        tx: mpsc::Sender<ProtocolMessage>,
+    ) -> Result<()> {
+        self.cleanup_expired_bans();
+
         if self.peers.read().len() >= self.max_peers as usize {
             return Err(NetworkError::ConnectionError("Max peers reached".into()));
+        }
+
+        if self.is_banned(&node_record.peer_id) {
+            return Err(NetworkError::ConnectionError(format!(
+                "peer {} is banned",
+                node_record.peer_id
+            )));
+        }
+
+        if self.is_ip_banned(&node_record.ip) {
+            return Err(NetworkError::ConnectionError(format!(
+                "ip {} is banned",
+                node_record.ip
+            )));
         }
 
         let peer_id = node_record.peer_id.clone();
@@ -183,7 +237,6 @@ impl PeerManager {
             })?;
         let local_addr: SocketAddr = "0.0.0.0:0".parse().expect("hardcoded address must parse");
 
-        let (tx, _rx) = mpsc::channel(64);
         let info = PeerInfo::new(
             peer_id.clone(),
             remote_addr,
@@ -196,6 +249,7 @@ impl PeerManager {
         self.activity
             .write()
             .insert(peer_id.clone(), current_timestamp());
+        self.heights.write().insert(peer_id.clone(), 0);
         self.scores.write().entry(peer_id).or_insert(0);
         set_global_peer_count(self.peer_count());
         set_global_peers(self.get_active_peer_infos());
@@ -203,10 +257,17 @@ impl PeerManager {
         Ok(())
     }
 
+    /// Add peer
+    pub fn add_peer(&self, node_record: crate::discovery::NodeRecord) -> Result<()> {
+        let (tx, _rx) = mpsc::channel(64);
+        self.add_peer_with_sender(node_record, tx)
+    }
+
     /// Remove peer
     pub fn remove_peer(&self, peer_id: &str) -> Result<()> {
         self.peers.write().remove(peer_id);
         self.activity.write().remove(peer_id);
+        self.heights.write().remove(peer_id);
         self.scores.write().remove(peer_id);
         set_global_peer_count(self.peer_count());
         set_global_peers(self.get_active_peer_infos());
@@ -250,6 +311,15 @@ impl PeerManager {
         self.peers.read().len()
     }
 
+    /// Count currently connected peers for a specific remote IP.
+    pub fn connected_peers_for_ip(&self, ip: &str) -> usize {
+        self.peers
+            .read()
+            .values()
+            .filter(|peer| peer.info.remote_addr.ip().to_string() == ip)
+            .count()
+    }
+
     /// Disconnect all peers
     pub fn disconnect_all_peers(&self) {
         for peer in self.peers.read().values() {
@@ -258,6 +328,7 @@ impl PeerManager {
 
         self.peers.write().clear();
         self.activity.write().clear();
+        self.heights.write().clear();
         set_global_peer_count(0);
         set_global_peers(Vec::new());
     }
@@ -295,16 +366,107 @@ impl PeerManager {
 
     /// Ban peer
     pub fn ban_peer(&self, peer_id: &str, duration_secs: u64) {
-        // Would add to ban list
-        let _ = self.remove_peer(peer_id);
+        let now = current_timestamp();
+        let duration = if duration_secs == 0 {
+            self.default_ban_duration_secs
+        } else {
+            duration_secs
+        };
+        let expires_at = now.saturating_add(duration);
 
-        tracing::info!("Banned peer {} for {} seconds", peer_id, duration_secs);
+        self.banned_peers
+            .write()
+            .insert(peer_id.to_string(), expires_at);
+
+        let peer_ip = self
+            .peers
+            .read()
+            .get(peer_id)
+            .map(|peer| peer.info.remote_addr.ip().to_string());
+        if let Some(ip) = peer_ip {
+            self.banned_ips.write().insert(ip, expires_at);
+        }
+
+        let _ = self.remove_peer(peer_id);
+        self.persist_bans();
+
+        tracing::info!("Banned peer {} for {} seconds", peer_id, duration);
+    }
+
+    /// Ban an IP and disconnect peers currently using that address.
+    pub fn ban_ip(&self, ip: &str, duration_secs: u64) {
+        let now = current_timestamp();
+        let duration = if duration_secs == 0 {
+            self.default_ban_duration_secs
+        } else {
+            duration_secs
+        };
+        let expires_at = now.saturating_add(duration);
+        self.banned_ips.write().insert(ip.to_string(), expires_at);
+
+        let affected = self
+            .peers
+            .read()
+            .values()
+            .filter(|peer| peer.info.remote_addr.ip().to_string() == ip)
+            .map(|peer| peer.info.peer_id.clone())
+            .collect::<Vec<_>>();
+        for peer_id in affected {
+            let _ = self.remove_peer(&peer_id);
+            self.banned_peers.write().insert(peer_id, expires_at);
+        }
+
+        self.persist_bans();
+        tracing::warn!("Banned ip {} for {} seconds", ip, duration);
     }
 
     /// Check if peer is banned
     pub fn is_banned(&self, peer_id: &str) -> bool {
-        // Would check ban list
-        false
+        self.cleanup_expired_bans();
+        self.banned_peers
+            .read()
+            .get(peer_id)
+            .is_some_and(|expires| *expires > current_timestamp())
+    }
+
+    /// Check if remote IP is banned.
+    pub fn is_ip_banned(&self, ip: &str) -> bool {
+        self.cleanup_expired_bans();
+        self.banned_ips
+            .read()
+            .get(ip)
+            .is_some_and(|expires| *expires > current_timestamp())
+    }
+
+    /// Remove expired bans and persist updated state if needed.
+    pub fn cleanup_expired_bans(&self) {
+        let now = current_timestamp();
+        let mut changed = false;
+        {
+            let mut peers = self.banned_peers.write();
+            let old_len = peers.len();
+            peers.retain(|_, expires_at| *expires_at > now);
+            changed |= peers.len() != old_len;
+        }
+        {
+            let mut ips = self.banned_ips.write();
+            let old_len = ips.len();
+            ips.retain(|_, expires_at| *expires_at > now);
+            changed |= ips.len() != old_len;
+        }
+
+        if changed {
+            self.persist_bans();
+        }
+    }
+
+    /// Broadcast a message to all active peers except one source peer.
+    pub fn broadcast_except(&self, source_peer_id: &str, message: ProtocolMessage) {
+        for peer in self.peers.read().values().filter(|peer| {
+            peer.status == PeerStatus::Connected && peer.info.peer_id.as_str() != source_peer_id
+        }) {
+            let _ = peer.send(message.clone());
+        }
     }
 
     /// Update last activity timestamp for a peer.
@@ -334,13 +496,71 @@ impl PeerManager {
             })
             .collect()
     }
+
+    /// Update peer advertised head height.
+    pub fn update_peer_height(&self, peer_id: &str, height: u64) -> bool {
+        let mut heights = self.heights.write();
+        let Some(entry) = heights.get_mut(peer_id) else {
+            return false;
+        };
+        *entry = height;
+        true
+    }
+
+    /// Get highest announced head among connected peers.
+    pub fn highest_peer_height(&self) -> u64 {
+        self.heights.read().values().copied().max().unwrap_or(0)
+    }
+
+    fn persist_bans(&self) {
+        let Some(path) = &self.banlist_path else {
+            return;
+        };
+
+        let payload = PersistedBanList {
+            peers: self.banned_peers.read().clone(),
+            ips: self.banned_ips.read().clone(),
+        };
+
+        if let Some(parent) = path.parent() {
+            if let Err(err) = fs::create_dir_all(parent) {
+                tracing::warn!(
+                    "failed to create banlist directory {}: {}",
+                    parent.display(),
+                    err
+                );
+                return;
+            }
+        }
+
+        let data = match serde_json::to_vec_pretty(&payload) {
+            Ok(v) => v,
+            Err(err) => {
+                tracing::warn!("failed to serialize p2p banlist: {}", err);
+                return;
+            }
+        };
+
+        if let Err(err) = fs::write(path, data) {
+            tracing::warn!("failed to persist p2p banlist {}: {}", path.display(), err);
+        }
+    }
+}
+
+fn load_persisted_bans(
+    path: Option<&PathBuf>,
+) -> Option<(HashMap<PeerId, u64>, HashMap<String, u64>)> {
+    let path = path?;
+    let data = fs::read(path).ok()?;
+    let parsed = serde_json::from_slice::<PersistedBanList>(&data).ok()?;
+    Some((parsed.peers, parsed.ips))
 }
 
 fn current_timestamp() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_secs()
 }
 
@@ -353,8 +573,6 @@ mod tests {
         let manager = PeerManager::new(10);
 
         assert_eq!(manager.peer_count(), 0);
-
-        // Would add peers in real test
     }
 
     #[test]
@@ -373,5 +591,18 @@ mod tests {
 
         info.decrease_reputation(200);
         assert_eq!(info.reputation, -50);
+    }
+
+    #[test]
+    fn test_banlist_persistence_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("p2p-banlist.json");
+
+        let manager = PeerManager::new_with_policy(10, Some(path.clone()), 300);
+        manager.ban_ip("127.0.0.8", 120);
+        assert!(manager.is_ip_banned("127.0.0.8"));
+
+        let reloaded = PeerManager::new_with_policy(10, Some(path), 300);
+        assert!(reloaded.is_ip_banned("127.0.0.8"));
     }
 }
