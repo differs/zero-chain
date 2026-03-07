@@ -134,7 +134,7 @@ curl -X POST http://localhost:8545 \
   -d '{
     "jsonrpc":"2.0",
     "method":"zero_getAccount",
-    "params":["0xAddress"],
+    "params":["ZER0xAddress"],
     "id":1
   }'
 ```
@@ -147,10 +147,12 @@ curl -X POST http://localhost:8545 \
   -d '{
     "jsonrpc":"2.0",
     "method":"zero_getUtxos",
-    "params":["0xAddress"],
+    "params":["ZER0xAddress"],
     "id":1
   }'
 ```
+
+说明：`zero_getAccount` / `zero_getUtxos` 推荐使用原生地址 `ZER0x` + 40 hex（checksum）；EVM `0x...` 地址在兼容路径下仍可解析。
 
 ### zero_getDomain
 

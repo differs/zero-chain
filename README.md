@@ -178,8 +178,10 @@ curl -X POST http://localhost:8545 \
 # ZeroChain extensions
 curl -X POST http://localhost:8545 \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"zero_getAccount","params":["0x..."],"id":1}'
+  -d '{"jsonrpc":"2.0","method":"zero_getAccount","params":["ZER0x..."],"id":1}'
 ```
+
+`zero_getAccount` / `zero_getUtxos` 现在推荐使用原生地址格式：`ZER0x` + 40 hex（checksum）。
 
 ## Development
 
