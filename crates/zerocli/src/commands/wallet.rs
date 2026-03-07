@@ -345,7 +345,7 @@ fn new_ed25519_account(name: String, passphrase: &str) -> Result<WalletAccount> 
         created_at: Utc::now().to_rfc3339(),
         public_key_hex: hex::encode(public),
         encrypted_private_key,
-        address: Some(format!("native1{}", hex::encode(address))),
+        address: Some(format_zero_native_address(address)),
     })
 }
 
@@ -444,6 +444,28 @@ fn native_address_from_public_key(pubkey: &[u8; 32]) -> [u8; 20] {
     let mut addr = [0u8; 20];
     addr.copy_from_slice(&out[12..]);
     addr
+}
+
+fn format_zero_native_address(address: [u8; 20]) -> String {
+    let lower_hex = hex::encode(address);
+    let hash = keccak256(lower_hex.as_bytes());
+
+    let mut checksummed = String::with_capacity(40);
+    for (idx, ch) in lower_hex.chars().enumerate() {
+        let nibble = if idx % 2 == 0 {
+            (hash[idx / 2] >> 4) & 0x0f
+        } else {
+            hash[idx / 2] & 0x0f
+        };
+
+        if ch.is_ascii_hexdigit() && ch.is_ascii_lowercase() && nibble >= 8 {
+            checksummed.push(ch.to_ascii_uppercase());
+        } else {
+            checksummed.push(ch);
+        }
+    }
+
+    format!("ZERO{}", checksummed)
 }
 
 fn wallet_file_path(data_dir: &str) -> PathBuf {

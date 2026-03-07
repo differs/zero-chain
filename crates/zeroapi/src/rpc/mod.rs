@@ -848,7 +848,7 @@ impl RpcApi {
 
         // Would get full account info
         Ok(serde_json::json!({
-            "address": address_str,
+            "address": format_zero_address(address),
             "balance": format_u256_hex(self.state_db.get_balance(&address)),
             "nonce": format!("0x{:x}", self.state_db.get_nonce(&address)),
         }))
@@ -1572,7 +1572,12 @@ fn build_compute_kv_backend(config: &RpcConfig) -> Arc<dyn KeyValueDB> {
 }
 
 fn parse_address(s: &str) -> Result<Address, RpcErrorObject> {
-    let bytes = hex::decode(s.strip_prefix("0x").unwrap_or(s))
+    let raw = s.trim();
+    let body = raw
+        .strip_prefix("ZERO")
+        .or_else(|| raw.strip_prefix("0x"))
+        .unwrap_or(raw);
+    let bytes = hex::decode(body)
         .map_err(|e| RpcErrorObject::invalid_params(format!("Invalid address: {}", e)))?;
 
     if bytes.len() != 20 {
@@ -1646,6 +1651,28 @@ fn format_u256_hex(value: U256) -> String {
         }
         None => "0x0".to_string(),
     }
+}
+
+fn format_zero_address(address: Address) -> String {
+    let lower_hex = hex::encode(address.as_bytes());
+    let hash = zerocore::crypto::keccak256(lower_hex.as_bytes());
+    let mut checksummed = String::with_capacity(40);
+
+    for (idx, ch) in lower_hex.chars().enumerate() {
+        let nibble = if idx % 2 == 0 {
+            (hash[idx / 2] >> 4) & 0x0f
+        } else {
+            hash[idx / 2] & 0x0f
+        };
+
+        if ch.is_ascii_hexdigit() && ch.is_ascii_lowercase() && nibble >= 8 {
+            checksummed.push(ch.to_ascii_uppercase());
+        } else {
+            checksummed.push(ch);
+        }
+    }
+
+    format!("ZERO{}", checksummed)
 }
 
 fn block_to_zero_block_json(block: &Block) -> serde_json::Value {
@@ -2558,6 +2585,26 @@ mod tests {
     fn test_parse_address() {
         let addr = parse_address("0x0000000000000000000000000000000000000001").unwrap();
         assert!(!addr.is_zero());
+    }
+
+    #[test]
+    fn test_parse_zero_prefixed_address() {
+        let addr = parse_address("ZERO0000000000000000000000000000000000000001").unwrap();
+        assert!(!addr.is_zero());
+    }
+
+    #[test]
+    fn test_parse_address_rejects_native1() {
+        let err = parse_address("native10000000000000000000000000000000000000001");
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_format_zero_address_prefix() {
+        let addr = parse_address("0x1111111111111111111111111111111111111111").unwrap();
+        let formatted = format_zero_address(addr);
+        assert!(formatted.starts_with("ZERO"));
+        assert_eq!(formatted.len(), 44);
     }
 
     #[test]
