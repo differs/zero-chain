@@ -7,6 +7,7 @@ use zerocore::account::U256;
 use zerocore::block::create_genesis_block;
 use zerocore::consensus::PowConsensus;
 use zerocore::crypto::Hash;
+use zeronet::{NetworkConfig, NetworkService};
 
 pub async fn run_node(
     mine: bool,
@@ -15,12 +16,35 @@ pub async fn run_node(
     ws_port: u16,
     data_dir: &str,
     rpc_config: Option<RpcConfig>,
+    p2p_listen_addr: String,
+    p2p_listen_port: u16,
+    bootnodes: Vec<String>,
+    max_peers: u32,
+    enable_discovery: bool,
+    enable_sync: bool,
 ) -> Result<()> {
     println!("🚀 Starting ZeroChain node...");
     println!("   Data directory: {}", data_dir);
     println!("   HTTP RPC port: {}", http_port);
     println!("   WebSocket port: {}", ws_port);
     println!("   Mining: {}", if mine { "enabled" } else { "disabled" });
+    println!("   P2P listen: {}:{}", p2p_listen_addr, p2p_listen_port);
+    println!("   P2P max peers: {}", max_peers);
+    println!(
+        "   Discovery: {}",
+        if enable_discovery {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
+    println!(
+        "   Sync: {}",
+        if enable_sync { "enabled" } else { "disabled" }
+    );
+    if !bootnodes.is_empty() {
+        println!("   Bootnodes: {}", bootnodes.join(", "));
+    }
     if let Some(ref cb) = coinbase {
         println!("   Coinbase: {}", cb);
     }
@@ -101,7 +125,11 @@ pub async fn run_node(
     println!("✅ Node started successfully!");
     println!("   Press Ctrl+C to stop");
 
-    let _api_service = if let Some(mut cfg) = rpc_config {
+    let network_id = rpc_config
+        .as_ref()
+        .map(|cfg| cfg.network_id)
+        .unwrap_or(10086);
+    let _api_service = if let Some(mut cfg) = rpc_config.clone() {
         cfg.port = http_port;
         let mut api_cfg = ApiConfig {
             http_rpc: cfg,
@@ -121,8 +149,24 @@ pub async fn run_node(
         None
     };
 
+    let network_cfg = NetworkConfig {
+        network_id,
+        listen_addr: p2p_listen_addr,
+        listen_port: p2p_listen_port,
+        max_peers,
+        min_peers: max_peers.min(25),
+        bootnodes,
+        enable_discovery,
+        enable_sync,
+        ..NetworkConfig::default()
+    };
+    let network_service = NetworkService::new(network_cfg)?;
+    network_service.start().await?;
+    println!("   P2P service started on port {}", p2p_listen_port);
+
     // Keep running
     loop {
+        println!("   Peers connected: {}", network_service.peer_count());
         tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
     }
 }

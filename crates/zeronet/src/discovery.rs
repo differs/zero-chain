@@ -4,7 +4,10 @@ use crate::{NetworkConfig, NetworkError, Result};
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use tokio::net::UdpSocket;
+use tokio::task::JoinHandle;
 use zerocore::crypto::{Hash, PublicKey};
 
 /// Node record
@@ -77,9 +80,13 @@ pub struct Discovery {
     /// Local node ID
     node_id: String,
     /// Routing table (256 buckets)
-    buckets: RwLock<Vec<KBucket>>,
+    buckets: Arc<RwLock<Vec<KBucket>>>,
     /// Known nodes
-    nodes: RwLock<HashMap<String, NodeRecord>>,
+    nodes: Arc<RwLock<HashMap<String, NodeRecord>>>,
+    /// Background running flag
+    running: Arc<AtomicBool>,
+    /// Background UDP task
+    task: RwLock<Option<JoinHandle<()>>>,
 }
 
 impl Discovery {
@@ -92,47 +99,71 @@ impl Discovery {
         Ok(Self {
             config: config.clone(),
             node_id,
-            buckets: RwLock::new(buckets),
-            nodes: RwLock::new(HashMap::new()),
+            buckets: Arc::new(RwLock::new(buckets)),
+            nodes: Arc::new(RwLock::new(HashMap::new())),
+            running: Arc::new(AtomicBool::new(false)),
+            task: RwLock::new(None),
         })
     }
 
     pub async fn start(&self) -> Result<()> {
-        tracing::info!("Starting discovery service");
+        if self.running.swap(true, Ordering::SeqCst) {
+            return Ok(());
+        }
 
-        // Would start UDP listener for discovery protocol
+        let bind_addr = format!("{}:{}", self.config.listen_addr, self.config.listen_port);
+        let socket = UdpSocket::bind(&bind_addr)
+            .await
+            .map_err(|e| NetworkError::ConnectionError(format!("discovery bind failed: {e}")))?;
+
+        tracing::info!("Starting discovery service on {}", bind_addr);
+
+        let running = self.running.clone();
+        let buckets = self.buckets.clone();
+        let nodes = self.nodes.clone();
+        let node_id = self.node_id.clone();
+        let task = tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            while running.load(Ordering::Relaxed) {
+                match socket.recv_from(&mut buf).await {
+                    Ok((len, addr)) => {
+                        let msg = String::from_utf8_lossy(&buf[..len]);
+                        let peer_id = msg
+                            .strip_prefix("zero-discovery:")
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or_else(|| format!("udp-{}", addr));
+                        let node = NodeRecord {
+                            peer_id,
+                            ip: addr.ip().to_string(),
+                            tcp_port: addr.port(),
+                            udp_port: addr.port(),
+                        };
+                        let _ = insert_node_record(&node_id, &buckets, &nodes, node);
+                        let _ = socket.send_to(b"zero-discovery:ack", addr).await;
+                    }
+                    Err(err) => {
+                        tracing::debug!("discovery recv error: {}", err);
+                    }
+                }
+            }
+        });
+        *self.task.write() = Some(task);
         Ok(())
     }
 
     pub async fn stop(&self) -> Result<()> {
+        self.running.store(false, Ordering::SeqCst);
+        if let Some(task) = self.task.write().take() {
+            task.abort();
+        }
         tracing::info!("Stopping discovery service");
         Ok(())
     }
 
     /// Add node to routing table
     pub fn add_node(&self, node: NodeRecord) -> bool {
-        // Calculate distance and bucket index
-        let distance = calculate_distance(&self.node_id, &node.peer_id);
-        let bucket_index = 255 - distance.leading_zeros() as usize;
-
-        let mut buckets = self.buckets.write();
-        let bucket = &mut buckets[bucket_index];
-
-        // Check if already exists
-        if bucket.nodes.iter().any(|n| n.peer_id == node.peer_id) {
-            bucket.last_updated = current_timestamp();
-            return false;
-        }
-
-        // Add if bucket not full
-        if bucket.nodes.len() < 20 {
-            bucket.nodes.push(node.clone());
-            bucket.last_updated = current_timestamp();
-            self.nodes.write().insert(node.peer_id.clone(), node);
-            true
-        } else {
-            false
-        }
+        insert_node_record(&self.node_id, &self.buckets, &self.nodes, node)
     }
 
     /// Get closest nodes to target
@@ -186,6 +217,36 @@ impl Discovery {
         self.nodes.write().remove(peer_id);
 
         // Would also remove from bucket
+    }
+}
+
+fn insert_node_record(
+    local_node_id: &str,
+    buckets: &RwLock<Vec<KBucket>>,
+    nodes: &RwLock<HashMap<String, NodeRecord>>,
+    node: NodeRecord,
+) -> bool {
+    // Calculate distance and bucket index
+    let distance = calculate_distance(local_node_id, &node.peer_id);
+    let bucket_index = 255 - distance.leading_zeros() as usize;
+
+    let mut buckets = buckets.write();
+    let bucket = &mut buckets[bucket_index];
+
+    // Check if already exists
+    if bucket.nodes.iter().any(|n| n.peer_id == node.peer_id) {
+        bucket.last_updated = current_timestamp();
+        return false;
+    }
+
+    // Add if bucket not full
+    if bucket.nodes.len() < 20 {
+        bucket.nodes.push(node.clone());
+        bucket.last_updated = current_timestamp();
+        nodes.write().insert(node.peer_id.clone(), node);
+        true
+    } else {
+        false
     }
 }
 

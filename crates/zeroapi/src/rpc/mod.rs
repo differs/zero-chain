@@ -22,6 +22,7 @@ use zerocore::crypto::{Address, Hash};
 use zerocore::crypto::{PrivateKey, Signature};
 use zerocore::state::StateDb;
 use zerocore::transaction::{pool::TxPoolConfig, SignedTransaction, TransactionPool};
+use zeronet::global_peer_count;
 use zerostore::db::{KeyValueDB, MemDatabase, RedbDatabase, RocksDb};
 use zerostore::ComputeStore;
 
@@ -507,7 +508,7 @@ impl RpcApi {
         &self,
         _params: Option<Vec<serde_json::Value>>,
     ) -> Result<serde_json::Value, RpcErrorObject> {
-        Ok(serde_json::json!("0x0"))
+        Ok(serde_json::json!(format!("0x{:x}", global_peer_count())))
     }
 
     fn net_listening(

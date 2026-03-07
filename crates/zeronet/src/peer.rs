@@ -1,6 +1,6 @@
 //! Peer management module
 
-use crate::{NetworkConfig, NetworkError, Result};
+use crate::{set_global_peer_count, NetworkError, Result};
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -169,9 +169,24 @@ impl PeerManager {
         }
 
         let peer_id = node_record.peer_id.clone();
+        if self.peers.read().contains_key(&peer_id) {
+            return Ok(());
+        }
 
-        // Would create actual peer connection
-        // For now, just a placeholder
+        let remote_addr: SocketAddr = format!("{}:{}", node_record.ip, node_record.tcp_port)
+            .parse()
+            .map_err(|e| {
+                NetworkError::ConnectionError(format!("Invalid peer address format: {e}"))
+            })?;
+        let local_addr: SocketAddr = "0.0.0.0:0".parse().expect("hardcoded address must parse");
+
+        let (tx, _rx) = mpsc::channel(64);
+        let info = PeerInfo::new(peer_id.clone(), remote_addr, local_addr, 0);
+        let peer = Arc::new(Peer::new(info, tx));
+
+        self.peers.write().insert(peer_id.clone(), peer);
+        self.scores.write().entry(peer_id).or_insert(0);
+        set_global_peer_count(self.peer_count());
 
         Ok(())
     }
@@ -180,6 +195,7 @@ impl PeerManager {
     pub fn remove_peer(&self, peer_id: &str) -> Result<()> {
         self.peers.write().remove(peer_id);
         self.scores.write().remove(peer_id);
+        set_global_peer_count(self.peer_count());
         Ok(())
     }
 
@@ -220,6 +236,7 @@ impl PeerManager {
         }
 
         self.peers.write().clear();
+        set_global_peer_count(0);
     }
 
     /// Get best peers for sync (by score)

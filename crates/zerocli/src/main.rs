@@ -92,6 +92,30 @@ enum Commands {
         /// Optional coinbase override
         #[arg(long)]
         rpc_coinbase: Option<String>,
+
+        /// P2P listen address
+        #[arg(long, default_value = "0.0.0.0")]
+        p2p_listen_addr: String,
+
+        /// P2P listen port
+        #[arg(long, default_value = "30303")]
+        p2p_listen_port: u16,
+
+        /// Bootnode enode, repeatable.
+        #[arg(long = "bootnode")]
+        bootnodes: Vec<String>,
+
+        /// Max connected peers
+        #[arg(long, default_value = "50")]
+        max_peers: u32,
+
+        /// Disable discovery service
+        #[arg(long, default_value_t = false)]
+        disable_discovery: bool,
+
+        /// Disable sync service
+        #[arg(long, default_value_t = false)]
+        disable_sync: bool,
     },
 
     /// Initialize data directory
@@ -282,6 +306,12 @@ async fn main() -> Result<()> {
             chain_id,
             rpc_network_id,
             rpc_coinbase,
+            p2p_listen_addr,
+            p2p_listen_port,
+            bootnodes,
+            max_peers,
+            disable_discovery,
+            disable_sync,
         }) => {
             let mut api_config = if let Some(path) = &cli.config {
                 commands::init::load_api_config(path)?
@@ -321,6 +351,10 @@ async fn main() -> Result<()> {
                 "   rpc: {}:{}",
                 api_config.http_rpc.address, api_config.http_rpc.port
             );
+            println!("   p2p: {}:{}", p2p_listen_addr, p2p_listen_port);
+            if !bootnodes.is_empty() {
+                println!("   bootnodes: {}", bootnodes.join(", "));
+            }
 
             commands::run::run_node(
                 mine,
@@ -329,6 +363,12 @@ async fn main() -> Result<()> {
                 ws_port,
                 &data_dir,
                 Some(api_config.http_rpc.clone()),
+                p2p_listen_addr,
+                p2p_listen_port,
+                bootnodes,
+                max_peers,
+                !disable_discovery,
+                !disable_sync,
             )
             .await?;
         }

@@ -105,6 +105,21 @@ cargo test
 
 # Override chain/network id at runtime
 ./target/release/zerocchain --network mainnet run --chain-id 0x276e --rpc-network-id 10086
+
+# Multi-node bootstrap example (P2P)
+# node-1 (bootnode listener)
+./target/release/zerocchain run --http-port 18645 --ws-port 18646 \
+  --p2p-listen-addr 0.0.0.0 --p2p-listen-port 30331
+
+# node-2 (connect to node-1)
+./target/release/zerocchain run --http-port 28645 --ws-port 28646 \
+  --p2p-listen-addr 0.0.0.0 --p2p-listen-port 30332 \
+  --bootnode enode://bootnode1@<node1-ip>:30331
+
+# verify p2p peer count
+curl -s -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"net_peerCount","params":[]}' \
+  http://127.0.0.1:28645
 ```
 
 ### CLI Commands
@@ -262,7 +277,7 @@ cargo audit
 - [x] Hybrid account model
 - [x] EVM implementation
 - [x] PoW consensus
-- [ ] P2P networking
+- [x] P2P networking (basic discovery + peer connectivity)
 - [ ] State sync
 - [ ] Light client
 - [ ] Sharding support
