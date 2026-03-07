@@ -225,6 +225,18 @@ Latest full-chain integration record:
 docs/FULL_CHAIN_E2E_2026-03-07.md
 ```
 
+P0 release blockers tracker:
+
+```text
+docs/P0_RELEASE_BLOCKERS_2026-03.md
+```
+
+Run full-chain E2E locally:
+
+```bash
+bash scripts/full_chain_e2e.sh
+```
+
 ### Benchmark
 
 ```bash
