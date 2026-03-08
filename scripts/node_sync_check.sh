@@ -16,7 +16,6 @@ EXPECTED_NET_VERSION="${EXPECTED_NET_VERSION:-31337}"
 MIN_PUBLIC_PEERS="${MIN_PUBLIC_PEERS:-1}"
 MAX_PUBLIC_BLOCK_GAP="${MAX_PUBLIC_BLOCK_GAP:-0}"
 MIN_PUBLIC_BLOCK_HEIGHT="${MIN_PUBLIC_BLOCK_HEIGHT:-0}"
-SKIP_GAP_CHECK="${SKIP_GAP_CHECK:-0}"
 EXPECTED_REMOTE_ENDPOINT_ON_LOCAL="${EXPECTED_REMOTE_ENDPOINT_ON_LOCAL:-139.180.207.66:30303}"
 
 MONITOR_SCRIPT="${ROOT_DIR}/scripts/public_node_soak_monitor.sh"
@@ -178,9 +177,7 @@ if [[ "${local_block_hex}" != "N/A" && "${remote_block_hex}" != "N/A" ]]; then
     gap=$(( -gap ))
   fi
 
-  if [[ "${SKIP_GAP_CHECK}" == "1" ]]; then
-    log_pass "公网节点区块高度差检查已跳过 (gap=${gap})"
-  elif (( gap <= MAX_PUBLIC_BLOCK_GAP )); then
+  if (( gap <= MAX_PUBLIC_BLOCK_GAP )); then
     log_pass "公网节点区块高度差达标 (gap=${gap})"
   else
     log_fail "公网节点区块高度差超阈值 (local=${local_block_dec}, remote=${remote_block_dec}, gap=${gap}, max=${MAX_PUBLIC_BLOCK_GAP})"

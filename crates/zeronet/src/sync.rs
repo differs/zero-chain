@@ -1,7 +1,7 @@
 //! Sync module - header/body/state request-response sync manager.
 
 use crate::protocol::{ProtocolMessage, SyncBlockBody, SyncHeader, SyncStateSnapshot};
-use crate::{set_global_synced_height, NetworkError, Result};
+use crate::{global_synced_height, set_global_synced_height, NetworkError, Result};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -106,7 +106,7 @@ impl SyncManager {
     }
 
     pub fn local_height(&self) -> u64 {
-        *self.local_height.read()
+        (*self.local_height.read()).max(global_synced_height())
     }
 
     pub fn set_local_height(&self, height: u64) {
@@ -222,6 +222,11 @@ impl SyncManager {
                 }
 
                 let local = *local_height.read();
+                let external_head = global_synced_height();
+                let local = local.max(external_head);
+                if local > *local_height.read() {
+                    *local_height.write() = local;
+                }
                 let target_head = peer_manager.highest_peer_height().max(target);
                 if local >= target_head {
                     *state.write() = SyncState::Complete;

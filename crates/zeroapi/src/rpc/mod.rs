@@ -24,7 +24,7 @@ use zerocore::crypto::{keccak256, Address, Hash};
 use zerocore::crypto::{PrivateKey, Signature};
 use zerocore::state::StateDb;
 use zerocore::transaction::{pool::TxPoolConfig, SignedTransaction, TransactionPool};
-use zeronet::{global_peer_count, global_peers, global_synced_height};
+use zeronet::{global_peer_count, global_peers, global_synced_height, set_global_synced_height};
 use zerostore::db::{KeyValueDB, MemDatabase, RedbDatabase, RocksDb};
 use zerostore::ComputeStore;
 
@@ -1075,6 +1075,7 @@ impl RpcApi {
             uncles: Vec::new(),
         };
         *self.latest_block.write() = Some(block);
+        set_global_synced_height(header.number.as_u64());
         self.credit_block_reward(header.coinbase, header.number);
         RPC_METRICS
             .latest_block_height
@@ -1267,6 +1268,7 @@ impl RpcApi {
             transactions: Vec::new(),
             uncles: Vec::new(),
         });
+        set_global_synced_height(number);
 
         Ok(serde_json::json!({
             "imported": true,

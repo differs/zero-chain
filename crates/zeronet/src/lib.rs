@@ -83,7 +83,7 @@ pub fn global_synced_height() -> u64 {
     GLOBAL_SYNCED_HEIGHT.load(Ordering::Relaxed)
 }
 
-pub(crate) fn set_global_synced_height(height: u64) {
+pub fn set_global_synced_height(height: u64) {
     GLOBAL_SYNCED_HEIGHT.store(height, Ordering::Relaxed);
 }
 

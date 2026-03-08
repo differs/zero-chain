@@ -133,7 +133,7 @@ pub async fn run_node(
         max_inbound_rate_per_minute: p2p_max_inbound_rate_per_minute,
         max_gossip_per_peer_per_minute: p2p_max_gossip_per_peer_per_minute,
         bootnode_retry_interval_secs: p2p_bootnode_retry_interval_secs,
-        sync_auto_advance: mine,
+        sync_auto_advance: false,
         sync_auto_advance_interval_secs: 2,
         ..NetworkConfig::default()
     };
