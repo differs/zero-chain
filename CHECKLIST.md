@@ -7,4 +7,5 @@
 - [x] WebSocket 订阅接口收敛到 `zero_*`
 - [x] 文档主入口不再引导 legacy 兼容路径
 - [ ] 全链路压力回归
-- [ ] 发布门禁自动化
+- [x] 发布门禁自动化
+- [x] Redline 门禁（禁止 silent fallback）已接入 CI

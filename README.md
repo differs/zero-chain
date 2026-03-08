@@ -78,6 +78,9 @@ curl -X POST http://localhost:8545 \
 ## Development
 
 ```bash
+# Redline guard (禁止 silent fallback)
+bash scripts/no_silent_fallback.sh
+
 # Format
 cargo fmt
 
@@ -87,6 +90,12 @@ cargo clippy -- -D warnings
 # Tests
 cargo test
 ```
+
+## Engineering Redlines
+
+- 规范文档：`docs/ENGINEERING_REDLINES.md`
+- CI 阻断：`.github/workflows/redline-guard.yml`
+- 发布门禁包含 redline 检查：`scripts/run_tests.sh`
 
 ## Mainnet Checklist
 

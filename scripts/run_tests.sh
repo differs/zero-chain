@@ -12,16 +12,19 @@ mkdir -p "${REPORT_DIR}"
 echo "🧪 ZeroChain release gate"
 echo "========================="
 
-echo "[1/4] cargo fmt --all --check"
+echo "[1/5] redline guard (no silent fallback)"
+bash scripts/no_silent_fallback.sh
+
+echo "[2/5] cargo fmt --all --check"
 cargo fmt --all --check
 
-echo "[2/4] cargo check --workspace"
+echo "[3/5] cargo check --workspace"
 cargo check --workspace
 
-echo "[3/4] cargo test --workspace"
+echo "[4/5] cargo test --workspace"
 cargo test --workspace
 
-echo "[4/4] cargo test --workspace -- --ignored"
+echo "[5/5] cargo test --workspace -- --ignored"
 set +e
 cargo test --workspace -- --ignored
 IGNORED_EXIT=$?
@@ -48,6 +51,7 @@ cat > "${REPORT_FILE}" <<EOF
 
 ## Automated Gates
 
+- [x] redline guard (no silent fallback)
 - [x] cargo fmt --all --check
 - [x] cargo check --workspace
 - [x] cargo test --workspace
