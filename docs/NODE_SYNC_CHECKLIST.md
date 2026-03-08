@@ -50,10 +50,15 @@ EXPECTED_NET_VERSION=31337 \
 MIN_PUBLIC_PEERS=1 \
 MAX_PUBLIC_BLOCK_GAP=0 \
 MIN_PUBLIC_BLOCK_HEIGHT=0 \
+SKIP_GAP_CHECK=0 \
 REMOTE_HOST=139.180.207.66 \
 SSH_KEY=/root/.ssh/agent_139_180_207_66 \
 scripts/node_sync_check.sh
 ```
+
+说明：
+- 当本地公网节点开启 `--mine` 时，远端会跟随同步头快速前进，区块高度差可能持续扩大。
+- 该场景建议使用 `SKIP_GAP_CHECK=1`，重点检查“连通性 + 高度下限 + 监控健康”。
 
 ## 标准重置测试流程（推荐）
 
