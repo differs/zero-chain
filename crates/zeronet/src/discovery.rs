@@ -156,7 +156,7 @@ impl Discovery {
         let listen_config = ListenConfig::from_ip(listen_ip, self.config.listen_port);
 
         let enr_key = CombinedKey::generate_secp256k1();
-        let enr = build_local_enr(&self.config, &enr_key);
+        let enr = build_local_enr(&self.config, &enr_key)?;
         *self.local_enr.write() = Some(enr.to_base64());
 
         let config = ConfigBuilder::new(listen_config).build();
@@ -304,7 +304,7 @@ impl Discovery {
     }
 }
 
-fn build_local_enr(config: &NetworkConfig, enr_key: &CombinedKey) -> Enr {
+fn build_local_enr(config: &NetworkConfig, enr_key: &CombinedKey) -> Result<Enr> {
     let mut builder = enr::Enr::builder();
 
     let advertised_ip = config
@@ -332,9 +332,9 @@ fn build_local_enr(config: &NetworkConfig, enr_key: &CombinedKey) -> Enr {
         builder.tcp4(config.listen_port);
     }
 
-    builder
-        .build(enr_key)
-        .expect("local ENR construction must succeed")
+    builder.build(enr_key).map_err(|err| {
+        NetworkError::ConnectionError(format!("local ENR construction failed: {err}"))
+    })
 }
 
 fn parse_maybe_socket_ip(raw: &str) -> Option<IpAddr> {

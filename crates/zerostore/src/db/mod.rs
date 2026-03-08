@@ -151,11 +151,14 @@ impl KeyValueDB for RocksDb {
 
     fn iter_prefix(&self, prefix: &[u8]) -> Result<PrefixIterator<'_>> {
         let iter = self.db.prefix_iterator(prefix);
+        let mut items = Vec::new();
 
-        Ok(Box::new(iter.map(|item| {
-            let (k, v) = item.unwrap();
-            (k.to_vec(), v.to_vec())
-        })))
+        for item in iter {
+            let (k, v) = item.map_err(|e| StorageError::Database(e.to_string()))?;
+            items.push((k.to_vec(), v.to_vec()));
+        }
+
+        Ok(Box::new(items.into_iter()))
     }
 }
 

@@ -120,28 +120,43 @@ impl WsServer {
                 tokio::select! {
                     Ok(header) = new_heads_rx.recv() => {
                         // Broadcast to all subscribers
-                        let _ = sender.send(Message::Text(
-                            serde_json::to_string(&WsNotification::new(
-                                "new_heads".to_string(),
-                                header,
-                            )).unwrap()
-                        )).await;
+                        let payload = match serialize_ws_json(&WsNotification::new(
+                            "new_heads".to_string(),
+                            header,
+                        )) {
+                            Ok(payload) => payload,
+                            Err(err) => {
+                                error!(error = %err, "failed to serialize new_heads notification");
+                                break;
+                            }
+                        };
+                        let _ = sender.send(Message::Text(payload)).await;
                     }
                     Ok(tx_hash) = new_pending_txs_rx.recv() => {
-                        let _ = sender.send(Message::Text(
-                            serde_json::to_string(&WsNotification::new(
-                                "new_pending_txs".to_string(),
-                                tx_hash,
-                            )).unwrap()
-                        )).await;
+                        let payload = match serialize_ws_json(&WsNotification::new(
+                            "new_pending_txs".to_string(),
+                            tx_hash,
+                        )) {
+                            Ok(payload) => payload,
+                            Err(err) => {
+                                error!(error = %err, "failed to serialize new_pending_txs notification");
+                                break;
+                            }
+                        };
+                        let _ = sender.send(Message::Text(payload)).await;
                     }
-                    Ok((filter, log)) = logs_rx.recv() => {
-                        let _ = sender.send(Message::Text(
-                            serde_json::to_string(&WsNotification::new(
-                                "logs".to_string(),
-                                log,
-                            )).unwrap()
-                        )).await;
+                    Ok((_filter, log)) = logs_rx.recv() => {
+                        let payload = match serialize_ws_json(&WsNotification::new(
+                            "logs".to_string(),
+                            log,
+                        )) {
+                            Ok(payload) => payload,
+                            Err(err) => {
+                                error!(error = %err, "failed to serialize logs notification");
+                                break;
+                            }
+                        };
+                        let _ = sender.send(Message::Text(payload)).await;
                     }
                     else => break,
                 }
@@ -189,6 +204,10 @@ pub struct WsErrorObject {
     pub data: Option<serde_json::Value>,
 }
 
+fn serialize_ws_json<T: Serialize>(value: &T) -> Result<String> {
+    serde_json::to_string(value).map_err(|e| ApiError::Serialization(e.to_string()))
+}
+
 /// Handle incoming WebSocket message
 async fn handle_incoming_message(
     text: &str,
@@ -226,7 +245,7 @@ async fn handle_incoming_message(
         },
     };
 
-    let response_text = serde_json::to_string(&ws_response).unwrap();
+    let response_text = serialize_ws_json(&ws_response)?;
     sender
         .send(Message::Text(response_text))
         .await

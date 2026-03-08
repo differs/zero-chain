@@ -3,7 +3,7 @@
 use super::StateDb;
 use crate::account::{Account, AccountType, U256};
 use crate::block::Block;
-use crate::crypto::{keccak256, Address, Hash};
+use crate::crypto::{keccak256, Address, Hash, PublicKey};
 use crate::transaction::{Log, SignedTransaction, TransactionReceipt};
 use std::sync::Arc;
 use thiserror::Error;
@@ -28,6 +28,10 @@ pub enum ExecutionError {
 }
 
 pub type Result<T> = std::result::Result<T, ExecutionError>;
+
+fn placeholder_public_key() -> PublicKey {
+    PublicKey::placeholder()
+}
 
 /// State transition
 #[derive(Clone, Debug)]
@@ -160,17 +164,17 @@ impl StateExecutor {
 
         // Pay gas to miner
         let miner = block.header.coinbase;
-        let mut miner_account = self
-            .state_db
-            .get_account(&miner)
-            .unwrap_or_else(|| Account {
+        let mut miner_account = match self.state_db.get_account(&miner) {
+            Some(account) => account,
+            None => Account {
                 address: miner,
                 account_type: AccountType::ExternalOwned {
-                    public_key: crate::crypto::PublicKey::from_bytes([0u8; 65]).unwrap(),
+                    public_key: placeholder_public_key(),
                     signature_scheme: Default::default(),
                 },
                 ..Default::default()
-            });
+            },
+        };
 
         miner_account.balance = miner_account.balance + actual_gas_cost;
         miner_account.state = crate::account::AccountState::Active;
@@ -210,7 +214,7 @@ impl StateExecutor {
     fn execute_create(&self, tx: &SignedTransaction, block: &Block) -> Result<ExecutionResult> {
         // Calculate contract address
         let nonce = self.state_db.get_nonce(&tx.sender());
-        let contract_address = self.calculate_contract_address(tx.sender(), nonce);
+        let contract_address = self.calculate_contract_address(tx.sender(), nonce)?;
 
         // Create contract account
         let contract_account = Account {
@@ -252,7 +256,9 @@ impl StateExecutor {
 
     /// Execute contract call
     fn execute_call(&self, tx: &SignedTransaction, block: &Block) -> Result<ExecutionResult> {
-        let to = tx.to().unwrap();
+        let to = tx
+            .to()
+            .ok_or_else(|| ExecutionError::InvalidTransaction("missing recipient for call".into()))?;
 
         // Transfer value
         if !tx.tx.value.is_zero() {
@@ -306,14 +312,17 @@ impl StateExecutor {
         self.state_db.insert_account(from, from_account);
 
         // Add to recipient
-        let mut to_account = self.state_db.get_account(&to).unwrap_or_else(|| Account {
-            address: to,
-            account_type: AccountType::ExternalOwned {
-                public_key: crate::crypto::PublicKey::from_bytes([0u8; 65]).unwrap(),
-                signature_scheme: Default::default(),
+        let mut to_account = match self.state_db.get_account(&to) {
+            Some(account) => account,
+            None => Account {
+                address: to,
+                account_type: AccountType::ExternalOwned {
+                    public_key: placeholder_public_key(),
+                    signature_scheme: Default::default(),
+                },
+                ..Default::default()
             },
-            ..Default::default()
-        });
+        };
 
         to_account.balance = to_account.balance + amount;
         to_account.state = crate::account::AccountState::Active;
@@ -347,7 +356,7 @@ impl StateExecutor {
     }
 
     /// Calculate contract address
-    fn calculate_contract_address(&self, sender: Address, nonce: u64) -> Address {
+    fn calculate_contract_address(&self, sender: Address, nonce: u64) -> Result<Address> {
         use rlp::RlpStream;
 
         let mut stream = RlpStream::new_list(2);
@@ -357,7 +366,8 @@ impl StateExecutor {
         let encoded = stream.out();
         let hash = keccak256(&encoded);
 
-        Address::from_slice(&hash[12..]).unwrap()
+        Address::from_slice(&hash[12..])
+            .map_err(|e| ExecutionError::State(format!("contract address derivation failed: {e}")))
     }
 }
 

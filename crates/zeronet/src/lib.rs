@@ -1253,14 +1253,14 @@ async fn write_protocol_message(
         )),
         ProtocolMessage::SyncBlockBody(body) => Some(format!(
             "ZERO/BLOCK_BODY_V2 {}\n",
-            encode_sync_payload(&body)
+            encode_sync_payload(&body)?
         )),
         ProtocolMessage::SyncGetStateSnapshot { block_number } => {
             Some(format!("ZERO/GET_STATE_SNAPSHOT {}\n", block_number))
         }
         ProtocolMessage::SyncStateSnapshot(snapshot) => Some(format!(
             "ZERO/STATE_SNAPSHOT_V2 {}\n",
-            encode_sync_payload(&snapshot)
+            encode_sync_payload(&snapshot)?
         )),
         ProtocolMessage::Transactions(_) | ProtocolMessage::Block(_) => None,
     };
@@ -1406,9 +1406,14 @@ fn parse_sync_headers(raw: &str) -> std::result::Result<Vec<SyncHeader>, String>
         .collect::<std::result::Result<Vec<_>, String>>()
 }
 
-fn encode_sync_payload<T: serde::Serialize>(payload: &T) -> String {
-    let bytes = serde_json::to_vec(payload).expect("sync payload serialization must succeed");
-    hex::encode(bytes)
+fn encode_sync_payload<T: serde::Serialize>(payload: &T) -> std::io::Result<String> {
+    let bytes = serde_json::to_vec(payload).map_err(|err| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("sync payload serialization failed: {err}"),
+        )
+    })?;
+    Ok(hex::encode(bytes))
 }
 
 fn decode_sync_payload<T: DeserializeOwned>(raw: &str) -> std::result::Result<T, String> {

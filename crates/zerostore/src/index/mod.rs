@@ -33,8 +33,16 @@ impl TxIndex {
         }
 
         let block_hash = Hash::from_slice(&data[0..32])?;
-        let block_number = u64::from_be_bytes(data[32..40].try_into().unwrap());
-        let index = u32::from_be_bytes(data[40..44].try_into().unwrap());
+        let block_number = u64::from_be_bytes(
+            data[32..40]
+                .try_into()
+                .map_err(|_| StorageError::Serialization("Invalid tx index data".into()))?,
+        );
+        let index = u32::from_be_bytes(
+            data[40..44]
+                .try_into()
+                .map_err(|_| StorageError::Serialization("Invalid tx index data".into()))?,
+        );
 
         Ok(Self {
             block_hash,
@@ -156,7 +164,9 @@ impl IndexDB {
         let key = self.block_number_key(hash);
         match self.db.get(&key)? {
             Some(data) => {
-                let number = u64::from_be_bytes(data.try_into().unwrap());
+                let number = u64::from_be_bytes(data.as_slice().try_into().map_err(|_| {
+                    StorageError::Serialization("Invalid block number index data".into())
+                })?);
                 Ok(Some(number))
             }
             None => Ok(None),

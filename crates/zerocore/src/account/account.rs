@@ -696,11 +696,7 @@ impl Default for Account {
         Self {
             address: Address::zero(),
             account_type: AccountType::ExternalOwned {
-                public_key: PublicKey::from_bytes([0u8; 65]).unwrap_or_else(|_| {
-                    let mut pk = [0u8; 65];
-                    pk[0] = 0x04;
-                    PublicKey::from_bytes(pk).unwrap()
-                }),
+                public_key: PublicKey::placeholder(),
                 signature_scheme: SignatureScheme::default(),
             },
             version: 1,

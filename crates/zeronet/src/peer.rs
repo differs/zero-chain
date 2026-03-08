@@ -235,7 +235,7 @@ impl PeerManager {
             .map_err(|e| {
                 NetworkError::ConnectionError(format!("Invalid peer address format: {e}"))
             })?;
-        let local_addr: SocketAddr = "0.0.0.0:0".parse().expect("hardcoded address must parse");
+        let local_addr = SocketAddr::from(([0, 0, 0, 0], 0));
 
         let info = PeerInfo::new(
             peer_id.clone(),

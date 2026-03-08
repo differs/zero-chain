@@ -271,6 +271,12 @@ impl PublicKey {
         Ok(Self(bytes))
     }
 
+    pub(crate) fn placeholder() -> Self {
+        let mut bytes = [0u8; 65];
+        bytes[0] = 0x04;
+        Self(bytes)
+    }
+
     /// Get the public key as bytes
     pub fn as_bytes(&self) -> &[u8] {
         &self.0

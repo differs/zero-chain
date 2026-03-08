@@ -3,7 +3,7 @@
 use axum::{
     extract::DefaultBodyLimit, extract::State, http::HeaderMap, routing::post, Json, Router,
 };
-use once_cell::sync::Lazy;
+use once_cell::sync::OnceCell;
 use parking_lot::RwLock;
 use prometheus::{Encoder, IntCounterVec, IntGauge, Registry, TextEncoder};
 use serde::{Deserialize, Serialize};
@@ -34,7 +34,7 @@ use zeronet::{
 use zerostore::db::{KeyValueDB, MemDatabase, RedbDatabase, RocksDb};
 use zerostore::ComputeStore;
 
-static RPC_METRICS: Lazy<RpcMetrics> = Lazy::new(RpcMetrics::new);
+static RPC_METRICS: RpcMetricsHandle = RpcMetricsHandle(OnceCell::new());
 const MAX_MINING_JOBS: usize = 2_048;
 const MAX_MINING_JOB_AGE_SECS: u64 = 300;
 const MAX_MINER_EXTRA_DATA_BYTES: usize = 64;
@@ -56,65 +56,69 @@ struct RpcMetrics {
     latest_block_height: IntGauge,
 }
 
+struct RpcMetricsHandle(OnceCell<RpcMetrics>);
+
+impl RpcMetricsHandle {
+    fn get(&self) -> Result<&RpcMetrics, RpcErrorObject> {
+        self.0.get_or_try_init(RpcMetrics::try_new).map_err(|err| {
+            RpcErrorObject::internal_error(format!("rpc metrics initialization failed: {err}"))
+        })
+    }
+
+    fn init(&self) -> std::result::Result<(), crate::ApiError> {
+        self.0
+            .get_or_try_init(RpcMetrics::try_new)
+            .map(|_| ())
+            .map_err(|err| {
+                crate::ApiError::Internal(format!("rpc metrics initialization failed: {err}"))
+            })
+    }
+}
+
 impl RpcMetrics {
-    fn new() -> Self {
+    fn try_new() -> Result<Self, prometheus::Error> {
         let registry = Registry::new();
         let method_calls = IntCounterVec::new(
             prometheus::Opts::new("zero_rpc_method_calls_total", "RPC method call count"),
             &["method"],
-        )
-        .expect("method_calls metric");
+        )?;
         let method_errors = IntCounterVec::new(
             prometheus::Opts::new("zero_rpc_method_errors_total", "RPC method error count"),
             &["method"],
-        )
-        .expect("method_errors metric");
+        )?;
         let mining_shares_accepted = IntCounterVec::new(
             prometheus::Opts::new(
                 "zero_mining_shares_accepted_total",
                 "Accepted mining shares",
             ),
             &["source"],
-        )
-        .expect("mining_shares_accepted metric");
+        )?;
         let mining_shares_rejected = IntCounterVec::new(
             prometheus::Opts::new(
                 "zero_mining_shares_rejected_total",
                 "Rejected mining shares",
             ),
             &["reason"],
-        )
-        .expect("mining_shares_rejected metric");
+        )?;
         let latest_block_height = IntGauge::new(
             "zero_latest_block_height",
             "Latest block height observed by RPC",
-        )
-        .expect("latest_block_height metric");
+        )?;
 
-        registry
-            .register(Box::new(method_calls.clone()))
-            .expect("register method_calls");
-        registry
-            .register(Box::new(method_errors.clone()))
-            .expect("register method_errors");
-        registry
-            .register(Box::new(mining_shares_accepted.clone()))
-            .expect("register mining_shares_accepted");
-        registry
-            .register(Box::new(mining_shares_rejected.clone()))
-            .expect("register mining_shares_rejected");
-        registry
-            .register(Box::new(latest_block_height.clone()))
-            .expect("register latest_block_height");
+        registry.register(Box::new(method_calls.clone()))?;
+        registry.register(Box::new(method_errors.clone()))?;
+        registry.register(Box::new(mining_shares_accepted.clone()))?;
+        registry.register(Box::new(mining_shares_rejected.clone()))?;
+        registry.register(Box::new(latest_block_height.clone()))?;
 
-        Self {
+        Ok(Self {
             registry,
             method_calls,
             method_errors,
             mining_shares_accepted,
             mining_shares_rejected,
             latest_block_height,
-        }
+        })
     }
 
     fn render(&self) -> Result<String, RpcErrorObject> {
@@ -463,7 +467,18 @@ impl RpcApi {
 
     /// Handle RPC request
     pub async fn handle_request(&self, request: JsonRpcRequest) -> JsonRpcResponse {
-        RPC_METRICS
+        let metrics = match RPC_METRICS.get() {
+            Ok(metrics) => metrics,
+            Err(error) => {
+                return JsonRpcResponse {
+                    jsonrpc: "2.0".into(),
+                    result: None,
+                    error: Some(error),
+                    id: request.id,
+                };
+            }
+        };
+        metrics
             .method_calls
             .with_label_values(&[request.method.as_str()])
             .inc();
@@ -477,7 +492,7 @@ impl RpcApi {
                 id: request.id,
             },
             Err(error) => {
-                RPC_METRICS
+                metrics
                     .method_errors
                     .with_label_values(&[request.method.as_str()])
                     .inc();
@@ -1372,6 +1387,7 @@ impl RpcApi {
         &self,
         params: Option<Vec<serde_json::Value>>,
     ) -> Result<serde_json::Value, RpcErrorObject> {
+        let metrics = RPC_METRICS.get()?;
         if !self.config.mining_enabled {
             return Err(RpcErrorObject::invalid_params(
                 "mining rpc disabled on this node".to_string(),
@@ -1406,7 +1422,7 @@ impl RpcApi {
         hash.copy_from_slice(&hash_bytes);
         let leading = hash_bytes.iter().take_while(|b| **b == 0).count();
         if leading < work.target_leading_zero_bytes {
-            RPC_METRICS
+            metrics
                 .mining_shares_rejected
                 .with_label_values(&["low_difficulty_share"])
                 .inc();
@@ -1423,7 +1439,7 @@ impl RpcApi {
         data.extend_from_slice(&req.nonce.to_be_bytes());
         let expected = zerocore::crypto::keccak256(&data);
         if expected != hash {
-            RPC_METRICS
+            metrics
                 .mining_shares_rejected
                 .with_label_values(&["invalid_pow_hash"])
                 .inc();
@@ -1435,7 +1451,7 @@ impl RpcApi {
 
         let miner_label = req.miner.unwrap_or_else(|| "zero-miner".to_string());
         if miner_label.len() > MAX_MINER_EXTRA_DATA_BYTES {
-            RPC_METRICS
+            metrics
                 .mining_shares_rejected
                 .with_label_values(&["invalid_miner_label"])
                 .inc();
@@ -1454,7 +1470,7 @@ impl RpcApi {
             let mut seen = self.mining_seen_submissions.write();
             let mut order = self.mining_seen_submission_order.write();
             if !seen.insert(seen_key.clone()) {
-                RPC_METRICS
+                metrics
                     .mining_shares_rejected
                     .with_label_values(&["duplicate_share"])
                     .inc();
@@ -1476,7 +1492,7 @@ impl RpcApi {
             .write()
             .retain(|work_id| work_id != &req.work_id);
         if !consumed {
-            RPC_METRICS
+            metrics
                 .mining_shares_rejected
                 .with_label_values(&["stale_or_duplicate_work"])
                 .inc();
@@ -1490,7 +1506,7 @@ impl RpcApi {
             let mut counter = self.hashrate_counter.write();
             *counter = counter.saturating_add(1);
         }
-        RPC_METRICS
+        metrics
             .mining_shares_accepted
             .with_label_values(&["zero_submitWork"])
             .inc();
@@ -1541,7 +1557,7 @@ impl RpcApi {
         *self.latest_block.write() = Some(block);
         set_global_synced_height(header.number.as_u64());
         self.credit_block_reward(header.coinbase, header.number);
-        RPC_METRICS
+        metrics
             .latest_block_height
             .set(header.number.as_u64() as i64);
 
@@ -1556,7 +1572,7 @@ impl RpcApi {
         &self,
         _params: Option<Vec<serde_json::Value>>,
     ) -> Result<serde_json::Value, RpcErrorObject> {
-        let text = RPC_METRICS.render()?;
+        let text = RPC_METRICS.get()?.render()?;
         Ok(serde_json::json!({ "text": text }))
     }
 
@@ -2205,6 +2221,8 @@ fn is_authorized(headers: &HeaderMap, expected_token: Option<&str>) -> bool {
 }
 
 fn build_default_rpc_api(config: RpcConfig) -> std::result::Result<RpcApi, crate::ApiError> {
+    RPC_METRICS.init()?;
+
     let account_manager = Arc::new(InMemoryAccountManager::new());
     let tx_pool = Arc::new(TransactionPool::new(
         TxPoolConfig::default(),
@@ -2284,7 +2302,8 @@ fn parse_address(s: &str) -> Result<Address, RpcErrorObject> {
     let bytes = hex::decode(body)
         .map_err(|e| RpcErrorObject::invalid_params(format!("Invalid address: {}", e)))?;
 
-    Ok(Address::from_slice(&bytes).unwrap())
+    Address::from_slice(&bytes)
+        .map_err(|e| RpcErrorObject::invalid_params(format!("Invalid address: {e}")))
 }
 
 fn parse_hash(s: &str) -> Result<Hash, RpcErrorObject> {
@@ -2297,7 +2316,8 @@ fn parse_hash(s: &str) -> Result<Hash, RpcErrorObject> {
         ));
     }
 
-    Ok(Hash::from_slice(&bytes).unwrap())
+    Hash::from_slice(&bytes)
+        .map_err(|e| RpcErrorObject::invalid_params(format!("Invalid hash: {e}")))
 }
 
 fn parse_u256_hex(s: &str) -> Result<U256, RpcErrorObject> {
