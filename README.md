@@ -88,6 +88,19 @@ cargo clippy -- -D warnings
 cargo test
 ```
 
+## Mainnet Checklist
+
+```bash
+# Public local + remote + observer + explorer checklist
+./scripts/mainnet_checklist.sh
+```
+
+Key checks include:
+- local/remote/observer RPC reachability, peerCount, block heights, `zero_syncStatus`
+- local/remote block-gap threshold
+- explorer `/health`, `/api/overview`, `/api/txs/recent`, account balance + account tx endpoints
+- public soak monitor health and RPC/SSH error counters
+
 ## License
 
 MIT OR Apache-2.0
