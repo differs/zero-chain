@@ -51,7 +51,9 @@ impl NodeRecord {
         }
 
         let ip = addr_parts[0].to_string();
-        let port = addr_parts[1].parse().unwrap_or(30303);
+        let port = addr_parts[1]
+            .parse::<u16>()
+            .map_err(|e| NetworkError::ProtocolError(format!("Invalid port: {e}")))?;
 
         Ok(Self {
             peer_id,
@@ -452,6 +454,13 @@ mod tests {
         assert_eq!(record.ip, "127.0.0.1");
         assert_eq!(record.tcp_port, 30303);
         assert_eq!(record.to_enode(), "enode://peer123@127.0.0.1:30303");
+    }
+
+    #[test]
+    fn test_node_record_from_enode_rejects_invalid_port() {
+        let err = NodeRecord::from_enode("enode://peer123@127.0.0.1:not-a-port")
+            .expect_err("invalid port should fail");
+        assert!(matches!(err, NetworkError::ProtocolError(_)));
     }
 
     #[test]
