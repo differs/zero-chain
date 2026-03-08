@@ -115,15 +115,10 @@ impl ApiService {
         })
     }
 
-    /// Create new API service with fallback behavior.
+    /// Create new API service and fail fast on invalid configuration.
     pub fn new(config: ApiConfig) -> Self {
-        match Self::try_new(config.clone()) {
-            Ok(svc) => svc,
-            Err(err) => {
-                tracing::warn!("invalid API config, fallback to default: {}", err);
-                Self::try_new(ApiConfig::default()).expect("default ApiConfig must be valid")
-            }
-        }
+        Self::try_new(config)
+            .unwrap_or_else(|err| panic!("invalid ApiConfig for ApiService::new: {err}"))
     }
 
     /// Start API service

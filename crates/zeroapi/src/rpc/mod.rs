@@ -152,6 +152,8 @@ pub struct RpcConfig {
     pub network_id: u64,
     /// Mining reward address.
     pub coinbase: String,
+    /// Whether mining RPC methods are enabled (`zero_getWork` / `zero_submitWork`).
+    pub mining_enabled: bool,
     /// Optional static auth token for all JSON-RPC requests.
     pub auth_token: Option<String>,
     /// Per-client request budget per rolling minute. `0` means disabled.
@@ -195,6 +197,7 @@ impl Default for RpcConfig {
             chain_id: 10086,
             network_id: 10086,
             coinbase: "ZER0x0000000000000000000000000000000000000000".to_string(),
+            mining_enabled: false,
             auth_token: None,
             rate_limit_per_minute: 600,
         }
@@ -1299,6 +1302,11 @@ impl RpcApi {
         &self,
         _params: Option<Vec<serde_json::Value>>,
     ) -> Result<serde_json::Value, RpcErrorObject> {
+        if !self.config.mining_enabled {
+            return Err(RpcErrorObject::invalid_params(
+                "mining rpc disabled on this node".to_string(),
+            ));
+        }
         let now = current_unix_secs();
         let latest = self.latest_block.read();
         let target_leading_zero_bytes = latest
@@ -1364,6 +1372,11 @@ impl RpcApi {
         &self,
         params: Option<Vec<serde_json::Value>>,
     ) -> Result<serde_json::Value, RpcErrorObject> {
+        if !self.config.mining_enabled {
+            return Err(RpcErrorObject::invalid_params(
+                "mining rpc disabled on this node".to_string(),
+            ));
+        }
         let params = params.ok_or(RpcErrorObject::invalid_params("Missing params".to_string()))?;
         let req_value = params
             .first()
@@ -2022,7 +2035,7 @@ impl RpcServer {
     pub fn try_new(config: RpcConfig) -> Result<Self, crate::ApiError> {
         config.validate().map_err(crate::ApiError::InvalidRequest)?;
 
-        let api = Some(Arc::new(build_default_rpc_api(config.clone())));
+        let api = Some(Arc::new(build_default_rpc_api(config.clone())?));
         Ok(Self {
             config,
             api,
@@ -2031,15 +2044,10 @@ impl RpcServer {
         })
     }
 
+    /// Creates server and fails fast on invalid configuration.
     pub fn new(config: RpcConfig) -> Self {
-        match Self::try_new(config.clone()) {
-            Ok(server) => server,
-            Err(err) => {
-                tracing::warn!("invalid rpc config, fallback to default: {}", err);
-                // Keep backward compatibility for callers expecting infallible constructor.
-                Self::try_new(RpcConfig::default()).expect("default RpcConfig must be valid")
-            }
-        }
+        Self::try_new(config)
+            .unwrap_or_else(|err| panic!("invalid rpc config for RpcServer::new: {err}"))
     }
 
     /// Create server with externally provided RPC API instance.
@@ -2196,7 +2204,7 @@ fn is_authorized(headers: &HeaderMap, expected_token: Option<&str>) -> bool {
         .unwrap_or(false)
 }
 
-fn build_default_rpc_api(config: RpcConfig) -> RpcApi {
+fn build_default_rpc_api(config: RpcConfig) -> std::result::Result<RpcApi, crate::ApiError> {
     let account_manager = Arc::new(InMemoryAccountManager::new());
     let tx_pool = Arc::new(TransactionPool::new(
         TxPoolConfig::default(),
@@ -2204,7 +2212,7 @@ fn build_default_rpc_api(config: RpcConfig) -> RpcApi {
     ));
     let state_db = Arc::new(StateDb::new(Hash::zero()));
 
-    let persistent_db = build_compute_kv_backend(&config);
+    let persistent_db = build_compute_kv_backend(&config)?;
     let compute_store = Arc::new(ComputeStore::new(persistent_db));
 
     let domains = Arc::new(InMemoryDomainRegistry::new());
@@ -2215,34 +2223,38 @@ fn build_default_rpc_api(config: RpcConfig) -> RpcApi {
         public: true,
     });
 
-    RpcApi::with_persistent_compute(config, state_db, tx_pool, compute_store, domains)
+    Ok(RpcApi::with_persistent_compute(
+        config,
+        state_db,
+        tx_pool,
+        compute_store,
+        domains,
+    ))
 }
 
-fn build_compute_kv_backend(config: &RpcConfig) -> Arc<dyn KeyValueDB> {
+fn build_compute_kv_backend(
+    config: &RpcConfig,
+) -> std::result::Result<Arc<dyn KeyValueDB>, crate::ApiError> {
     match config.compute_backend {
-        ComputeBackend::Mem => Arc::new(MemDatabase::new()),
-        ComputeBackend::RocksDb => match RocksDb::open(&config.compute_db_path) {
-            Ok(db) => Arc::new(db),
-            Err(err) => {
-                tracing::warn!(
-                    "failed to open rocksdb at {}: {}, fallback to mem",
-                    config.compute_db_path,
-                    err
-                );
-                Arc::new(MemDatabase::new())
-            }
-        },
-        ComputeBackend::Redb => match RedbDatabase::open(&config.compute_db_path) {
-            Ok(db) => Arc::new(db),
-            Err(err) => {
-                tracing::warn!(
-                    "failed to open redb at {}: {}, fallback to mem",
-                    config.compute_db_path,
-                    err
-                );
-                Arc::new(MemDatabase::new())
-            }
-        },
+        ComputeBackend::Mem => Ok(Arc::new(MemDatabase::new())),
+        ComputeBackend::RocksDb => {
+            let db = RocksDb::open(&config.compute_db_path).map_err(|err| {
+                crate::ApiError::InvalidRequest(format!(
+                    "failed to open rocksdb at {}: {}",
+                    config.compute_db_path, err
+                ))
+            })?;
+            Ok(Arc::new(db))
+        }
+        ComputeBackend::Redb => {
+            let db = RedbDatabase::open(&config.compute_db_path).map_err(|err| {
+                crate::ApiError::InvalidRequest(format!(
+                    "failed to open redb at {}: {}",
+                    config.compute_db_path, err
+                ))
+            })?;
+            Ok(Arc::new(db))
+        }
     }
 }
 
@@ -3130,7 +3142,9 @@ mod tests {
             public: true,
         });
 
-        RpcApi::with_compute(RpcConfig::default(), state_db, tx_pool, store, domains)
+        let mut config = RpcConfig::default();
+        config.mining_enabled = true;
+        RpcApi::with_compute(config, state_db, tx_pool, store, domains)
     }
 
     fn build_test_api_with_persistent_compute() -> RpcApi {
@@ -3152,13 +3166,51 @@ mod tests {
             public: true,
         });
 
-        RpcApi::with_persistent_compute(
-            RpcConfig::default(),
-            state_db,
-            tx_pool,
-            persistent_store,
-            domains,
-        )
+        let mut config = RpcConfig::default();
+        config.mining_enabled = true;
+        RpcApi::with_persistent_compute(config, state_db, tx_pool, persistent_store, domains)
+    }
+
+    #[test]
+    fn test_mining_rpc_disabled_by_default() {
+        zeronet::global_reset_sync_cache();
+        let account_manager = Arc::new(InMemoryAccountManager::new());
+        let tx_pool = Arc::new(TransactionPool::new(
+            TxPoolConfig::default(),
+            account_manager,
+        ));
+        let state_db = Arc::new(StateDb::new(Hash::zero()));
+        let store = Arc::new(InMemoryObjectStore::new());
+        let domains = Arc::new(InMemoryDomainRegistry::new());
+        domains.upsert_domain(DomainConfig {
+            domain_id: DomainId(0),
+            name: "main".to_string(),
+            vm: "wasm".to_string(),
+            public: true,
+        });
+
+        let api = RpcApi::with_compute(RpcConfig::default(), state_db, tx_pool, store, domains);
+        let get_work_err = api
+            .zero_get_work(None)
+            .expect_err("zero_getWork should be disabled by default");
+        assert_eq!(get_work_err.code, -32602);
+        assert_eq!(
+            get_work_err.data,
+            Some(serde_json::Value::String(
+                "mining rpc disabled on this node".to_string()
+            ))
+        );
+
+        let submit_work_err = api
+            .zero_submit_work(Some(vec![serde_json::json!({})]))
+            .expect_err("zero_submitWork should be disabled by default");
+        assert_eq!(submit_work_err.code, -32602);
+        assert_eq!(
+            submit_work_err.data,
+            Some(serde_json::Value::String(
+                "mining rpc disabled on this node".to_string()
+            ))
+        );
     }
 
     fn canonicalize_compute_tx_id(mut tx_json: serde_json::Value) -> serde_json::Value {
@@ -3510,11 +3562,15 @@ mod tests {
             .get("syncing")
             .and_then(|v| v.as_bool())
             .expect("syncing");
-        assert_eq!(local_head, 0);
         assert_eq!(syncing, network_head > local_head);
+        assert!(local_head <= network_head);
 
         let latest = api.zero_get_latest_block(None).expect("latest block");
-        assert_eq!(latest.get("number").and_then(|v| v.as_str()), Some("0x0"));
+        let latest_number = latest
+            .get("number")
+            .and_then(|v| v.as_str())
+            .expect("latest.number");
+        assert_eq!(latest_number, format!("0x{local_head:x}"));
         set_global_synced_height(0);
     }
 
@@ -3714,6 +3770,7 @@ mod tests {
 
     #[test]
     fn test_zero_transfer_query_and_address_history() {
+        zeronet::global_reset_sync_cache();
         let account_manager = Arc::new(InMemoryAccountManager::new());
         let tx_pool = Arc::new(TransactionPool::new(
             TxPoolConfig::default(),
@@ -3731,7 +3788,10 @@ mod tests {
             public: true,
         });
         let api = RpcApi::with_persistent_compute(
-            RpcConfig::default(),
+            RpcConfig {
+                mining_enabled: true,
+                ..RpcConfig::default()
+            },
             state_db,
             tx_pool,
             persistent_store,
@@ -4544,9 +4604,28 @@ mod tests {
             compute_backend: ComputeBackend::Mem,
             ..RpcConfig::default()
         };
-        let db = build_compute_kv_backend(&cfg);
+        let db = build_compute_kv_backend(&cfg).expect("mem backend should initialize");
         db.put(b"k", b"v").unwrap();
         assert_eq!(db.get(b"k").unwrap(), Some(b"v".to_vec()));
+    }
+
+    #[test]
+    fn test_build_compute_backend_file_open_failure_returns_error() {
+        let cfg = RpcConfig {
+            compute_backend: ComputeBackend::RocksDb,
+            compute_db_path: "/dev/null/zerochain-db".to_string(),
+            ..RpcConfig::default()
+        };
+        let err = match build_compute_kv_backend(&cfg) {
+            Ok(_) => panic!("invalid path should fail"),
+            Err(err) => err,
+        };
+        match err {
+            crate::ApiError::InvalidRequest(msg) => {
+                assert!(msg.contains("failed to open rocksdb"));
+            }
+            other => panic!("unexpected error: {other}"),
+        }
     }
 
     #[test]

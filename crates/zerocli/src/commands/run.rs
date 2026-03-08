@@ -112,6 +112,7 @@ pub async fn run_node(cfg: RunNodeConfig) -> Result<()> {
         .unwrap_or(10086);
     let _api_service = if let Some(mut cfg) = rpc_config.clone() {
         cfg.port = http_port;
+        cfg.mining_enabled = mine;
         let mut api_cfg = ApiConfig {
             http_rpc: cfg,
             ..ApiConfig::default()

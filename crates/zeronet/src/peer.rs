@@ -552,8 +552,22 @@ fn load_persisted_bans(
     path: Option<&PathBuf>,
 ) -> Option<(HashMap<PeerId, u64>, HashMap<String, u64>)> {
     let path = path?;
-    let data = fs::read(path).ok()?;
-    let parsed = serde_json::from_slice::<PersistedBanList>(&data).ok()?;
+    let data = match fs::read(path) {
+        Ok(data) => data,
+        Err(err) => {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!("failed to read p2p banlist {}: {}", path.display(), err);
+            }
+            return None;
+        }
+    };
+    let parsed = match serde_json::from_slice::<PersistedBanList>(&data) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            tracing::warn!("failed to parse p2p banlist {}: {}", path.display(), err);
+            return None;
+        }
+    };
     Some((parsed.peers, parsed.ips))
 }
 

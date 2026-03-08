@@ -400,6 +400,7 @@ async fn main() -> Result<()> {
                 chain_id,
                 network_id: rpc_network_id,
                 coinbase: rpc_coinbase,
+                mining_enabled: mine,
                 auth_token: rpc_auth_token,
                 rate_limit_per_minute: rpc_rate_limit_per_minute,
                 ..api_config.http_rpc
