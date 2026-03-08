@@ -157,8 +157,9 @@ impl RandomXContext {
         let mut hash = keccak256(&data);
         for _ in 0..8 {
             // Mix with cache
-            let cache_index = (u64::from_le_bytes(hash[..8].try_into().unwrap())
-                % self.cache.len() as u64) as usize;
+            let mut cache_seed = [0u8; 8];
+            cache_seed.copy_from_slice(&hash[..8]);
+            let cache_index = (u64::from_le_bytes(cache_seed) % self.cache.len() as u64) as usize;
             for i in 0..32 {
                 hash[i] ^= self.cache[(cache_index + i) % self.cache.len()];
             }
@@ -624,7 +625,7 @@ fn current_timestamp() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_secs()
 }
 

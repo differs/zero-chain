@@ -90,7 +90,9 @@ impl U256 {
     }
 
     pub fn as_u64(&self) -> u64 {
-        u64::from_be_bytes(self.0[24..32].try_into().unwrap())
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(&self.0[24..32]);
+        u64::from_be_bytes(bytes)
     }
 
     pub fn as_u8(&self) -> u8 {
@@ -98,7 +100,9 @@ impl U256 {
     }
 
     pub fn as_u128(&self) -> u128 {
-        u128::from_be_bytes(self.0[16..32].try_into().unwrap())
+        let mut bytes = [0u8; 16];
+        bytes.copy_from_slice(&self.0[16..32]);
+        u128::from_be_bytes(bytes)
     }
 
     pub fn is_zero(&self) -> bool {
@@ -852,7 +856,7 @@ fn current_timestamp() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_secs()
 }
 

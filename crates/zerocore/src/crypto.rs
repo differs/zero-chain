@@ -298,6 +298,27 @@ impl fmt::Debug for PublicKey {
 #[derive(Clone, PartialEq, Eq)]
 pub struct PrivateKey([u8; 32]);
 
+fn invariant_signing_key(bytes: &[u8; 32]) -> SigningKey {
+    match SigningKey::from_bytes(bytes.into()) {
+        Ok(signing_key) => signing_key,
+        Err(_) => unreachable!("PrivateKey invariant violated"),
+    }
+}
+
+fn invariant_secret_key(bytes: &[u8; 32]) -> SecretKey {
+    match SecretKey::from_slice(bytes) {
+        Ok(secret_key) => secret_key,
+        Err(_) => unreachable!("PrivateKey invariant violated"),
+    }
+}
+
+fn invariant_message(hash: [u8; 32]) -> SecpMessage {
+    match SecpMessage::from_slice(&hash) {
+        Ok(message) => message,
+        Err(_) => unreachable!("keccak256 must produce 32-byte output"),
+    }
+}
+
 impl PrivateKey {
     /// Generate a new random private key
     pub fn random() -> Self {
@@ -319,18 +340,25 @@ impl PrivateKey {
 
     /// Get the corresponding public key
     pub fn public_key(&self) -> PublicKey {
-        let signing_key = SigningKey::from_bytes(&self.0.into()).expect("Valid private key");
+        let signing_key = invariant_signing_key(&self.0);
         let verifying_key = VerifyingKey::from(&signing_key);
-        let bytes = verifying_key.to_encoded_point(false);
-        PublicKey::from_bytes(bytes.as_bytes().try_into().unwrap()).unwrap()
+        let encoded_bytes = verifying_key.to_encoded_point(false);
+        let encoded_slice = encoded_bytes.as_bytes();
+        debug_assert_eq!(encoded_slice.len(), 65);
+        if encoded_slice.len() != 65 {
+            unreachable!("uncompressed secp256k1 public key must be 65 bytes");
+        }
+        let mut bytes = [0u8; 65];
+        bytes.copy_from_slice(encoded_slice);
+        PublicKey(bytes)
     }
 
     /// Sign a message
     pub fn sign(&self, message: &[u8]) -> Signature {
         let hash = keccak256(message);
         let secp = Secp256k1::new();
-        let sk = SecretKey::from_slice(&self.0).expect("valid private key");
-        let msg = SecpMessage::from_slice(&hash).expect("hash must be 32 bytes");
+        let sk = invariant_secret_key(&self.0);
+        let msg = invariant_message(hash);
         let recoverable = secp.sign_ecdsa_recoverable(&msg, &sk);
         let (rec_id, sig64) = recoverable.serialize_compact();
 
@@ -429,7 +457,7 @@ impl Signature {
         let signature =
             SecpSignature::from_compact(&sig64).map_err(|_| CryptoError::InvalidSignature)?;
 
-        let msg = SecpMessage::from_slice(&hash).expect("hash must be 32 bytes");
+        let msg = invariant_message(hash);
         secp.verify_ecdsa(&msg, &signature, &pubkey)
             .map(|_| true)
             .map_err(|_| CryptoError::VerificationFailed)
@@ -439,7 +467,7 @@ impl Signature {
     pub fn recover(&self, message: &[u8]) -> Result<PublicKey, CryptoError> {
         let hash = keccak256(message);
         let secp = Secp256k1::verification_only();
-        let msg = SecpMessage::from_slice(&hash).expect("hash must be 32 bytes");
+        let msg = invariant_message(hash);
 
         let mut sig64 = [0u8; 64];
         sig64[0..32].copy_from_slice(&self.r);
