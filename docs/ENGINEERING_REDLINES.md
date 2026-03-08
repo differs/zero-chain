@@ -22,6 +22,7 @@
 ## 自动门禁
 
 - 本仓库使用 `scripts/no_silent_fallback.sh` 做红线静态检查。
+- 脚本支持 `-d/--dir` 指定一个或多个目录；不传时默认自动发现并检查当前工作区下的项目。
 - CI 工作流：`.github/workflows/redline-guard.yml`。
 - 发布门禁：`scripts/run_tests.sh` 已将 redline guard 设为阻断步骤。
 

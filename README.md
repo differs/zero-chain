@@ -81,6 +81,9 @@ curl -X POST http://localhost:8545 \
 # Redline guard (禁止 silent fallback)
 bash scripts/no_silent_fallback.sh
 
+# 指定目录检查（可重复 -d）
+bash scripts/no_silent_fallback.sh -d ../zero-chain -d ../zero-explore
+
 # Format
 cargo fmt
 
