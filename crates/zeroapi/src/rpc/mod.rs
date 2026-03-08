@@ -3709,6 +3709,68 @@ mod tests {
     }
 
     #[test]
+    fn test_zero_get_block_by_number_accepts_numeric_param() {
+        let api = build_test_api_with_persistent_compute();
+
+        assert_eq!(
+            mine_one_block(&api, 301, "numeric-block-miner")["accepted"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            mine_one_block(&api, 302, "numeric-block-miner")["accepted"].as_bool(),
+            Some(true)
+        );
+
+        let block = api
+            .zero_get_block_by_number(Some(vec![serde_json::json!(2)]))
+            .expect("numeric block query should succeed");
+        assert_eq!(block.get("number").and_then(|v| v.as_str()), Some("0x2"));
+    }
+
+    #[test]
+    fn test_zero_get_blocks_range_clamps_inverted_window_to_single_height() {
+        let api = build_test_api_with_persistent_compute();
+
+        assert_eq!(
+            mine_one_block(&api, 401, "clamp-miner")["accepted"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            mine_one_block(&api, 402, "clamp-miner")["accepted"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            mine_one_block(&api, 403, "clamp-miner")["accepted"].as_bool(),
+            Some(true)
+        );
+
+        let range = api
+            .zero_get_blocks_range(Some(vec![serde_json::json!({
+                "from": 9,
+                "to": 2,
+                "limit": 5
+            })]))
+            .expect("range should clamp successfully");
+        assert_eq!(range.get("from").and_then(|v| v.as_u64()), Some(2));
+        assert_eq!(range.get("to").and_then(|v| v.as_u64()), Some(2));
+        let items = range
+            .get("items")
+            .and_then(|v| v.as_array())
+            .expect("items missing");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].get("number").and_then(|v| v.as_str()), Some("0x2"));
+    }
+
+    #[test]
+    fn test_zero_get_blocks_range_rejects_invalid_hex_bounds() {
+        let api = build_test_api_with_persistent_compute();
+        let err = api
+            .zero_get_blocks_range(Some(vec![serde_json::json!({ "from": "0xzz" })]))
+            .expect_err("invalid hex bounds should fail");
+        assert_eq!(err.code, -32602);
+    }
+
+    #[test]
     fn test_zero_get_blocks_range_defaults_to_latest_and_clamps_limit() {
         let api = build_test_api_with_persistent_compute();
         assert_eq!(
@@ -3746,6 +3808,47 @@ mod tests {
             .zero_get_blocks_range(Some(vec![serde_json::json!("bad")]))
             .expect_err("non-object query should fail");
         assert_eq!(err.code, -32602);
+    }
+
+    #[test]
+    fn test_zero_list_compute_tx_results_returns_empty_page_past_total() {
+        let api = build_test_api_with_persistent_compute();
+        let newer_hash = Hash::from_bytes([0x91u8; 32]);
+        let older_hash = Hash::from_bytes([0x81u8; 32]);
+        zeronet::global_replace_compute_txs(vec![
+            SyncComputeTxRecord {
+                tx_hash: older_hash,
+                result: serde_json::json!({
+                    "submitted_at_unix": 9_000_000_010u64,
+                    "status": "ok"
+                }),
+            },
+            SyncComputeTxRecord {
+                tx_hash: newer_hash,
+                result: serde_json::json!({
+                    "submitted_at_unix": 9_000_000_020u64,
+                    "status": "ok"
+                }),
+            },
+        ]);
+
+        let page = api
+            .zero_list_compute_tx_results(Some(vec![serde_json::json!({
+                "page": 3,
+                "limit": 1
+            })]))
+            .expect("list tx results");
+        assert_eq!(page.get("page").and_then(|v| v.as_u64()), Some(3));
+        assert_eq!(page.get("limit").and_then(|v| v.as_u64()), Some(1));
+        assert_eq!(page.get("total").and_then(|v| v.as_u64()), Some(2));
+        assert_eq!(page.get("has_more").and_then(|v| v.as_bool()), Some(false));
+        let items = page
+            .get("items")
+            .and_then(|v| v.as_array())
+            .expect("items missing");
+        assert!(items.is_empty());
+
+        zeronet::global_replace_compute_txs(Vec::new());
     }
 
     #[test]
