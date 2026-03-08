@@ -20,6 +20,7 @@ MIN_OBSERVER_BLOCK_HEIGHT="${MIN_OBSERVER_BLOCK_HEIGHT:-1}"
 REQUIRE_OBSERVER_SYNC="${REQUIRE_OBSERVER_SYNC:-1}"
 MAX_OBSERVER_SYNC_LAG="${MAX_OBSERVER_SYNC_LAG:-2}"
 CHECK_ADDRESS="${CHECK_ADDRESS:-ZER0x1111111111111111111111111111111111111111}"
+CHECK_TX_HASH="${CHECK_TX_HASH:-}"
 
 RPC_TIMEOUT_SECS="${RPC_TIMEOUT_SECS:-8}"
 SSH_TIMEOUT_SECS="${SSH_TIMEOUT_SECS:-8}"
@@ -144,6 +145,18 @@ extract_sync_field_u64() {
 
 extract_sync_field_bool() {
   sed -n 's/.*"syncing":[ ]*\(true\|false\).*/\1/p'
+}
+
+extract_account_balance() {
+  sed -n 's/.*"balance":"\([^"]*\)".*/\1/p'
+}
+
+extract_account_nonce() {
+  sed -n 's/.*"nonce":"\([^"]*\)".*/\1/p'
+}
+
+extract_tx_block_number() {
+  sed -n 's/.*"block_number":[ ]*\([0-9][0-9]*\).*/\1/p'
 }
 
 hex_to_dec() {
@@ -360,6 +373,50 @@ if [[ -n "${observer_sync_json}" ]]; then
     else
       log_pass "observer 同步滞后可接受 (lag=${observer_lag})"
     fi
+  fi
+fi
+
+local_account_json=''; remote_account_json=''
+if local_account_json="$(rpc_local "${PUBLIC_LOCAL_RPC_URL}" zero_getAccount "[\"${CHECK_ADDRESS}\"]" 2>/dev/null)" && \
+   remote_account_json="$(rpc_remote zero_getAccount "[\"${CHECK_ADDRESS}\"]" 2>/dev/null)"; then
+  local_balance="$(printf '%s' "${local_account_json}" | extract_account_balance)"
+  local_nonce="$(printf '%s' "${local_account_json}" | extract_account_nonce)"
+  remote_balance="$(printf '%s' "${remote_account_json}" | extract_account_balance)"
+  remote_nonce="$(printf '%s' "${remote_account_json}" | extract_account_nonce)"
+  printf '  account %s: local(balance=%s nonce=%s) remote(balance=%s nonce=%s)\n' \
+    "${CHECK_ADDRESS}" "${local_balance:-N/A}" "${local_nonce:-N/A}" "${remote_balance:-N/A}" "${remote_nonce:-N/A}"
+  if [[ -n "${local_balance}" && -n "${remote_balance}" && "${local_balance}" == "${remote_balance}" && "${local_nonce}" == "${remote_nonce}" ]]; then
+    log_pass "账户状态一致 (${CHECK_ADDRESS})"
+  else
+    log_fail "账户状态不一致 (${CHECK_ADDRESS})"
+  fi
+else
+  log_fail "账户状态对比失败 (${CHECK_ADDRESS})"
+fi
+
+if [[ -n "${CHECK_TX_HASH}" ]]; then
+  local_tx_json=''; remote_tx_json=''
+  if local_tx_json="$(rpc_local "${PUBLIC_LOCAL_RPC_URL}" zero_getTransactionByHash "[\"${CHECK_TX_HASH}\"]" 2>/dev/null)" && \
+     remote_tx_json="$(rpc_remote zero_getTransactionByHash "[\"${CHECK_TX_HASH}\"]" 2>/dev/null)"; then
+    local_is_null=0
+    remote_is_null=0
+    [[ "${local_tx_json}" == *'"result":null'* ]] && local_is_null=1
+    [[ "${remote_tx_json}" == *'"result":null'* ]] && remote_is_null=1
+    local_block_num="$(printf '%s' "${local_tx_json}" | extract_tx_block_number)"
+    remote_block_num="$(printf '%s' "${remote_tx_json}" | extract_tx_block_number)"
+    printf '  tx %s: local_null=%d remote_null=%d local_block=%s remote_block=%s\n' \
+      "${CHECK_TX_HASH}" "${local_is_null}" "${remote_is_null}" "${local_block_num:-N/A}" "${remote_block_num:-N/A}"
+    if [[ "${local_is_null}" == "${remote_is_null}" ]]; then
+      if [[ "${local_is_null}" == "0" && -n "${local_block_num}" && -n "${remote_block_num}" && "${local_block_num}" != "${remote_block_num}" ]]; then
+        log_fail "交易索引块高不一致 (${CHECK_TX_HASH})"
+      else
+        log_pass "交易索引一致 (${CHECK_TX_HASH})"
+      fi
+    else
+      log_fail "交易索引存在缺失 (${CHECK_TX_HASH})"
+    fi
+  else
+    log_fail "交易索引对比失败 (${CHECK_TX_HASH})"
   fi
 fi
 

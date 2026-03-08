@@ -26,7 +26,10 @@ use zerocore::state::StateDb;
 use zerocore::transaction::{pool::TxPoolConfig, SignedTransaction, TransactionPool};
 use zeronet::{
     global_block_by_number, global_latest_block, global_peer_count, global_peers,
-    global_store_block, global_synced_height, set_global_synced_height,
+    global_record_account, global_record_compute_tx, global_record_transfer_tx, global_store_block,
+    global_synced_account, global_synced_compute_tx, global_synced_compute_txs,
+    global_synced_height, global_synced_transfer_tx, global_synced_transfer_txs,
+    set_global_synced_height, SyncComputeTxRecord, SyncTransferTxRecord,
 };
 use zerostore::db::{KeyValueDB, MemDatabase, RedbDatabase, RocksDb};
 use zerostore::ComputeStore;
@@ -622,6 +625,7 @@ impl RpcApi {
         from_account.nonce = from_account.nonce.saturating_add(1);
         from_account.updated_at = now;
         self.state_db.insert_account(from, from_account.clone());
+        global_record_account(from_account.clone());
 
         let mut to_account = self.state_db.get_account(&to).unwrap_or_else(|| Account {
             address: to,
@@ -632,7 +636,8 @@ impl RpcApi {
         });
         to_account.balance = to_account.balance.saturating_add(value);
         to_account.updated_at = now;
-        self.state_db.insert_account(to, to_account);
+        self.state_db.insert_account(to, to_account.clone());
+        global_record_account(to_account);
 
         let mut hash_input = Vec::new();
         hash_input.extend_from_slice(from.as_bytes());
@@ -674,12 +679,29 @@ impl RpcApi {
             .ok_or_else(|| RpcErrorObject::invalid_params("Address must be string".to_string()))?;
 
         let address = parse_address(address_str)?;
+        let local = self.state_db.get_account(&address);
+        let synced = global_synced_account(&address);
+        let account = match (local, synced) {
+            (Some(local), Some(synced)) => {
+                if synced.updated_at > local.updated_at {
+                    Some(synced)
+                } else {
+                    Some(local)
+                }
+            }
+            (Some(local), None) => Some(local),
+            (None, Some(synced)) => Some(synced),
+            (None, None) => None,
+        };
+        let (balance, nonce) = match account {
+            Some(ref account) => (account.balance, account.nonce),
+            None => (U256::zero(), 0),
+        };
 
-        // Would get full account info
         Ok(serde_json::json!({
             "address": format_zero_address(address),
-            "balance": format_u256_hex(self.state_db.get_balance(&address)),
-            "nonce": format!("0x{:x}", self.state_db.get_nonce(&address)),
+            "balance": format_u256_hex(balance),
+            "nonce": format!("0x{:x}", nonce),
         }))
     }
 
@@ -873,6 +895,10 @@ impl RpcApi {
                 }
             }
         }
+        global_record_compute_tx(SyncComputeTxRecord {
+            tx_hash: tx.tx_id.0,
+            result: result.clone(),
+        });
 
         Ok(result)
     }
@@ -903,6 +929,9 @@ impl RpcApi {
                 })?;
                 return Ok(value);
             }
+        }
+        if let Some(record) = global_synced_compute_tx(&tx_id.0) {
+            return Ok(record.result);
         }
 
         Ok(serde_json::Value::Null)
@@ -938,18 +967,42 @@ impl RpcApi {
 
         let order = self.submitted_compute_order.read();
         let results = self.submitted_compute_results.read();
-        let total = order.len();
-        let mut items = Vec::new();
-
-        for tx_hash in order.iter().rev().skip(skip).take(limit) {
+        let mut seen = HashSet::new();
+        let mut merged: Vec<(u64, Hash, serde_json::Value)> = Vec::new();
+        for tx_hash in order.iter().rev() {
             if let Some(result) = results.get(tx_hash) {
-                items.push(serde_json::json!({
-                    "tx_id": format!("0x{}", hex::encode(tx_hash.as_bytes())),
-                    "result": result.clone(),
-                }));
+                let ts = result
+                    .get("submitted_at_unix")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                if seen.insert(*tx_hash) {
+                    merged.push((ts, *tx_hash, result.clone()));
+                }
             }
         }
-
+        for record in global_synced_compute_txs().into_iter().rev() {
+            if seen.insert(record.tx_hash) {
+                let ts = record
+                    .result
+                    .get("submitted_at_unix")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                merged.push((ts, record.tx_hash, record.result));
+            }
+        }
+        merged.sort_by(|a, b| b.0.cmp(&a.0));
+        let total = merged.len();
+        let items = merged
+            .into_iter()
+            .skip(skip)
+            .take(limit)
+            .map(|(_, tx_hash, result)| {
+                serde_json::json!({
+                    "tx_id": format!("0x{}", hex::encode(tx_hash.as_bytes())),
+                    "result": result,
+                })
+            })
+            .collect::<Vec<_>>();
         let has_more = skip.saturating_add(items.len()) < total;
         Ok(serde_json::json!({
             "page": page,
@@ -990,6 +1043,21 @@ impl RpcApi {
                 })?;
                 return Ok(compute_tx_to_json(tx_hash, &value));
             }
+        }
+        if let Some(record) = global_synced_transfer_tx(&tx_hash) {
+            let local = TransferTxRecord {
+                tx_hash: record.tx_hash,
+                from: record.from,
+                to: record.to,
+                value_hex: record.value_hex,
+                from_nonce: record.from_nonce,
+                timestamp: record.timestamp,
+                block_number: record.block_number,
+            };
+            return Ok(transfer_record_to_json(&local));
+        }
+        if let Some(record) = global_synced_compute_tx(&tx_hash) {
+            return Ok(compute_tx_to_json(record.tx_hash, &record.result));
         }
 
         Ok(serde_json::Value::Null)
@@ -1051,9 +1119,25 @@ impl RpcApi {
         if include_transfer {
             let order = self.transfer_tx_order.read();
             let txs = self.transfer_txs.read();
+            let mut seen = HashSet::new();
             for tx_hash in order.iter().rev() {
                 if let Some(record) = txs.get(tx_hash) {
                     items.push((record.timestamp, transfer_record_to_json(record)));
+                    seen.insert(*tx_hash);
+                }
+            }
+            for record in global_synced_transfer_txs().into_iter().rev() {
+                if seen.insert(record.tx_hash) {
+                    let local = TransferTxRecord {
+                        tx_hash: record.tx_hash,
+                        from: record.from,
+                        to: record.to,
+                        value_hex: record.value_hex,
+                        from_nonce: record.from_nonce,
+                        timestamp: record.timestamp,
+                        block_number: record.block_number,
+                    };
+                    items.push((local.timestamp, transfer_record_to_json(&local)));
                 }
             }
         }
@@ -1061,6 +1145,7 @@ impl RpcApi {
         if include_compute {
             let order = self.submitted_compute_order.read();
             let results = self.submitted_compute_results.read();
+            let mut seen = HashSet::new();
             for tx_hash in order.iter().rev() {
                 if let Some(result) = results.get(tx_hash) {
                     let ts = result
@@ -1068,6 +1153,17 @@ impl RpcApi {
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0);
                     items.push((ts, compute_tx_to_json(*tx_hash, result)));
+                    seen.insert(*tx_hash);
+                }
+            }
+            for record in global_synced_compute_txs().into_iter().rev() {
+                if seen.insert(record.tx_hash) {
+                    let ts = record
+                        .result
+                        .get("submitted_at_unix")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    items.push((ts, compute_tx_to_json(record.tx_hash, &record.result)));
                 }
             }
         }
@@ -1149,12 +1245,32 @@ impl RpcApi {
 
         let order = self.transfer_tx_order.read();
         let txs = self.transfer_txs.read();
+        let mut seen = HashSet::new();
         let mut filtered = Vec::new();
         for tx_hash in order.iter().rev() {
             if let Some(record) = txs.get(tx_hash) {
                 if record.from == address || record.to == address {
                     filtered.push(transfer_record_to_json(record));
+                    seen.insert(*tx_hash);
                 }
+            }
+        }
+        for record in global_synced_transfer_txs().into_iter().rev() {
+            if seen.contains(&record.tx_hash) {
+                continue;
+            }
+            if record.from == address || record.to == address {
+                let local = TransferTxRecord {
+                    tx_hash: record.tx_hash,
+                    from: record.from,
+                    to: record.to,
+                    value_hex: record.value_hex,
+                    from_nonce: record.from_nonce,
+                    timestamp: record.timestamp,
+                    block_number: record.block_number,
+                };
+                filtered.push(transfer_record_to_json(&local));
+                seen.insert(local.tx_hash);
             }
         }
 
@@ -1594,6 +1710,15 @@ impl RpcApi {
 
     fn record_transfer_tx(&self, record: TransferTxRecord) {
         let tx_hash = record.tx_hash;
+        global_record_transfer_tx(SyncTransferTxRecord {
+            tx_hash,
+            from: record.from,
+            to: record.to,
+            value_hex: record.value_hex.clone(),
+            from_nonce: record.from_nonce,
+            timestamp: record.timestamp,
+            block_number: record.block_number,
+        });
         let mut txs = self.transfer_txs.write();
         let mut order = self.transfer_tx_order.write();
         txs.insert(tx_hash, record);
@@ -1626,7 +1751,8 @@ impl RpcApi {
 
         account.balance = account.balance.saturating_add(reward);
         account.updated_at = now;
-        self.state_db.insert_account(coinbase, account);
+        self.state_db.insert_account(coinbase, account.clone());
+        global_record_account(account);
     }
 
     fn zero_import_block(
@@ -1662,6 +1788,15 @@ impl RpcApi {
         let coinbase = parse_address(coinbase)?;
         let mix_hash = parse_hash_field(block, "mix_hash")?;
         let extra_data = parse_bytes_hex_opt(block.get("extra_data"))?.unwrap_or_default();
+        let transactions = block
+            .get("transactions")
+            .map(|value| {
+                serde_json::from_value::<Vec<SignedTransaction>>(value.clone()).map_err(|e| {
+                    RpcErrorObject::invalid_params(format!("transactions decode failed: {e}"))
+                })
+            })
+            .transpose()?
+            .unwrap_or_default();
 
         let mut latest = self.latest_block.write();
         if let Some(current) = latest.as_ref() {
@@ -1686,7 +1821,7 @@ impl RpcApi {
             uncle_hashes: Vec::new(),
             coinbase,
             state_root: Hash::zero(),
-            transactions_root: Hash::zero(),
+            transactions_root: derive_transactions_root(&transactions),
             receipts_root: Hash::zero(),
             number: U256::from(number),
             gas_limit: 30_000_000,
@@ -1701,12 +1836,25 @@ impl RpcApi {
         };
         let block = Block {
             header: header.clone(),
-            transactions: Vec::new(),
+            transactions: transactions.clone(),
             uncles: Vec::new(),
         };
         self.store_block(block.clone());
         *latest = Some(block);
         set_global_synced_height(number);
+        for tx in transactions {
+            if let Some(to) = tx.to() {
+                self.record_transfer_tx(TransferTxRecord {
+                    tx_hash: tx.hash(),
+                    from: tx.sender(),
+                    to,
+                    value_hex: format_u256_hex(tx.value()),
+                    from_nonce: tx.nonce(),
+                    timestamp,
+                    block_number: number,
+                });
+            }
+        }
 
         Ok(serde_json::json!({
             "imported": true,
@@ -1742,6 +1890,20 @@ fn adjust_mining_difficulty(parent_difficulty: U256, parent_timestamp: u64, now:
 
     let bounded = next.clamp(MIN_MINING_DIFFICULTY, MAX_MINING_DIFFICULTY);
     U256::from_u128(bounded)
+}
+
+fn derive_transactions_root(txs: &[SignedTransaction]) -> Hash {
+    if txs.is_empty() {
+        return Hash::zero();
+    }
+    let mut hashes = txs.iter().map(|tx| tx.hash()).collect::<Vec<_>>();
+    hashes.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+    let mut data = Vec::with_capacity(12 + hashes.len() * 32);
+    data.extend_from_slice(b"ZERO-SYNC-T");
+    for hash in hashes {
+        data.extend_from_slice(hash.as_bytes());
+    }
+    Hash::from_bytes(zerocore::crypto::keccak256(&data))
 }
 
 fn current_unix_secs() -> u64 {
@@ -3265,6 +3427,55 @@ mod tests {
         let latest = api.zero_get_latest_block(None).expect("latest block");
         assert!(latest.get("hash").is_some());
         assert_eq!(latest.get("number").and_then(|v| v.as_str()), Some("0x1"));
+    }
+
+    #[test]
+    fn test_zero_import_block_with_transactions_updates_tx_index() {
+        let api = build_test_api_with_persistent_compute();
+        let latest = api.zero_get_latest_block(None).expect("latest block");
+        let parent_hash = latest
+            .get("hash")
+            .and_then(|v| v.as_str())
+            .expect("parent hash");
+
+        let key = zerocore::crypto::PrivateKey::random();
+        let to = parse_address("ZER0x1111111111111111111111111111111111111111").expect("to");
+        let signed = zerocore::transaction::UnsignedTransaction::new_legacy(
+            0,
+            U256::from(1u64),
+            U256::from(21_000u64),
+            Some(to),
+            U256::from(7u64),
+            Vec::new(),
+            31337,
+        )
+        .sign(&key);
+        let tx_hash_hex = format!("0x{}", hex::encode(signed.hash().as_bytes()));
+
+        let import = api
+            .zero_import_block(Some(vec![serde_json::json!({
+                "hash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "parent_hash": parent_hash,
+                "number": "0x1",
+                "timestamp": 1,
+                "difficulty": "0x1",
+                "nonce": 1,
+                "coinbase": "ZER0x526Dc404e751C7d52F6fFF75d563d8D0857C94E9",
+                "mix_hash": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "extra_data": "0x",
+                "transactions": [signed]
+            })]))
+            .expect("import block");
+        assert_eq!(import.get("imported").and_then(|v| v.as_bool()), Some(true));
+
+        let tx = api
+            .zero_get_transaction_by_hash(Some(vec![serde_json::json!(tx_hash_hex.clone())]))
+            .expect("get tx");
+        assert_eq!(
+            tx.get("hash").and_then(|v| v.as_str()),
+            Some(tx_hash_hex.as_str())
+        );
+        assert_eq!(tx.get("kind").and_then(|v| v.as_str()), Some("transfer"));
     }
 
     #[test]

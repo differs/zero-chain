@@ -2,16 +2,20 @@
 
 use crate::protocol::{ProtocolMessage, SyncBlockBody, SyncHeader, SyncStateSnapshot};
 use crate::{
-    global_block_by_number, global_block_number_for_hash, global_latest_block, global_store_block,
-    global_synced_height, set_global_synced_height, NetworkError, Result,
+    global_block_by_number, global_block_number_for_hash, global_latest_block,
+    global_replace_accounts, global_replace_compute_txs, global_replace_transfer_txs,
+    global_store_block, global_synced_accounts, global_synced_compute_txs, global_synced_height,
+    global_synced_transfer_txs, set_global_synced_height, NetworkError, Result,
 };
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::{interval, timeout, Duration, MissedTickBehavior};
+use zerocore::account::Account;
 use zerocore::account::U256;
 use zerocore::block::{Block, BlockHeader};
 use zerocore::crypto::Address;
@@ -39,8 +43,8 @@ pub struct DeterministicStateProofVerifier;
 
 impl StateProofVerifier for DeterministicStateProofVerifier {
     fn verify(&self, header: &SyncHeader, snapshot: &SyncStateSnapshot) -> bool {
-        snapshot.state_root == derive_state_root(&header.hash)
-            && snapshot.state_proof == derive_state_proof(&header.hash, snapshot.block_number)
+        snapshot.state_root == derive_state_root(&snapshot.accounts)
+            && snapshot.state_proof == derive_state_proof(&header.hash, snapshot)
     }
 }
 
@@ -148,6 +152,7 @@ impl SyncManager {
         let block = global_block_by_number(number)?;
         Some(SyncBlockBody {
             block_hash: *block_hash,
+            transactions: block.transactions.clone(),
             tx_count: block.transactions.len() as u32,
         })
     }
@@ -155,12 +160,22 @@ impl SyncManager {
     pub fn build_state_snapshot_response(&self, block_number: u64) -> Option<SyncStateSnapshot> {
         let block = global_block_by_number(block_number)?;
         let block_hash = block.header.hash;
-        Some(SyncStateSnapshot {
+        let accounts = global_synced_accounts();
+        let transfer_txs = global_synced_transfer_txs();
+        let compute_txs = global_synced_compute_txs();
+        let state_root = derive_state_root(&accounts);
+        let account_count = accounts.len() as u64;
+        let mut snapshot = SyncStateSnapshot {
             block_number,
-            state_root: derive_state_root(&block_hash),
-            account_count: synthetic_account_count(block_number),
-            state_proof: derive_state_proof(&block_hash, block_number),
-        })
+            state_root,
+            account_count,
+            accounts,
+            transfer_txs,
+            compute_txs,
+            state_proof: Vec::new(),
+        };
+        snapshot.state_proof = derive_state_proof(&block_hash, &snapshot);
+        Some(SyncStateSnapshot { ..snapshot })
     }
 
     pub fn handle_sync_headers(&self, peer_id: String, headers: Vec<SyncHeader>) {
@@ -235,6 +250,33 @@ impl SyncManager {
                 let target_head = peer_manager.highest_peer_height().max(target);
                 if local >= target_head {
                     *state.write() = SyncState::Complete;
+                    if let Some(peer) = peer_manager.get_best_peers(1).into_iter().next() {
+                        let peer_id = peer.info.peer_id.clone();
+                        if peer
+                            .send(ProtocolMessage::SyncGetStateSnapshot {
+                                block_number: local,
+                            })
+                            .is_ok()
+                        {
+                            if let Ok(snapshot) = wait_for_state_snapshot(
+                                &mut inbound_rx,
+                                &peer_id,
+                                local,
+                                Duration::from_secs(SYNC_RESPONSE_TIMEOUT_SECS),
+                            )
+                            .await
+                            {
+                                if let Some(local_block) = global_block_by_number(local) {
+                                    let local_header = sync_header_from_block(&local_block);
+                                    if state_proof_verifier.verify(&local_header, &snapshot) {
+                                        global_replace_accounts(snapshot.accounts.clone());
+                                        global_replace_transfer_txs(snapshot.transfer_txs.clone());
+                                        global_replace_compute_txs(snapshot.compute_txs.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
                     continue;
                 }
 
@@ -303,6 +345,7 @@ impl SyncManager {
                 }
 
                 let mut body_ok = true;
+                let mut bodies: HashMap<Hash, SyncBlockBody> = HashMap::new();
                 for header in &headers {
                     if peer
                         .send(ProtocolMessage::SyncGetBlockBody {
@@ -322,7 +365,13 @@ impl SyncManager {
                     )
                     .await
                     {
-                        Ok(_body) => {}
+                        Ok(body) => {
+                            if body.tx_count != body.transactions.len() as u32 {
+                                body_ok = false;
+                                break;
+                            }
+                            bodies.insert(header.hash, body);
+                        }
                         Err(_err) => {
                             body_ok = false;
                             break;
@@ -394,6 +443,10 @@ impl SyncManager {
                     continue;
                 }
 
+                global_replace_accounts(snapshot.accounts.clone());
+                global_replace_transfer_txs(snapshot.transfer_txs.clone());
+                global_replace_compute_txs(snapshot.compute_txs.clone());
+
                 for header in &headers {
                     if global_block_by_number(header.number)
                         .map(|b| b.header.hash == header.hash)
@@ -401,7 +454,13 @@ impl SyncManager {
                     {
                         continue;
                     }
-                    global_store_block(block_from_sync_header(header));
+                    let mut block = block_from_sync_header(header);
+                    if let Some(body) = bodies.get(&header.hash) {
+                        block.transactions = body.transactions.clone();
+                        block.header.transactions_root =
+                            derive_transactions_root(&block.transactions);
+                    }
+                    global_store_block(block);
                 }
                 *local_height.write() = last_header.number;
                 set_global_synced_height(last_header.number);
@@ -620,22 +679,50 @@ async fn wait_for_state_snapshot(
     .map_err(|_| "timeout".to_string())?
 }
 
-fn synthetic_account_count(number: u64) -> u64 {
-    1_000u64.saturating_add(number.saturating_mul(13))
-}
-
-pub(crate) fn derive_state_root(block_hash: &Hash) -> Hash {
-    let mut data = Vec::with_capacity(48);
-    data.extend_from_slice(b"ZERO-SYNC-S");
-    data.extend_from_slice(block_hash.as_bytes());
+fn derive_transactions_root(txs: &[zerocore::transaction::SignedTransaction]) -> Hash {
+    if txs.is_empty() {
+        return Hash::zero();
+    }
+    let mut ordered_hashes = txs.iter().map(|tx| tx.hash).collect::<Vec<_>>();
+    ordered_hashes.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+    let mut data = Vec::with_capacity(12 + ordered_hashes.len() * 32);
+    data.extend_from_slice(b"ZERO-SYNC-T");
+    for hash in ordered_hashes {
+        data.extend_from_slice(hash.as_bytes());
+    }
     Hash::from_bytes(zerocore::crypto::keccak256(&data))
 }
 
-pub(crate) fn derive_state_proof(block_hash: &Hash, block_number: u64) -> Vec<u8> {
-    let mut data = Vec::with_capacity(64);
+pub(crate) fn derive_state_root(accounts: &[Account]) -> Hash {
+    let mut ordered = accounts.to_vec();
+    ordered.sort_by(|a, b| a.address.as_bytes().cmp(b.address.as_bytes()));
+    let mut data = Vec::new();
+    data.extend_from_slice(b"ZERO-SYNC-S");
+    for account in ordered {
+        data.extend_from_slice(account.address.as_bytes());
+        data.extend_from_slice(&account.balance.to_big_endian());
+        data.extend_from_slice(&account.nonce.to_be_bytes());
+        data.extend_from_slice(account.storage_root.as_bytes());
+        data.extend_from_slice(account.code_hash.as_bytes());
+    }
+    Hash::from_bytes(zerocore::crypto::keccak256(&data))
+}
+
+pub(crate) fn derive_state_proof(block_hash: &Hash, snapshot: &SyncStateSnapshot) -> Vec<u8> {
+    let mut data = Vec::new();
     data.extend_from_slice(b"ZERO-SYNC-P");
     data.extend_from_slice(block_hash.as_bytes());
-    data.extend_from_slice(&block_number.to_be_bytes());
+    data.extend_from_slice(&snapshot.block_number.to_be_bytes());
+    data.extend_from_slice(snapshot.state_root.as_bytes());
+    data.extend_from_slice(&(snapshot.account_count).to_be_bytes());
+    data.extend_from_slice(&(snapshot.transfer_txs.len() as u64).to_be_bytes());
+    for record in &snapshot.transfer_txs {
+        data.extend_from_slice(record.tx_hash.as_bytes());
+    }
+    data.extend_from_slice(&(snapshot.compute_txs.len() as u64).to_be_bytes());
+    for record in &snapshot.compute_txs {
+        data.extend_from_slice(record.tx_hash.as_bytes());
+    }
     zerocore::crypto::keccak256(&data).to_vec()
 }
 
@@ -644,6 +731,7 @@ mod tests {
     use super::*;
     use once_cell::sync::Lazy;
     use tokio::sync::Mutex;
+    use zerocore::account::{Account, AccountState};
     use zerocore::block::create_genesis_block;
 
     static TEST_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
@@ -708,14 +796,40 @@ mod tests {
             .expect("block body response");
         assert_eq!(body.block_hash, headers[1].hash);
 
+        let account_address = Address::from_bytes([0x11u8; 20]);
+        crate::global_record_account(Account {
+            address: account_address,
+            state: AccountState::Active,
+            balance: U256::from(99u64),
+            nonce: 3,
+            updated_at: 7,
+            ..Account::default()
+        });
+        crate::global_record_transfer_tx(crate::protocol::SyncTransferTxRecord {
+            tx_hash: Hash::from_bytes([0x22u8; 32]),
+            from: account_address,
+            to: Address::from_bytes([0x33u8; 20]),
+            value_hex: "0x1".to_string(),
+            from_nonce: 3,
+            timestamp: 8,
+            block_number: 4,
+        });
+        crate::global_record_compute_tx(crate::protocol::SyncComputeTxRecord {
+            tx_hash: Hash::from_bytes([0x44u8; 32]),
+            result: serde_json::json!({"ok": true, "submitted_at_unix": 8}),
+        });
+
         let snapshot = manager
             .build_state_snapshot_response(4)
             .expect("state snapshot response");
         assert_eq!(snapshot.block_number, 4);
-        assert_eq!(snapshot.state_root, derive_state_root(&headers[2].hash));
+        assert_eq!(snapshot.account_count, 1);
+        assert_eq!(snapshot.transfer_txs.len(), 1);
+        assert_eq!(snapshot.compute_txs.len(), 1);
+        assert_eq!(snapshot.state_root, derive_state_root(&snapshot.accounts));
         assert_eq!(
             snapshot.state_proof,
-            derive_state_proof(&headers[2].hash, snapshot.block_number)
+            derive_state_proof(&headers[2].hash, &snapshot)
         );
     }
 
@@ -756,7 +870,8 @@ mod tests {
                             "peer-sync-a".to_string(),
                             SyncBlockBody {
                                 block_hash,
-                                tx_count: 2,
+                                transactions: Vec::new(),
+                                tx_count: 0,
                             },
                         );
                     }
@@ -765,15 +880,17 @@ mod tests {
                             .expect("seeded block")
                             .header
                             .hash;
-                        sync_clone.handle_sync_state_snapshot(
-                            "peer-sync-a".to_string(),
-                            SyncStateSnapshot {
-                                block_number,
-                                state_root: derive_state_root(&block_hash),
-                                account_count: 42,
-                                state_proof: derive_state_proof(&block_hash, block_number),
-                            },
-                        );
+                        let mut snapshot = SyncStateSnapshot {
+                            block_number,
+                            state_root: derive_state_root(&[]),
+                            account_count: 0,
+                            accounts: Vec::new(),
+                            transfer_txs: Vec::new(),
+                            compute_txs: Vec::new(),
+                            state_proof: Vec::new(),
+                        };
+                        snapshot.state_proof = derive_state_proof(&block_hash, &snapshot);
+                        sync_clone.handle_sync_state_snapshot("peer-sync-a".to_string(), snapshot);
                     }
                     _ => {}
                 }

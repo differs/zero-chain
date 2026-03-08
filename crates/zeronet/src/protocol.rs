@@ -1,8 +1,30 @@
 //! Protocol message definitions.
 
-use zerocore::{block::Block, crypto::Address, crypto::Hash, transaction::SignedTransaction};
+use serde::{Deserialize, Serialize};
+use zerocore::{
+    account::Account, block::Block, crypto::Address, crypto::Hash, transaction::SignedTransaction,
+};
 
-/// Minimal sync header payload used by header-first sync.
+/// Transfer transaction record synchronized across peers.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SyncTransferTxRecord {
+    pub tx_hash: Hash,
+    pub from: Address,
+    pub to: Address,
+    pub value_hex: String,
+    pub from_nonce: u64,
+    pub timestamp: u64,
+    pub block_number: u64,
+}
+
+/// Compute transaction result record synchronized across peers.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct SyncComputeTxRecord {
+    pub tx_hash: Hash,
+    pub result: serde_json::Value,
+}
+
+/// Canonical sync header payload used by header-first sync.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SyncHeader {
     pub number: u64,
@@ -16,20 +38,24 @@ pub struct SyncHeader {
     pub extra_data: Vec<u8>,
 }
 
-/// Minimal block-body metadata used by body sync.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Full block-body payload used by body sync.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SyncBlockBody {
     pub block_hash: Hash,
+    pub transactions: Vec<SignedTransaction>,
     pub tx_count: u32,
 }
 
-/// Minimal state snapshot metadata used by state sync.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// State snapshot payload used by follower state/index sync.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SyncStateSnapshot {
     pub block_number: u64,
     pub state_root: Hash,
     pub account_count: u64,
-    /// Opaque proof bytes for state-root verification.
+    pub accounts: Vec<Account>,
+    pub transfer_txs: Vec<SyncTransferTxRecord>,
+    pub compute_txs: Vec<SyncComputeTxRecord>,
+    /// Snapshot proof bytes used to bind snapshot with block hash.
     pub state_proof: Vec<u8>,
 }
 

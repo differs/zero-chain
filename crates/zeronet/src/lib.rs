@@ -18,13 +18,14 @@ pub mod sync;
 pub use discovery::{Discovery, NodeRecord};
 pub use peer::{Peer, PeerInfo, PeerManager, PeerStatus};
 pub use protocol::{
-    BlockMessage, Protocol, ProtocolMessage, SyncBlockBody, SyncHeader, SyncStateSnapshot,
-    TxMessage,
+    BlockMessage, Protocol, ProtocolMessage, SyncBlockBody, SyncComputeTxRecord, SyncHeader,
+    SyncStateSnapshot, SyncTransferTxRecord, TxMessage,
 };
 pub use sync::{SyncManager, SyncState};
 
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
+use serde::de::DeserializeOwned;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -36,6 +37,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::{interval, timeout, MissedTickBehavior};
 use uuid::Uuid;
+use zerocore::account::Account;
 use zerocore::crypto::Hash;
 
 static GLOBAL_PEER_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -43,6 +45,16 @@ static GLOBAL_PEER_INFOS: Lazy<RwLock<Vec<PeerInfo>>> = Lazy::new(|| RwLock::new
 static GLOBAL_SYNCED_HEIGHT: AtomicU64 = AtomicU64::new(0);
 static GLOBAL_BLOCKS: Lazy<RwLock<BTreeMap<u64, zerocore::block::Block>>> =
     Lazy::new(|| RwLock::new(BTreeMap::new()));
+static GLOBAL_SYNC_ACCOUNTS: Lazy<RwLock<HashMap<zerocore::crypto::Address, Account>>> =
+    Lazy::new(|| RwLock::new(HashMap::new()));
+static GLOBAL_SYNC_TRANSFER_TXS: Lazy<RwLock<HashMap<Hash, SyncTransferTxRecord>>> =
+    Lazy::new(|| RwLock::new(HashMap::new()));
+static GLOBAL_SYNC_TRANSFER_ORDER: Lazy<RwLock<VecDeque<Hash>>> =
+    Lazy::new(|| RwLock::new(VecDeque::new()));
+static GLOBAL_SYNC_COMPUTE_TXS: Lazy<RwLock<HashMap<Hash, SyncComputeTxRecord>>> =
+    Lazy::new(|| RwLock::new(HashMap::new()));
+static GLOBAL_SYNC_COMPUTE_ORDER: Lazy<RwLock<VecDeque<Hash>>> =
+    Lazy::new(|| RwLock::new(VecDeque::new()));
 static SEEN_TX_HASHES: Lazy<RwLock<HashMap<String, u64>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
 static SEEN_BLOCK_HASHES: Lazy<RwLock<HashMap<String, u64>>> =
@@ -53,13 +65,14 @@ const HANDSHAKE_MAX_LEN: usize = 512;
 const HANDSHAKE_TIMEOUT_SECS: u64 = 5;
 const HEARTBEAT_PING: &[u8] = b"ZERO/PING\n";
 const HEARTBEAT_PONG: &[u8] = b"ZERO/PONG\n";
-const CONTROL_FRAME_MAX_LEN: usize = 8192;
+const CONTROL_FRAME_MAX_LEN: usize = 16 * 1024 * 1024;
 const HEARTBEAT_INTERVAL_SECS: u64 = 15;
 const PEER_IDLE_TIMEOUT_SECS: u64 = 45;
 const PEER_SEND_BUFFER: usize = 256;
 const DEFAULT_DEDUP_TTL_SECS: u64 = 5 * 60;
 const MAX_DEDUP_ENTRIES: usize = 8192;
 const MAX_GLOBAL_BLOCKS: usize = 8192;
+const MAX_GLOBAL_SYNC_TX_INDEX: usize = 100_000;
 const DISCOVERY_DIAL_INTERVAL_SECS: u64 = 5;
 const SYNC_HEAD_ANNOUNCE_INTERVAL_SECS: u64 = 10;
 
@@ -131,7 +144,124 @@ pub fn global_block_number_for_hash(target: &Hash) -> Option<u64> {
 /// Reset in-process sync cache (blocks + advertised synced height).
 pub fn global_reset_sync_cache() {
     GLOBAL_BLOCKS.write().clear();
+    GLOBAL_SYNC_ACCOUNTS.write().clear();
+    GLOBAL_SYNC_TRANSFER_TXS.write().clear();
+    GLOBAL_SYNC_TRANSFER_ORDER.write().clear();
+    GLOBAL_SYNC_COMPUTE_TXS.write().clear();
+    GLOBAL_SYNC_COMPUTE_ORDER.write().clear();
     set_global_synced_height(0);
+}
+
+/// Record or update an account snapshot visible to RPC readers.
+pub fn global_record_account(account: Account) {
+    GLOBAL_SYNC_ACCOUNTS
+        .write()
+        .insert(account.address, account);
+}
+
+/// Replace account snapshot cache with the provided full snapshot.
+pub fn global_replace_accounts(accounts: Vec<Account>) {
+    let mut map = GLOBAL_SYNC_ACCOUNTS.write();
+    map.clear();
+    for account in accounts {
+        map.insert(account.address, account);
+    }
+}
+
+/// Read a synchronized account snapshot.
+pub fn global_synced_account(address: &zerocore::crypto::Address) -> Option<Account> {
+    GLOBAL_SYNC_ACCOUNTS.read().get(address).cloned()
+}
+
+/// Export synchronized account snapshot.
+pub fn global_synced_accounts() -> Vec<Account> {
+    GLOBAL_SYNC_ACCOUNTS.read().values().cloned().collect()
+}
+
+/// Record or update a synchronized transfer transaction record.
+pub fn global_record_transfer_tx(record: SyncTransferTxRecord) {
+    let tx_hash = record.tx_hash;
+    let mut map = GLOBAL_SYNC_TRANSFER_TXS.write();
+    let mut order = GLOBAL_SYNC_TRANSFER_ORDER.write();
+    map.insert(tx_hash, record);
+    order.retain(|h| h != &tx_hash);
+    order.push_back(tx_hash);
+    while order.len() > MAX_GLOBAL_SYNC_TX_INDEX {
+        if let Some(stale) = order.pop_front() {
+            map.remove(&stale);
+        }
+    }
+}
+
+/// Replace synchronized transfer tx index.
+pub fn global_replace_transfer_txs(records: Vec<SyncTransferTxRecord>) {
+    let mut map = GLOBAL_SYNC_TRANSFER_TXS.write();
+    let mut order = GLOBAL_SYNC_TRANSFER_ORDER.write();
+    map.clear();
+    order.clear();
+    for record in records {
+        let tx_hash = record.tx_hash;
+        map.insert(tx_hash, record);
+        order.push_back(tx_hash);
+    }
+}
+
+/// Read a synchronized transfer transaction record.
+pub fn global_synced_transfer_tx(hash: &Hash) -> Option<SyncTransferTxRecord> {
+    GLOBAL_SYNC_TRANSFER_TXS.read().get(hash).cloned()
+}
+
+/// Export synchronized transfer transaction records (oldest -> newest).
+pub fn global_synced_transfer_txs() -> Vec<SyncTransferTxRecord> {
+    let map = GLOBAL_SYNC_TRANSFER_TXS.read();
+    GLOBAL_SYNC_TRANSFER_ORDER
+        .read()
+        .iter()
+        .filter_map(|h| map.get(h).cloned())
+        .collect()
+}
+
+/// Record or update a synchronized compute tx result record.
+pub fn global_record_compute_tx(record: SyncComputeTxRecord) {
+    let tx_hash = record.tx_hash;
+    let mut map = GLOBAL_SYNC_COMPUTE_TXS.write();
+    let mut order = GLOBAL_SYNC_COMPUTE_ORDER.write();
+    map.insert(tx_hash, record);
+    order.retain(|h| h != &tx_hash);
+    order.push_back(tx_hash);
+    while order.len() > MAX_GLOBAL_SYNC_TX_INDEX {
+        if let Some(stale) = order.pop_front() {
+            map.remove(&stale);
+        }
+    }
+}
+
+/// Replace synchronized compute tx index.
+pub fn global_replace_compute_txs(records: Vec<SyncComputeTxRecord>) {
+    let mut map = GLOBAL_SYNC_COMPUTE_TXS.write();
+    let mut order = GLOBAL_SYNC_COMPUTE_ORDER.write();
+    map.clear();
+    order.clear();
+    for record in records {
+        let tx_hash = record.tx_hash;
+        map.insert(tx_hash, record);
+        order.push_back(tx_hash);
+    }
+}
+
+/// Read a synchronized compute tx result record.
+pub fn global_synced_compute_tx(hash: &Hash) -> Option<SyncComputeTxRecord> {
+    GLOBAL_SYNC_COMPUTE_TXS.read().get(hash).cloned()
+}
+
+/// Export synchronized compute tx records (oldest -> newest).
+pub fn global_synced_compute_txs() -> Vec<SyncComputeTxRecord> {
+    let map = GLOBAL_SYNC_COMPUTE_TXS.read();
+    GLOBAL_SYNC_COMPUTE_ORDER
+        .read()
+        .iter()
+        .filter_map(|h| map.get(h).cloned())
+        .collect()
 }
 
 /// Network error types
@@ -1032,6 +1162,16 @@ async fn read_control_frame(stream: &mut TcpStream) -> std::io::Result<ControlFr
             "invalid get block body hash frame",
         ));
     }
+    if let Some(raw) = normalized.strip_prefix("ZERO/BLOCK_BODY_V2 ") {
+        return Ok(ControlFrame::SyncBlockBody(
+            decode_sync_payload(raw).map_err(|err| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("invalid block body payload: {err}"),
+                )
+            })?,
+        ));
+    }
     if let Some(raw) = normalized.strip_prefix("ZERO/BLOCK_BODY ") {
         return Ok(ControlFrame::SyncBlockBody(
             parse_sync_block_body(raw)
@@ -1046,6 +1186,16 @@ async fn read_control_frame(stream: &mut TcpStream) -> std::io::Result<ControlFr
             )
         })?;
         return Ok(ControlFrame::SyncGetStateSnapshot { block_number });
+    }
+    if let Some(raw) = normalized.strip_prefix("ZERO/STATE_SNAPSHOT_V2 ") {
+        return Ok(ControlFrame::SyncStateSnapshot(
+            decode_sync_payload(raw).map_err(|err| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("invalid state snapshot payload: {err}"),
+                )
+            })?,
+        ));
     }
     if let Some(raw) = normalized.strip_prefix("ZERO/STATE_SNAPSHOT ") {
         return Ok(ControlFrame::SyncStateSnapshot(
@@ -1114,19 +1264,15 @@ async fn write_protocol_message(
             hash_to_hex(&block_hash)
         )),
         ProtocolMessage::SyncBlockBody(body) => Some(format!(
-            "ZERO/BLOCK_BODY {} {}\n",
-            hash_to_hex(&body.block_hash),
-            body.tx_count
+            "ZERO/BLOCK_BODY_V2 {}\n",
+            encode_sync_payload(&body)
         )),
         ProtocolMessage::SyncGetStateSnapshot { block_number } => {
             Some(format!("ZERO/GET_STATE_SNAPSHOT {}\n", block_number))
         }
         ProtocolMessage::SyncStateSnapshot(snapshot) => Some(format!(
-            "ZERO/STATE_SNAPSHOT {} {} {} {}\n",
-            snapshot.block_number,
-            hash_to_hex(&snapshot.state_root),
-            snapshot.account_count,
-            hex::encode(&snapshot.state_proof)
+            "ZERO/STATE_SNAPSHOT_V2 {}\n",
+            encode_sync_payload(&snapshot)
         )),
         ProtocolMessage::Transactions(_) | ProtocolMessage::Block(_) => None,
     };
@@ -1287,6 +1433,7 @@ fn parse_sync_block_body(raw: &str) -> std::result::Result<SyncBlockBody, String
         .map_err(|e| format!("invalid block body tx_count: {e}"))?;
     Ok(SyncBlockBody {
         block_hash,
+        transactions: Vec::new(),
         tx_count,
     })
 }
@@ -1318,8 +1465,21 @@ fn parse_sync_state_snapshot(raw: &str) -> std::result::Result<SyncStateSnapshot
         block_number,
         state_root,
         account_count,
+        accounts: Vec::new(),
+        transfer_txs: Vec::new(),
+        compute_txs: Vec::new(),
         state_proof,
     })
+}
+
+fn encode_sync_payload<T: serde::Serialize>(payload: &T) -> String {
+    let bytes = serde_json::to_vec(payload).expect("sync payload serialization must succeed");
+    hex::encode(bytes)
+}
+
+fn decode_sync_payload<T: DeserializeOwned>(raw: &str) -> std::result::Result<T, String> {
+    let bytes = hex::decode(raw.trim()).map_err(|e| format!("payload hex decode failed: {e}"))?;
+    serde_json::from_slice::<T>(&bytes).map_err(|e| format!("payload json decode failed: {e}"))
 }
 
 fn allow_ip_rate(
