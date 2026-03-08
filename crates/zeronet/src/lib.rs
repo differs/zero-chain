@@ -1172,12 +1172,6 @@ async fn read_control_frame(stream: &mut TcpStream) -> std::io::Result<ControlFr
             })?,
         ));
     }
-    if let Some(raw) = normalized.strip_prefix("ZERO/BLOCK_BODY ") {
-        return Ok(ControlFrame::SyncBlockBody(
-            parse_sync_block_body(raw)
-                .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?,
-        ));
-    }
     if let Some(raw) = normalized.strip_prefix("ZERO/GET_STATE_SNAPSHOT ") {
         let block_number = raw.trim().parse::<u64>().map_err(|err| {
             std::io::Error::new(
@@ -1195,12 +1189,6 @@ async fn read_control_frame(stream: &mut TcpStream) -> std::io::Result<ControlFr
                     format!("invalid state snapshot payload: {err}"),
                 )
             })?,
-        ));
-    }
-    if let Some(raw) = normalized.strip_prefix("ZERO/STATE_SNAPSHOT ") {
-        return Ok(ControlFrame::SyncStateSnapshot(
-            parse_sync_state_snapshot(raw)
-                .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?,
         ));
     }
     if let Some(raw) = normalized.strip_prefix("ZERO/BLOCK ") {
@@ -1416,60 +1404,6 @@ fn parse_sync_headers(raw: &str) -> std::result::Result<Vec<SyncHeader>, String>
             })
         })
         .collect::<std::result::Result<Vec<_>, String>>()
-}
-
-fn parse_sync_block_body(raw: &str) -> std::result::Result<SyncBlockBody, String> {
-    let mut parts = raw.split_whitespace();
-    let block_hash = parse_hash(
-        parts
-            .next()
-            .ok_or_else(|| "missing block body hash".to_string())?,
-    )
-    .ok_or_else(|| "invalid block body hash".to_string())?;
-    let tx_count = parts
-        .next()
-        .ok_or_else(|| "missing block body tx_count".to_string())?
-        .parse::<u32>()
-        .map_err(|e| format!("invalid block body tx_count: {e}"))?;
-    Ok(SyncBlockBody {
-        block_hash,
-        transactions: Vec::new(),
-        tx_count,
-    })
-}
-
-fn parse_sync_state_snapshot(raw: &str) -> std::result::Result<SyncStateSnapshot, String> {
-    let mut parts = raw.split_whitespace();
-    let block_number = parts
-        .next()
-        .ok_or_else(|| "missing state snapshot block_number".to_string())?
-        .parse::<u64>()
-        .map_err(|e| format!("invalid state snapshot block_number: {e}"))?;
-    let state_root = parse_hash(
-        parts
-            .next()
-            .ok_or_else(|| "missing state snapshot state_root".to_string())?,
-    )
-    .ok_or_else(|| "invalid state snapshot state_root".to_string())?;
-    let account_count = parts
-        .next()
-        .ok_or_else(|| "missing state snapshot account_count".to_string())?
-        .parse::<u64>()
-        .map_err(|e| format!("invalid state snapshot account_count: {e}"))?;
-    let state_proof = match parts.next() {
-        Some(raw_proof) => hex::decode(raw_proof)
-            .map_err(|e| format!("invalid state snapshot state_proof hex: {e}"))?,
-        None => Vec::new(),
-    };
-    Ok(SyncStateSnapshot {
-        block_number,
-        state_root,
-        account_count,
-        accounts: Vec::new(),
-        transfer_txs: Vec::new(),
-        compute_txs: Vec::new(),
-        state_proof,
-    })
 }
 
 fn encode_sync_payload<T: serde::Serialize>(payload: &T) -> String {

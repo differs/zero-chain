@@ -969,6 +969,7 @@ impl RpcApi {
         let results = self.submitted_compute_results.read();
         let mut seen = HashSet::new();
         let mut merged: Vec<(u64, Hash, serde_json::Value)> = Vec::new();
+        let local_has_data = !order.is_empty();
         for tx_hash in order.iter().rev() {
             if let Some(result) = results.get(tx_hash) {
                 let ts = result
@@ -980,14 +981,16 @@ impl RpcApi {
                 }
             }
         }
-        for record in global_synced_compute_txs().into_iter().rev() {
-            if seen.insert(record.tx_hash) {
-                let ts = record
-                    .result
-                    .get("submitted_at_unix")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                merged.push((ts, record.tx_hash, record.result));
+        if !local_has_data {
+            for record in global_synced_compute_txs().into_iter().rev() {
+                if seen.insert(record.tx_hash) {
+                    let ts = record
+                        .result
+                        .get("submitted_at_unix")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    merged.push((ts, record.tx_hash, record.result));
+                }
             }
         }
         merged.sort_by(|a, b| b.0.cmp(&a.0));
