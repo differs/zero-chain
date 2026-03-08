@@ -29,6 +29,7 @@ pub async fn run_node(
     p2p_max_inbound_rate_per_minute: u32,
     p2p_max_gossip_per_peer_per_minute: u32,
     p2p_bootnode_retry_interval_secs: u64,
+    sync_source_rpcs: Vec<String>,
 ) -> Result<()> {
     println!("🚀 Starting ZeroChain node...");
     println!("   Data directory: {}", data_dir);
@@ -63,6 +64,9 @@ pub async fn run_node(
     }
     if let Some(ref banlist_path) = p2p_banlist_path {
         println!("   P2P banlist: {}", banlist_path);
+    }
+    if !sync_source_rpcs.is_empty() {
+        println!("   Sync source RPCs: {}", sync_source_rpcs.join(", "));
     }
     if mine {
         let display_coinbase = coinbase
@@ -110,10 +114,25 @@ pub async fn run_node(
                 run_rpc_backed_miner(rpc_url, "zerochain-local".to_string()).await;
             });
         }
+
+        if !mine && !sync_source_rpcs.is_empty() {
+            let local_rpc_url = format!("http://127.0.0.1:{http_port}");
+            let sources = sync_source_rpcs.clone();
+            println!(
+                "   🔄 Starting RPC pull sync worker from {} source(s)",
+                sources.len()
+            );
+            tokio::spawn(async move {
+                run_rpc_sync_puller(local_rpc_url, sources).await;
+            });
+        }
         Some(api)
     } else {
         if mine {
             println!("   ⚠️ Mining requested but HTTP RPC is disabled; mining worker not started");
+        }
+        if !sync_source_rpcs.is_empty() {
+            println!("   ⚠️ Sync source RPC configured but HTTP RPC is disabled; sync worker not started");
         }
         None
     };
@@ -339,6 +358,179 @@ async fn run_rpc_backed_miner(rpc_url: String, miner_label: String) {
                 // Keep RPC/network tasks responsive while this CPU-heavy loop runs.
                 tokio::task::yield_now().await;
             }
+        }
+    }
+}
+
+fn parse_block_number_hex(block: &serde_json::Value) -> Option<u64> {
+    let raw = block.get("number")?.as_str()?;
+    let trimmed = raw.strip_prefix("0x").unwrap_or(raw);
+    if trimmed.is_empty() {
+        return Some(0);
+    }
+    u64::from_str_radix(trimmed, 16).ok()
+}
+
+async fn run_rpc_sync_puller(local_rpc_url: String, sync_sources: Vec<String>) {
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+    {
+        Ok(client) => client,
+        Err(err) => {
+            println!("   ⚠️ Failed to build sync RPC client: {}", err);
+            return;
+        }
+    };
+
+    if sync_sources.is_empty() {
+        return;
+    }
+
+    const BATCH_LIMIT: u64 = 16;
+    const BASE_SLEEP: std::time::Duration = std::time::Duration::from_secs(3);
+    const RATE_LIMIT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(8);
+
+    loop {
+        let mut sleep_for = BASE_SLEEP;
+        let local_latest = match rpc_call::<serde_json::Value>(
+            &client,
+            &local_rpc_url,
+            "zero_getLatestBlock",
+            serde_json::json!([]),
+        )
+        .await
+        {
+            Ok(v) => v,
+            Err(err) => {
+                println!("   ⚠️ Sync puller failed to query local head: {}", err);
+                if err.to_string().contains("Rate limit exceeded") {
+                    sleep_for = RATE_LIMIT_BACKOFF;
+                }
+                tokio::time::sleep(sleep_for).await;
+                continue;
+            }
+        };
+
+        let local_head = parse_block_number_hex(&local_latest).unwrap_or(0);
+        let mut best_source: Option<(String, u64)> = None;
+
+        for source in &sync_sources {
+            match rpc_call::<serde_json::Value>(
+                &client,
+                source,
+                "zero_getLatestBlock",
+                serde_json::json!([]),
+            )
+            .await
+            {
+                Ok(v) => {
+                    if let Some(head) = parse_block_number_hex(&v) {
+                        if best_source
+                            .as_ref()
+                            .map(|(_, current)| head > *current)
+                            .unwrap_or(true)
+                        {
+                            best_source = Some((source.clone(), head));
+                        }
+                    }
+                }
+                Err(err) => {
+                    println!("   ⚠️ Sync puller failed source {}: {}", source, err);
+                    if err.to_string().contains("Rate limit exceeded") {
+                        sleep_for = RATE_LIMIT_BACKOFF;
+                    }
+                }
+            }
+        }
+
+        let Some((best_source_url, best_head)) = best_source else {
+            tokio::time::sleep(sleep_for).await;
+            continue;
+        };
+
+        if best_head <= local_head {
+            tokio::time::sleep(sleep_for).await;
+            continue;
+        }
+
+        let from = local_head.saturating_add(1);
+        let to = std::cmp::min(best_head, local_head.saturating_add(BATCH_LIMIT));
+        let range = match rpc_call::<serde_json::Value>(
+            &client,
+            &best_source_url,
+            "zero_getBlocksRange",
+            serde_json::json!([{
+                "from": from,
+                "to": to,
+                "limit": BATCH_LIMIT,
+            }]),
+        )
+        .await
+        {
+            Ok(v) => v,
+            Err(err) => {
+                println!(
+                    "   ⚠️ Sync puller failed to fetch range {}-{} from {}: {}",
+                    from, to, best_source_url, err
+                );
+                if err.to_string().contains("Rate limit exceeded") {
+                    sleep_for = RATE_LIMIT_BACKOFF;
+                }
+                tokio::time::sleep(sleep_for).await;
+                continue;
+            }
+        };
+
+        let mut items = range
+            .get("items")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if items.is_empty() {
+            tokio::time::sleep(sleep_for).await;
+            continue;
+        }
+
+        items.sort_by_key(|block| parse_block_number_hex(block).unwrap_or(u64::MAX));
+        let mut imported = 0u64;
+        let mut import_failed = false;
+
+        for block in items {
+            match rpc_call::<serde_json::Value>(
+                &client,
+                &local_rpc_url,
+                "zero_importBlock",
+                serde_json::json!([block]),
+            )
+            .await
+            {
+                Ok(_) => imported = imported.saturating_add(1),
+                Err(err) => {
+                    println!("   ⚠️ Sync puller failed zero_importBlock: {}", err);
+                    if err.to_string().contains("Rate limit exceeded") {
+                        sleep_for = RATE_LIMIT_BACKOFF;
+                    }
+                    import_failed = true;
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+
+        if imported > 0 {
+            println!(
+                "   🔄 Sync puller imported {} block(s), local_head {} -> <= {}",
+                imported, local_head, to
+            );
+        }
+
+        if import_failed {
+            tokio::time::sleep(sleep_for).await;
+        } else if imported > 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        } else {
+            tokio::time::sleep(sleep_for).await;
         }
     }
 }

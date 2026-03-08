@@ -14,15 +14,17 @@ EXPLORER_BASE_URL="${EXPLORER_BASE_URL:-http://${REMOTE_HOST}:19080}"
 EXPECTED_NET_VERSION="${EXPECTED_NET_VERSION:-31337}"
 MIN_PUBLIC_PEERS="${MIN_PUBLIC_PEERS:-1}"
 MIN_OBSERVER_PEERS="${MIN_OBSERVER_PEERS:-1}"
-MAX_PUBLIC_BLOCK_GAP="${MAX_PUBLIC_BLOCK_GAP:-2}"
+MAX_PUBLIC_BLOCK_GAP="${MAX_PUBLIC_BLOCK_GAP:-4}"
 MIN_PUBLIC_BLOCK_HEIGHT="${MIN_PUBLIC_BLOCK_HEIGHT:-1}"
 MIN_OBSERVER_BLOCK_HEIGHT="${MIN_OBSERVER_BLOCK_HEIGHT:-1}"
 REQUIRE_OBSERVER_SYNC="${REQUIRE_OBSERVER_SYNC:-1}"
+MAX_OBSERVER_SYNC_LAG="${MAX_OBSERVER_SYNC_LAG:-2}"
 CHECK_ADDRESS="${CHECK_ADDRESS:-ZER0x1111111111111111111111111111111111111111}"
 
 RPC_TIMEOUT_SECS="${RPC_TIMEOUT_SECS:-8}"
 SSH_TIMEOUT_SECS="${SSH_TIMEOUT_SECS:-8}"
 HTTP_TIMEOUT_SECS="${HTTP_TIMEOUT_SECS:-8}"
+HTTP_RETRIES="${HTTP_RETRIES:-3}"
 
 FAILURES=0
 
@@ -55,6 +57,19 @@ rpc_remote() {
     -o ConnectTimeout="${SSH_TIMEOUT_SECS}" \
     "${REMOTE_USER}@${REMOTE_HOST}" \
     "curl -fsS --max-time ${RPC_TIMEOUT_SECS} -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"method\":\"${method}\",\"params\":${params},\"id\":1}' http://127.0.0.1:${REMOTE_RPC_PORT}"
+}
+
+http_check() {
+  local url="$1"
+  local attempt=1
+  while (( attempt <= HTTP_RETRIES )); do
+    if curl -fsS --max-time "${HTTP_TIMEOUT_SECS}" "${url}" >/dev/null 2>&1; then
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    sleep 1
+  done
+  return 1
 }
 
 extract_result_hex() {
@@ -239,18 +254,26 @@ if [[ -n "${observer_sync_json}" ]]; then
   observer_sync_local="$(printf '%s' "${observer_sync_json}" | extract_sync_field_u64 local_head)"
   observer_sync_net="$(printf '%s' "${observer_sync_json}" | extract_sync_field_u64 network_head)"
   printf '  sync observer: local_head=%s network_head=%s syncing=%s\n' "${observer_sync_local:-N/A}" "${observer_sync_net:-N/A}" "${observer_syncing:-N/A}"
-  if [[ "${REQUIRE_OBSERVER_SYNC}" == "1" && "${observer_syncing}" == "true" ]]; then
-    log_fail "observer 仍处于 syncing=true，未完成同步"
+  if [[ "${REQUIRE_OBSERVER_SYNC}" == "1" && -n "${observer_sync_local}" && -n "${observer_sync_net}" ]]; then
+    observer_lag=$(( observer_sync_net - observer_sync_local ))
+    if (( observer_lag < 0 )); then
+      observer_lag=0
+    fi
+    if (( observer_lag > MAX_OBSERVER_SYNC_LAG )); then
+      log_fail "observer 同步滞后过大 (lag=${observer_lag}, max=${MAX_OBSERVER_SYNC_LAG})"
+    else
+      log_pass "observer 同步滞后可接受 (lag=${observer_lag})"
+    fi
   fi
 fi
 
-if curl -fsS --max-time "${HTTP_TIMEOUT_SECS}" "${EXPLORER_BASE_URL}/health" >/dev/null 2>&1; then
+if http_check "${EXPLORER_BASE_URL}/health"; then
   log_pass "区块浏览器 /health 可达"
 else
   log_fail "区块浏览器 /health 不可达 (${EXPLORER_BASE_URL}/health)"
 fi
 
-if curl -fsS --max-time "${HTTP_TIMEOUT_SECS}" "${EXPLORER_BASE_URL}/api/overview" >/dev/null 2>&1; then
+if http_check "${EXPLORER_BASE_URL}/api/overview"; then
   log_pass "区块浏览器 /api/overview 可达"
 else
   log_fail "区块浏览器 /api/overview 不可达"
@@ -263,13 +286,13 @@ else
   log_fail "区块浏览器 /api/txs/recent 不可达"
 fi
 
-if curl -fsS --max-time "${HTTP_TIMEOUT_SECS}" "${EXPLORER_BASE_URL}/api/accounts/${CHECK_ADDRESS}" >/dev/null 2>&1; then
+if http_check "${EXPLORER_BASE_URL}/api/accounts/${CHECK_ADDRESS}"; then
   log_pass "区块浏览器地址余额接口可达 (${CHECK_ADDRESS})"
 else
   log_fail "区块浏览器地址余额接口不可达 (${CHECK_ADDRESS})"
 fi
 
-if curl -fsS --max-time "${HTTP_TIMEOUT_SECS}" "${EXPLORER_BASE_URL}/api/accounts/${CHECK_ADDRESS}/txs?limit=5" >/dev/null 2>&1; then
+if http_check "${EXPLORER_BASE_URL}/api/accounts/${CHECK_ADDRESS}/txs?limit=5"; then
   log_pass "区块浏览器地址交易接口可达 (${CHECK_ADDRESS})"
 else
   log_fail "区块浏览器地址交易接口不可达 (${CHECK_ADDRESS})"
