@@ -27,7 +27,7 @@ use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -40,6 +40,7 @@ use zerocore::crypto::Hash;
 
 static GLOBAL_PEER_COUNT: AtomicUsize = AtomicUsize::new(0);
 static GLOBAL_PEER_INFOS: Lazy<RwLock<Vec<PeerInfo>>> = Lazy::new(|| RwLock::new(Vec::new()));
+static GLOBAL_SYNCED_HEIGHT: AtomicU64 = AtomicU64::new(0);
 static SEEN_TX_HASHES: Lazy<RwLock<HashMap<String, u64>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
 static SEEN_BLOCK_HASHES: Lazy<RwLock<HashMap<String, u64>>> =
@@ -75,6 +76,15 @@ pub fn global_peers() -> Vec<PeerInfo> {
 
 pub(crate) fn set_global_peers(peers: Vec<PeerInfo>) {
     *GLOBAL_PEER_INFOS.write() = peers;
+}
+
+/// Returns the latest synchronized height reported by network sync.
+pub fn global_synced_height() -> u64 {
+    GLOBAL_SYNCED_HEIGHT.load(Ordering::Relaxed)
+}
+
+pub(crate) fn set_global_synced_height(height: u64) {
+    GLOBAL_SYNCED_HEIGHT.store(height, Ordering::Relaxed);
 }
 
 /// Network error types

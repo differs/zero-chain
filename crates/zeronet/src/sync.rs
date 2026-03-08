@@ -1,7 +1,7 @@
 //! Sync module - header/body/state request-response sync manager.
 
 use crate::protocol::{ProtocolMessage, SyncBlockBody, SyncHeader, SyncStateSnapshot};
-use crate::{NetworkError, Result};
+use crate::{set_global_synced_height, NetworkError, Result};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -87,6 +87,7 @@ impl SyncManager {
         peer_manager: Arc<crate::PeerManager>,
         state_proof_verifier: Arc<dyn StateProofVerifier>,
     ) -> Self {
+        set_global_synced_height(0);
         let (inbound_tx, inbound_rx) = mpsc::channel(512);
         Self {
             state: Arc::new(RwLock::new(SyncState::Idle)),
@@ -110,6 +111,7 @@ impl SyncManager {
 
     pub fn set_local_height(&self, height: u64) {
         *self.local_height.write() = height;
+        set_global_synced_height(height);
     }
 
     pub fn export_checkpoint(&self) -> SyncCheckpoint {
@@ -122,6 +124,7 @@ impl SyncManager {
     pub fn import_checkpoint(&self, checkpoint: &SyncCheckpoint) {
         *self.local_height.write() = checkpoint.local_height;
         *self.state.write() = checkpoint.state.clone();
+        set_global_synced_height(checkpoint.local_height);
     }
 
     pub fn bump_local_height(&self, delta: u64) -> u64 {
@@ -378,6 +381,7 @@ impl SyncManager {
                 }
 
                 *local_height.write() = last_header.number;
+                set_global_synced_height(last_header.number);
                 *state.write() = SyncState::Syncing {
                     current: last_header.number,
                     target: target_head,

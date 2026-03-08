@@ -15,6 +15,7 @@ SSH_TIMEOUT_SECS="${SSH_TIMEOUT_SECS:-8}"
 EXPECTED_NET_VERSION="${EXPECTED_NET_VERSION:-31337}"
 MIN_PUBLIC_PEERS="${MIN_PUBLIC_PEERS:-1}"
 MAX_PUBLIC_BLOCK_GAP="${MAX_PUBLIC_BLOCK_GAP:-0}"
+MIN_PUBLIC_BLOCK_HEIGHT="${MIN_PUBLIC_BLOCK_HEIGHT:-0}"
 EXPECTED_REMOTE_ENDPOINT_ON_LOCAL="${EXPECTED_REMOTE_ENDPOINT_ON_LOCAL:-139.180.207.66:30303}"
 
 MONITOR_SCRIPT="${ROOT_DIR}/scripts/public_node_soak_monitor.sh"
@@ -179,6 +180,12 @@ if [[ "${local_block_hex}" != "N/A" && "${remote_block_hex}" != "N/A" ]]; then
     log_pass "公网节点区块高度差达标 (gap=${gap})"
   else
     log_fail "公网节点区块高度差超阈值 (local=${local_block_dec}, remote=${remote_block_dec}, gap=${gap}, max=${MAX_PUBLIC_BLOCK_GAP})"
+  fi
+
+  if (( local_block_dec >= MIN_PUBLIC_BLOCK_HEIGHT && remote_block_dec >= MIN_PUBLIC_BLOCK_HEIGHT )); then
+    log_pass "公网节点区块高度下限达标 (local=${local_block_dec}, remote=${remote_block_dec}, min=${MIN_PUBLIC_BLOCK_HEIGHT})"
+  else
+    log_fail "公网节点区块高度下限不达标 (local=${local_block_dec}, remote=${remote_block_dec}, min=${MIN_PUBLIC_BLOCK_HEIGHT})"
   fi
 else
   log_fail "无法解析公网节点区块高度"

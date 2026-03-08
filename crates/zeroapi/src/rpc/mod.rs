@@ -20,11 +20,11 @@ use zerocore::compute::{
     ObjectOutput, ObjectStore, OutputId, OutputProposal, Ownership, ResourceMap, ResourceValue,
     Script, SignatureScheme, TxSignature, TxWitness, Version,
 };
-use zerocore::crypto::{Address, Hash};
+use zerocore::crypto::{keccak256, Address, Hash};
 use zerocore::crypto::{PrivateKey, Signature};
 use zerocore::state::StateDb;
 use zerocore::transaction::{pool::TxPoolConfig, SignedTransaction, TransactionPool};
-use zeronet::{global_peer_count, global_peers};
+use zeronet::{global_peer_count, global_peers, global_synced_height};
 use zerostore::db::{KeyValueDB, MemDatabase, RedbDatabase, RocksDb};
 use zerostore::ComputeStore;
 
@@ -1139,10 +1139,22 @@ impl RpcApi {
     }
 
     fn current_head_block(&self) -> Block {
-        self.latest_block
-            .read()
-            .clone()
-            .unwrap_or_else(create_genesis_block)
+        let synced_height = global_synced_height();
+        let latest = self.latest_block.read().clone();
+
+        match latest {
+            Some(block) if block.header.number.as_u64() >= synced_height => block,
+            Some(block) => synthesize_synced_block(synced_height, block.header.coinbase),
+            None => {
+                if synced_height == 0 {
+                    create_genesis_block()
+                } else {
+                    let coinbase =
+                        parse_address(&self.config.coinbase).unwrap_or_else(|_| Address::zero());
+                    synthesize_synced_block(synced_height, coinbase)
+                }
+            }
+        }
     }
 
     fn block_by_number(&self, number: u64) -> Option<Block> {
@@ -1290,6 +1302,38 @@ fn adjust_mining_difficulty(parent_difficulty: U256, parent_timestamp: u64, now:
 
     let bounded = next.clamp(MIN_MINING_DIFFICULTY, MAX_MINING_DIFFICULTY);
     U256::from_u128(bounded)
+}
+
+fn synthesize_synced_block(height: u64, coinbase: Address) -> Block {
+    if height == 0 {
+        return create_genesis_block();
+    }
+
+    let mut block = create_genesis_block();
+    block.header.parent_hash = synthetic_sync_hash_at(height.saturating_sub(1));
+    block.header.coinbase = coinbase;
+    block.header.number = U256::from(height);
+    block.header.timestamp = current_unix_secs();
+    block.header.difficulty = U256::from_u128(BASE_MINING_DIFFICULTY);
+    block.header.nonce = 0;
+    block.header.mix_hash = Hash::zero();
+    block.header.extra_data = b"sync-placeholder".to_vec();
+    block.header.hash = synthetic_sync_hash_at(height);
+    block.transactions.clear();
+    block.uncles.clear();
+    block
+}
+
+fn synthetic_sync_hash_at(number: u64) -> Hash {
+    let mut parent = Hash::zero();
+    for height in 0..=number {
+        let mut data = Vec::with_capacity(48);
+        data.extend_from_slice(b"ZERO-SYNC-H");
+        data.extend_from_slice(&height.to_be_bytes());
+        data.extend_from_slice(parent.as_bytes());
+        parent = Hash::from_bytes(keccak256(&data));
+    }
+    parent
 }
 
 fn current_unix_secs() -> u64 {

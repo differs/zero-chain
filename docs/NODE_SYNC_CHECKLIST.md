@@ -20,7 +20,8 @@
 - 本地公网节点 `zero_peers` 包含远端端点（当前默认 `139.180.207.66:30303`）。
 
 4. 区块同步一致性
-- 公网双节点最新区块高度差 `<= 0`（即严格一致）。
+- 公网双节点最新区块高度差 `<= MAX_PUBLIC_BLOCK_GAP`（默认 `0`）。
+- 公网双节点最新区块高度 `>= MIN_PUBLIC_BLOCK_HEIGHT`（默认 `0`）。
 
 5. 长稳监控状态（soak monitor）
 - `LOCAL_OK=1`、`REMOTE_OK=1`。
@@ -48,8 +49,38 @@ scripts/node_sync_check.sh
 EXPECTED_NET_VERSION=31337 \
 MIN_PUBLIC_PEERS=1 \
 MAX_PUBLIC_BLOCK_GAP=0 \
+MIN_PUBLIC_BLOCK_HEIGHT=0 \
 REMOTE_HOST=139.180.207.66 \
 SSH_KEY=/root/.ssh/agent_139_180_207_66 \
 scripts/node_sync_check.sh
 ```
 
+## 标准重置测试流程（推荐）
+
+当需要“修复后清空数据并重启验证”时，统一使用：
+
+```bash
+scripts/public_node_reset_and_verify.sh
+```
+
+该脚本固定执行：
+- 停止公网监控、本地公网节点、远端公网节点。
+- 清空本地与远端公网节点数据目录。
+- 重启远端公网节点。
+- 重启本地公网节点（开启 `--mine`）。
+- 重新启动公网 soak 监控。
+- 在超时时间内反复采样，直到满足：
+  - `local peers >= 1 && remote peers >= 1`
+  - `local/remote block >= VERIFY_MIN_HEIGHT`（默认 `1`）
+  - `|local_block - remote_block| <= VERIFY_MAX_GAP`（默认 `8`）
+
+常用参数示例：
+
+```bash
+VERIFY_TIMEOUT_SECS=240 \
+VERIFY_MIN_HEIGHT=1 \
+VERIFY_MAX_GAP=8 \
+REMOTE_HOST=139.180.207.66 \
+SSH_KEY=/root/.ssh/agent_139_180_207_66 \
+scripts/public_node_reset_and_verify.sh
+```
