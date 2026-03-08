@@ -10,26 +10,49 @@ use zerocore::block::create_genesis_block;
 use zerocore::crypto::keccak256;
 use zeronet::{NetworkConfig, NetworkService};
 
-pub async fn run_node(
-    mine: bool,
-    coinbase: Option<String>,
-    http_port: u16,
-    ws_port: u16,
-    data_dir: &str,
-    rpc_config: Option<RpcConfig>,
-    p2p_listen_addr: String,
-    p2p_listen_port: u16,
-    bootnodes: Vec<String>,
-    max_peers: u32,
-    enable_discovery: bool,
-    enable_sync: bool,
-    p2p_banlist_path: Option<String>,
-    p2p_ban_duration_secs: u64,
-    p2p_max_inbound_per_ip: u32,
-    p2p_max_inbound_rate_per_minute: u32,
-    p2p_max_gossip_per_peer_per_minute: u32,
-    p2p_bootnode_retry_interval_secs: u64,
-) -> Result<()> {
+pub struct RunNodeConfig {
+    pub mine: bool,
+    pub coinbase: Option<String>,
+    pub http_port: u16,
+    pub ws_port: u16,
+    pub data_dir: String,
+    pub rpc_config: Option<RpcConfig>,
+    pub p2p_listen_addr: String,
+    pub p2p_listen_port: u16,
+    pub bootnodes: Vec<String>,
+    pub max_peers: u32,
+    pub enable_discovery: bool,
+    pub enable_sync: bool,
+    pub p2p_banlist_path: Option<String>,
+    pub p2p_ban_duration_secs: u64,
+    pub p2p_max_inbound_per_ip: u32,
+    pub p2p_max_inbound_rate_per_minute: u32,
+    pub p2p_max_gossip_per_peer_per_minute: u32,
+    pub p2p_bootnode_retry_interval_secs: u64,
+}
+
+pub async fn run_node(cfg: RunNodeConfig) -> Result<()> {
+    let RunNodeConfig {
+        mine,
+        coinbase,
+        http_port,
+        ws_port,
+        data_dir,
+        rpc_config,
+        p2p_listen_addr,
+        p2p_listen_port,
+        bootnodes,
+        max_peers,
+        enable_discovery,
+        enable_sync,
+        p2p_banlist_path,
+        p2p_ban_duration_secs,
+        p2p_max_inbound_per_ip,
+        p2p_max_inbound_rate_per_minute,
+        p2p_max_gossip_per_peer_per_minute,
+        p2p_bootnode_retry_interval_secs,
+    } = cfg;
+
     println!("🚀 Starting ZeroChain node...");
     println!("   Data directory: {}", data_dir);
     println!("   HTTP RPC port: {}", http_port);

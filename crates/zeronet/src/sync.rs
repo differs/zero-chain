@@ -249,9 +249,7 @@ impl SyncManager {
                 let peer_id = peer.info.peer_id.clone();
 
                 let request_start = local.saturating_add(1);
-                let request_limit = (target_head.saturating_sub(local))
-                    .min(SYNC_BATCH_LIMIT)
-                    .max(1);
+                let request_limit = (target_head.saturating_sub(local)).clamp(1, SYNC_BATCH_LIMIT);
                 if peer
                     .send(ProtocolMessage::SyncGetHeaders {
                         start: request_start,
@@ -645,7 +643,7 @@ pub(crate) fn derive_state_proof(block_hash: &Hash, block_number: u64) -> Vec<u8
 mod tests {
     use super::*;
     use once_cell::sync::Lazy;
-    use std::sync::Mutex;
+    use tokio::sync::Mutex;
     use zerocore::block::create_genesis_block;
 
     static TEST_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
@@ -693,9 +691,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_chain_responses_from_global_blocks() {
-        let _guard = TEST_LOCK.lock().expect("test lock");
+    #[tokio::test]
+    async fn test_chain_responses_from_global_blocks() {
+        let _guard = TEST_LOCK.lock().await;
         let manager = SyncManager::new(Arc::new(crate::PeerManager::new(4)));
         seed_chain(6);
         manager.set_local_height(6);
@@ -723,7 +721,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sync_progresses_with_real_request_response_flow() {
-        let _guard = TEST_LOCK.lock().expect("test lock");
+        let _guard = TEST_LOCK.lock().await;
         let peer_manager = Arc::new(crate::PeerManager::new(8));
         let sync = Arc::new(SyncManager::new(peer_manager.clone()));
 
@@ -798,9 +796,9 @@ mod tests {
         assert!(sync.local_height() >= 3);
     }
 
-    #[test]
-    fn checkpoint_roundtrip_restores_height_and_state() {
-        let _guard = TEST_LOCK.lock().expect("test lock");
+    #[tokio::test]
+    async fn checkpoint_roundtrip_restores_height_and_state() {
+        let _guard = TEST_LOCK.lock().await;
         let manager = SyncManager::new(Arc::new(crate::PeerManager::new(4)));
         manager.set_local_height(12);
         manager.import_checkpoint(&SyncCheckpoint {

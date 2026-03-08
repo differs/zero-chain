@@ -1302,7 +1302,7 @@ impl RpcApi {
         }
 
         let miner_label = req.miner.unwrap_or_else(|| "zero-miner".to_string());
-        if miner_label.as_bytes().len() > MAX_MINER_EXTRA_DATA_BYTES {
+        if miner_label.len() > MAX_MINER_EXTRA_DATA_BYTES {
             RPC_METRICS
                 .mining_shares_rejected
                 .with_label_values(&["invalid_miner_label"])

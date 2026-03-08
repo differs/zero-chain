@@ -431,26 +431,26 @@ async fn main() -> Result<()> {
                 println!("   bootnodes: {}", bootnodes.join(", "));
             }
 
-            commands::run::run_node(
+            commands::run::run_node(commands::run::RunNodeConfig {
                 mine,
                 coinbase,
                 http_port,
                 ws_port,
-                &data_dir,
-                Some(api_config.http_rpc.clone()),
+                data_dir: data_dir.clone(),
+                rpc_config: Some(api_config.http_rpc.clone()),
                 p2p_listen_addr,
                 p2p_listen_port,
                 bootnodes,
                 max_peers,
-                !disable_discovery,
-                !disable_sync,
+                enable_discovery: !disable_discovery,
+                enable_sync: !disable_sync,
                 p2p_banlist_path,
                 p2p_ban_duration_secs,
                 p2p_max_inbound_per_ip,
                 p2p_max_inbound_rate_per_minute,
                 p2p_max_gossip_per_peer_per_minute,
                 p2p_bootnode_retry_interval_secs,
-            )
+            })
             .await?;
         }
         Some(Commands::Init) => {

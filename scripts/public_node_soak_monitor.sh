@@ -11,6 +11,7 @@ DEFAULT_DURATION_SECS=$((72 * 3600))
 DEFAULT_INTERVAL_SECS=60
 DEFAULT_RPC_TIMEOUT_SECS=8
 DEFAULT_SSH_TIMEOUT_SECS=8
+DEFAULT_RPC_RETRIES=3
 DEFAULT_LOCAL_RPC_URL="http://127.0.0.1:29645"
 DEFAULT_REMOTE_HOST="139.180.207.66"
 DEFAULT_REMOTE_USER="root"
@@ -41,6 +42,7 @@ Options:
   --local-soak-env <path>   Local node env file (default: artifacts/public-node-soak/current.env)
   --remote-soak-env <path>  Remote node env file (default: /root/works/zero-chain-public-soak/current.env)
   --rpc-timeout-secs <n>    curl timeout per RPC request (default: 8)
+  --rpc-retries <n>         RPC retries before marking sample failed (default: 3)
   --ssh-timeout-secs <n>    SSH connect timeout (default: 8)
 EOF
 }
@@ -127,6 +129,48 @@ rpc_call_remote() {
         "curl -fsS --max-time ${rpc_timeout_secs} -H 'content-type: application/json' --data '${payload}' 'http://127.0.0.1:${remote_rpc_port}'"
 }
 
+rpc_call_local_with_retries() {
+    local rpc_url="$1"
+    local method="$2"
+    local params_json="$3"
+    local timeout_secs="$4"
+    local retries="$5"
+    local attempt=1
+    local output=""
+    while (( attempt <= retries )); do
+        if output="$(rpc_call_local "${rpc_url}" "${method}" "${params_json}" "${timeout_secs}" 2>/dev/null)"; then
+            printf '%s' "${output}"
+            return 0
+        fi
+        attempt=$((attempt + 1))
+        sleep 1
+    done
+    return 1
+}
+
+rpc_call_remote_with_retries() {
+    local ssh_key="$1"
+    local ssh_timeout_secs="$2"
+    local remote_user="$3"
+    local remote_host="$4"
+    local remote_rpc_port="$5"
+    local method="$6"
+    local params_json="$7"
+    local rpc_timeout_secs="$8"
+    local retries="$9"
+    local attempt=1
+    local output=""
+    while (( attempt <= retries )); do
+        if output="$(rpc_call_remote "${ssh_key}" "${ssh_timeout_secs}" "${remote_user}" "${remote_host}" "${remote_rpc_port}" "${method}" "${params_json}" "${rpc_timeout_secs}" 2>/dev/null)"; then
+            printf '%s' "${output}"
+            return 0
+        fi
+        attempt=$((attempt + 1))
+        sleep 1
+    done
+    return 1
+}
+
 extract_peer_count() {
     local json="$1"
     if [[ "${json}" != *'"result"'* ]]; then
@@ -199,6 +243,7 @@ start_monitor() {
     local interval_secs="${DEFAULT_INTERVAL_SECS}"
     local rpc_timeout_secs="${DEFAULT_RPC_TIMEOUT_SECS}"
     local ssh_timeout_secs="${DEFAULT_SSH_TIMEOUT_SECS}"
+    local rpc_retries="${DEFAULT_RPC_RETRIES}"
     local local_rpc_url="${DEFAULT_LOCAL_RPC_URL}"
     local remote_host="${DEFAULT_REMOTE_HOST}"
     local remote_user="${DEFAULT_REMOTE_USER}"
@@ -264,6 +309,10 @@ start_monitor() {
                 rpc_timeout_secs="${2:-}"
                 shift 2
                 ;;
+            --rpc-retries)
+                rpc_retries="${2:-}"
+                shift 2
+                ;;
             --ssh-timeout-secs)
                 ssh_timeout_secs="${2:-}"
                 shift 2
@@ -280,6 +329,7 @@ start_monitor() {
     assert_positive_int "--interval-secs" "${interval_secs}"
     assert_positive_int "--remote-rpc-port" "${remote_rpc_port}"
     assert_positive_int "--rpc-timeout-secs" "${rpc_timeout_secs}"
+    assert_positive_int "--rpc-retries" "${rpc_retries}"
     assert_positive_int "--ssh-timeout-secs" "${ssh_timeout_secs}"
 
     require_cmd curl
@@ -338,6 +388,7 @@ start_monitor() {
         LOCAL_SOAK_ENV "${local_soak_env}" \
         REMOTE_SOAK_ENV "${remote_soak_env}" \
         RPC_TIMEOUT_SECS "${rpc_timeout_secs}" \
+        RPC_RETRIES "${rpc_retries}" \
         SSH_TIMEOUT_SECS "${ssh_timeout_secs}" \
         SAMPLES_CSV "${samples_csv}" \
         STATUS_ENV "${status_env}" \
@@ -357,6 +408,7 @@ start_monitor() {
             --local-node-pid "${local_node_pid}" \
             --remote-node-pid "${remote_node_pid}" \
             --rpc-timeout-secs "${rpc_timeout_secs}" \
+            --rpc-retries "${rpc_retries}" \
             --ssh-timeout-secs "${ssh_timeout_secs}" \
             >"${monitor_out}" 2>&1 < /dev/null &
     else
@@ -372,6 +424,7 @@ start_monitor() {
             --local-node-pid "${local_node_pid}" \
             --remote-node-pid "${remote_node_pid}" \
             --rpc-timeout-secs "${rpc_timeout_secs}" \
+            --rpc-retries "${rpc_retries}" \
             --ssh-timeout-secs "${ssh_timeout_secs}" \
             >"${monitor_out}" 2>&1 &
     fi
@@ -399,6 +452,7 @@ start_monitor() {
         REMOTE_NODE_PID "${remote_node_pid}" \
         STATUS_ENV "${status_env}" \
         SAMPLES_CSV "${samples_csv}" \
+        RPC_RETRIES "${rpc_retries}" \
         MONITOR_OUT "${monitor_out}" \
         SUMMARY_TXT "${summary_txt}"
     echo "${monitor_pid}" > "${PID_FILE}"
@@ -420,6 +474,7 @@ run_monitor() {
     local local_node_pid=""
     local remote_node_pid=""
     local rpc_timeout_secs=""
+    local rpc_retries=""
     local ssh_timeout_secs=""
 
     while [[ $# -gt 0 ]]; do
@@ -468,6 +523,10 @@ run_monitor() {
                 rpc_timeout_secs="${2:-}"
                 shift 2
                 ;;
+            --rpc-retries)
+                rpc_retries="${2:-}"
+                shift 2
+                ;;
             --ssh-timeout-secs)
                 ssh_timeout_secs="${2:-}"
                 shift 2
@@ -483,6 +542,7 @@ run_monitor() {
     assert_positive_int "--interval-secs" "${interval_secs}"
     assert_positive_int "--remote-rpc-port" "${remote_rpc_port}"
     assert_positive_int "--rpc-timeout-secs" "${rpc_timeout_secs}"
+    assert_positive_int "--rpc-retries" "${rpc_retries}"
     assert_positive_int "--ssh-timeout-secs" "${ssh_timeout_secs}"
 
     local samples_csv="${run_dir}/samples.csv"
@@ -551,26 +611,26 @@ run_monitor() {
         local remote_node_alive=-1
 
         local local_peers_json=""
-        if local_peers_json="$(rpc_call_local "${local_rpc_url}" "zero_peers" "[]" "${rpc_timeout_secs}" 2>/dev/null)"; then
+        if local_peers_json="$(rpc_call_local_with_retries "${local_rpc_url}" "zero_peers" "[]" "${rpc_timeout_secs}" "${rpc_retries}")"; then
             local_ok=1
             local_peers="$(extract_peer_count "${local_peers_json}")"
         else
             local_rpc_errors=$((local_rpc_errors + 1))
         fi
 
-        if rpc_call_local "${local_rpc_url}" "web3_clientVersion" "[]" "${rpc_timeout_secs}" >/dev/null 2>&1; then
+        if rpc_call_local_with_retries "${local_rpc_url}" "web3_clientVersion" "[]" "${rpc_timeout_secs}" "${rpc_retries}" >/dev/null 2>&1; then
             local_client_ok=1
         fi
 
         local remote_peers_json=""
-        if remote_peers_json="$(rpc_call_remote "${ssh_key}" "${ssh_timeout_secs}" "${remote_user}" "${remote_host}" "${remote_rpc_port}" "zero_peers" "[]" "${rpc_timeout_secs}" 2>/dev/null)"; then
+        if remote_peers_json="$(rpc_call_remote_with_retries "${ssh_key}" "${ssh_timeout_secs}" "${remote_user}" "${remote_host}" "${remote_rpc_port}" "zero_peers" "[]" "${rpc_timeout_secs}" "${rpc_retries}")"; then
             remote_ok=1
             remote_peers="$(extract_peer_count "${remote_peers_json}")"
         else
             remote_rpc_errors=$((remote_rpc_errors + 1))
         fi
 
-        if rpc_call_remote "${ssh_key}" "${ssh_timeout_secs}" "${remote_user}" "${remote_host}" "${remote_rpc_port}" "web3_clientVersion" "[]" "${rpc_timeout_secs}" >/dev/null 2>&1; then
+        if rpc_call_remote_with_retries "${ssh_key}" "${ssh_timeout_secs}" "${remote_user}" "${remote_host}" "${remote_rpc_port}" "web3_clientVersion" "[]" "${rpc_timeout_secs}" "${rpc_retries}" >/dev/null 2>&1; then
             remote_client_ok=1
         else
             # this is optional health data; do not count as hard rpc error

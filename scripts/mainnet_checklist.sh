@@ -23,6 +23,7 @@ CHECK_ADDRESS="${CHECK_ADDRESS:-ZER0x1111111111111111111111111111111111111111}"
 
 RPC_TIMEOUT_SECS="${RPC_TIMEOUT_SECS:-8}"
 SSH_TIMEOUT_SECS="${SSH_TIMEOUT_SECS:-8}"
+REMOTE_RPC_RETRIES="${REMOTE_RPC_RETRIES:-3}"
 HTTP_TIMEOUT_SECS="${HTTP_TIMEOUT_SECS:-8}"
 HTTP_RETRIES="${HTTP_RETRIES:-3}"
 
@@ -64,13 +65,40 @@ rpc_local() {
 rpc_remote() {
   local method="$1"
   local params="${2:-[]}"
-  ssh \
-    -i "${SSH_KEY}" \
-    -o StrictHostKeyChecking=no \
-    -o BatchMode=yes \
-    -o ConnectTimeout="${SSH_TIMEOUT_SECS}" \
-    "${REMOTE_USER}@${REMOTE_HOST}" \
-    "curl -fsS --max-time ${RPC_TIMEOUT_SECS} -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"method\":\"${method}\",\"params\":${params},\"id\":1}' http://127.0.0.1:${REMOTE_RPC_PORT}"
+  local attempt=1
+  while (( attempt <= REMOTE_RPC_RETRIES )); do
+    if ssh \
+      -i "${SSH_KEY}" \
+      -o StrictHostKeyChecking=no \
+      -o BatchMode=yes \
+      -o ConnectTimeout="${SSH_TIMEOUT_SECS}" \
+      "${REMOTE_USER}@${REMOTE_HOST}" \
+      "curl -fsS --max-time ${RPC_TIMEOUT_SECS} -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"method\":\"${method}\",\"params\":${params},\"id\":1}' http://127.0.0.1:${REMOTE_RPC_PORT}"; then
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    sleep 1
+  done
+  return 1
+}
+
+ssh_remote_with_retries() {
+  local remote_cmd="$1"
+  local attempt=1
+  while (( attempt <= REMOTE_RPC_RETRIES )); do
+    if ssh \
+      -i "${SSH_KEY}" \
+      -o StrictHostKeyChecking=no \
+      -o BatchMode=yes \
+      -o ConnectTimeout="${SSH_TIMEOUT_SECS}" \
+      "${REMOTE_USER}@${REMOTE_HOST}" \
+      "${remote_cmd}"; then
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    sleep 1
+  done
+  return 1
 }
 
 http_check() {
@@ -78,6 +106,21 @@ http_check() {
   local attempt=1
   while (( attempt <= HTTP_RETRIES )); do
     if curl -fsS --max-time "${HTTP_TIMEOUT_SECS}" "${url}" >/dev/null 2>&1; then
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    sleep 1
+  done
+  return 1
+}
+
+http_get_with_retries() {
+  local url="$1"
+  local attempt=1
+  local body=""
+  while (( attempt <= HTTP_RETRIES )); do
+    if body="$(curl -fsS --max-time "${HTTP_TIMEOUT_SECS}" "${url}" 2>/dev/null)"; then
+      printf '%s' "${body}"
       return 0
     fi
     attempt=$((attempt + 1))
@@ -200,12 +243,7 @@ else
 fi
 
 remote_cmdline="$(
-  ssh \
-    -i "${SSH_KEY}" \
-    -o StrictHostKeyChecking=no \
-    -o BatchMode=yes \
-    -o ConnectTimeout="${SSH_TIMEOUT_SECS}" \
-    "${REMOTE_USER}@${REMOTE_HOST}" \
+  ssh_remote_with_retries \
     'set -euo pipefail
 if [ -f /root/works/zero-chain-public-soak/current.env ]; then
   . /root/works/zero-chain-public-soak/current.env || true
@@ -337,7 +375,7 @@ else
   log_fail "区块浏览器 /api/overview 不可达"
 fi
 
-if recent_json="$(curl -fsS --max-time "${HTTP_TIMEOUT_SECS}" "${EXPLORER_BASE_URL}/api/txs/recent?limit=5" 2>/dev/null)"; then
+if recent_json="$(http_get_with_retries "${EXPLORER_BASE_URL}/api/txs/recent?limit=5")"; then
   recent_count="$(printf '%s' "${recent_json}" | sed -n 's/.*"items":\[\(.*\)\],"limit".*/\1/p' | awk -F'},{' '{print NF}' | awk 'NF==0{print 0} NF>0{print $1}')"
   log_pass "区块浏览器 /api/txs/recent 可达"
 else

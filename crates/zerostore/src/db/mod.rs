@@ -281,7 +281,7 @@ impl KeyValueDB for RedbDatabase {
             .iter()
             .map_err(|e| StorageError::Database(e.to_string()))?;
         let mut items = Vec::new();
-        while let Some(entry) = iter.next() {
+        for entry in iter {
             let (k, v) = entry.map_err(|e| StorageError::Database(e.to_string()))?;
             if k.value().starts_with(prefix) {
                 items.push((k.value().to_vec(), v.value().to_vec()));
