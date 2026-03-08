@@ -20,7 +20,7 @@ use zerocore::compute::{
     ObjectOutput, ObjectStore, OutputId, OutputProposal, Ownership, ResourceMap, ResourceValue,
     Script, SignatureScheme, TxSignature, TxWitness, Version,
 };
-use zerocore::crypto::{keccak256, Address, Hash};
+use zerocore::crypto::{Address, Hash};
 use zerocore::crypto::{PrivateKey, Signature};
 use zerocore::state::StateDb;
 use zerocore::transaction::{pool::TxPoolConfig, SignedTransaction, TransactionPool};
@@ -514,6 +514,7 @@ impl RpcApi {
             "zero_getWork" => self.zero_get_work(params),
             "zero_submitWork" => self.zero_submit_work(params),
             "zero_getLatestBlock" => self.zero_get_latest_block(params),
+            "zero_syncStatus" => self.zero_sync_status(params),
             "zero_getBlockByNumber" => self.zero_get_block_by_number(params),
             "zero_getBlocksRange" => self.zero_get_blocks_range(params),
             "zero_importBlock" => self.zero_import_block(params),
@@ -1467,6 +1468,24 @@ impl RpcApi {
         Ok(block_to_zero_block_json(&self.current_head_block()))
     }
 
+    fn zero_sync_status(
+        &self,
+        _params: Option<Vec<serde_json::Value>>,
+    ) -> Result<serde_json::Value, RpcErrorObject> {
+        let local_head = self
+            .latest_block
+            .read()
+            .as_ref()
+            .map(|b| b.header.number.as_u64())
+            .unwrap_or(0);
+        let network_head = global_synced_height();
+        Ok(serde_json::json!({
+            "local_head": local_head,
+            "network_head": network_head,
+            "syncing": network_head > local_head,
+        }))
+    }
+
     fn zero_get_block_by_number(
         &self,
         params: Option<Vec<serde_json::Value>>,
@@ -1531,22 +1550,10 @@ impl RpcApi {
     }
 
     fn current_head_block(&self) -> Block {
-        let synced_height = global_synced_height();
-        let latest = self.latest_block.read().clone();
-
-        match latest {
-            Some(block) if block.header.number.as_u64() >= synced_height => block,
-            Some(block) => synthesize_synced_block(synced_height, block.header.coinbase),
-            None => {
-                if synced_height == 0 {
-                    create_genesis_block()
-                } else {
-                    let coinbase =
-                        parse_address(&self.config.coinbase).unwrap_or_else(|_| Address::zero());
-                    synthesize_synced_block(synced_height, coinbase)
-                }
-            }
-        }
+        self.latest_block
+            .read()
+            .clone()
+            .unwrap_or_else(create_genesis_block)
     }
 
     fn block_by_number(&self, number: u64) -> Option<Block> {
@@ -1731,38 +1738,6 @@ fn adjust_mining_difficulty(parent_difficulty: U256, parent_timestamp: u64, now:
 
     let bounded = next.clamp(MIN_MINING_DIFFICULTY, MAX_MINING_DIFFICULTY);
     U256::from_u128(bounded)
-}
-
-fn synthesize_synced_block(height: u64, coinbase: Address) -> Block {
-    if height == 0 {
-        return create_genesis_block();
-    }
-
-    let mut block = create_genesis_block();
-    block.header.parent_hash = synthetic_sync_hash_at(height.saturating_sub(1));
-    block.header.coinbase = coinbase;
-    block.header.number = U256::from(height);
-    block.header.timestamp = current_unix_secs();
-    block.header.difficulty = U256::from_u128(BASE_MINING_DIFFICULTY);
-    block.header.nonce = 0;
-    block.header.mix_hash = Hash::zero();
-    block.header.extra_data = b"sync-placeholder".to_vec();
-    block.header.hash = synthetic_sync_hash_at(height);
-    block.transactions.clear();
-    block.uncles.clear();
-    block
-}
-
-fn synthetic_sync_hash_at(number: u64) -> Hash {
-    let mut parent = Hash::zero();
-    for height in 0..=number {
-        let mut data = Vec::with_capacity(48);
-        data.extend_from_slice(b"ZERO-SYNC-H");
-        data.extend_from_slice(&height.to_be_bytes());
-        data.extend_from_slice(parent.as_bytes());
-        parent = Hash::from_bytes(keccak256(&data));
-    }
-    parent
 }
 
 fn current_unix_secs() -> u64 {
@@ -3293,6 +3268,26 @@ mod tests {
         let latest = api.zero_get_latest_block(None).expect("latest block");
         assert_eq!(latest.get("number").and_then(|v| v.as_str()), Some("0x0"));
         assert!(latest.get("hash").and_then(|v| v.as_str()).is_some());
+    }
+
+    #[test]
+    fn test_zero_sync_status_reports_gap_without_synthesizing_block() {
+        let api = build_test_api_with_persistent_compute();
+        set_global_synced_height(12);
+
+        let status = api
+            .zero_sync_status(None)
+            .expect("sync status should succeed");
+        assert_eq!(status.get("local_head").and_then(|v| v.as_u64()), Some(0));
+        assert_eq!(
+            status.get("network_head").and_then(|v| v.as_u64()),
+            Some(12)
+        );
+        assert_eq!(status.get("syncing").and_then(|v| v.as_bool()), Some(true));
+
+        let latest = api.zero_get_latest_block(None).expect("latest block");
+        assert_eq!(latest.get("number").and_then(|v| v.as_str()), Some("0x0"));
+        set_global_synced_height(0);
     }
 
     #[test]
