@@ -3,8 +3,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-LOCAL_ZEROCHAIN_BIN="${LOCAL_ZEROCHAIN_BIN:-${ROOT_DIR}/target/debug/zerochain}"
-REMOTE_ZEROCHAIN_BIN="${REMOTE_ZEROCHAIN_BIN:-/root/works/zero-chain-public-soak/bin/zerochain_local}"
+LOCAL_ZEROCHAIN_BIN="${LOCAL_ZEROCHAIN_BIN:-${ROOT_DIR}/target/release/zerochain}"
+REMOTE_ZEROCHAIN_BIN="${REMOTE_ZEROCHAIN_BIN:-/root/zerochain_local.mainnet_sync}"
 
 REMOTE_HOST="${REMOTE_HOST:-139.180.207.66}"
 REMOTE_USER="${REMOTE_USER:-root}"
@@ -17,6 +17,9 @@ SSH_TIMEOUT_SECS="${SSH_TIMEOUT_SECS:-10}"
 LOCAL_RPC_PORT="${LOCAL_RPC_PORT:-29645}"
 LOCAL_WS_PORT="${LOCAL_WS_PORT:-29646}"
 LOCAL_P2P_PORT="${LOCAL_P2P_PORT:-31303}"
+OBSERVER_RPC_PORT="${OBSERVER_RPC_PORT:-39745}"
+OBSERVER_WS_PORT="${OBSERVER_WS_PORT:-39746}"
+OBSERVER_P2P_PORT="${OBSERVER_P2P_PORT:-32303}"
 
 NETWORK_ID="${NETWORK_ID:-31337}"
 CHAIN_ID="${CHAIN_ID:-31337}"
@@ -26,6 +29,7 @@ VERIFY_TIMEOUT_SECS="${VERIFY_TIMEOUT_SECS:-180}"
 VERIFY_INTERVAL_SECS="${VERIFY_INTERVAL_SECS:-10}"
 VERIFY_MIN_HEIGHT="${VERIFY_MIN_HEIGHT:-1}"
 VERIFY_MAX_GAP="${VERIFY_MAX_GAP:-8}"
+VERIFY_MAX_OBSERVER_GAP="${VERIFY_MAX_OBSERVER_GAP:-8}"
 
 MONITOR_DURATION_SECS="${MONITOR_DURATION_SECS:-259200}"
 MONITOR_INTERVAL_SECS="${MONITOR_INTERVAL_SECS:-60}"
@@ -51,14 +55,24 @@ ssh_cmd() {
 
 rpc_local() {
   local method="$1"
+  local params="${2:-[]}"
   curl -fsS --max-time 8 -H 'Content-Type: application/json' \
-    -d "{\"jsonrpc\":\"2.0\",\"method\":\"${method}\",\"params\":[],\"id\":1}" \
+    -d "{\"jsonrpc\":\"2.0\",\"method\":\"${method}\",\"params\":${params},\"id\":1}" \
     "http://127.0.0.1:${LOCAL_RPC_PORT}"
 }
 
 rpc_remote() {
   local method="$1"
-  ssh_cmd "curl -fsS --max-time 8 -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"method\":\"${method}\",\"params\":[],\"id\":1}' http://127.0.0.1:${REMOTE_RPC_PORT}"
+  local params="${2:-[]}"
+  ssh_cmd "curl -fsS --max-time 8 -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"method\":\"${method}\",\"params\":${params},\"id\":1}' http://127.0.0.1:${REMOTE_RPC_PORT}"
+}
+
+rpc_observer() {
+  local method="$1"
+  local params="${2:-[]}"
+  curl -fsS --max-time 8 -H 'Content-Type: application/json' \
+    -d "{\"jsonrpc\":\"2.0\",\"method\":\"${method}\",\"params\":${params},\"id\":1}" \
+    "http://127.0.0.1:${OBSERVER_RPC_PORT}"
 }
 
 extract_result_hex() {
@@ -87,6 +101,10 @@ wait_rpc_up() {
   while (( elapsed < timeout_secs )); do
     if [[ "${kind}" == "local" ]]; then
       if rpc_local net_version >/dev/null 2>&1; then
+        return 0
+      fi
+    elif [[ "${kind}" == "observer" ]]; then
+      if rpc_observer net_version >/dev/null 2>&1; then
         return 0
       fi
     else
@@ -128,6 +146,16 @@ if [[ -f artifacts/public-node-soak/current.env ]]; then
   fi
 fi
 
+log "停止 observer 节点"
+if [[ -f artifacts/public-node-observer/current.env ]]; then
+  # shellcheck disable=SC1091
+  source artifacts/public-node-observer/current.env || true
+  if [[ -n "${NODE_PID:-}" ]] && kill -0 "${NODE_PID}" 2>/dev/null; then
+    kill "${NODE_PID}" || true
+    sleep 1
+  fi
+fi
+
 log "停止远端公网节点"
 ssh_cmd '
 set -euo pipefail
@@ -141,8 +169,9 @@ fi
 '
 
 log "清空本地公网数据"
-rm -rf artifacts/public-node-soak artifacts/public-node-soak-monitor
+rm -rf artifacts/public-node-soak artifacts/public-node-observer artifacts/public-node-soak-monitor
 mkdir -p artifacts/public-node-soak artifacts/public-node-soak-monitor
+mkdir -p artifacts/public-node-observer
 
 log "清空远端公网数据"
 ssh_cmd '
@@ -165,6 +194,8 @@ if command -v setsid >/dev/null 2>&1; then
   setsid ${REMOTE_ZEROCHAIN_BIN} \\
     --data-dir \"\${DATA_DIR}\" \\
     run \\
+    --mine \\
+    --coinbase ${COINBASE} \\
     --http-port ${REMOTE_RPC_PORT} \\
     --ws-port ${REMOTE_WS_PORT} \\
     --p2p-listen-addr 0.0.0.0 \\
@@ -177,6 +208,8 @@ else
   nohup ${REMOTE_ZEROCHAIN_BIN} \\
     --data-dir \"\${DATA_DIR}\" \\
     run \\
+    --mine \\
+    --coinbase ${COINBASE} \\
     --http-port ${REMOTE_RPC_PORT} \\
     --ws-port ${REMOTE_WS_PORT} \\
     --p2p-listen-addr 0.0.0.0 \\
@@ -197,7 +230,7 @@ echo \"\${NEW_PID}\" > /root/works/zero-chain-public-soak/remote-node.pid
 echo \"remote_pid=\${NEW_PID}\"
 "
 
-log "启动本地公网节点（开启挖矿）"
+log "启动本地公网节点（follower，不挖矿）"
 TS="$(date -u +%Y%m%dT%H%M%SZ)"
 LOCAL_RUN_DIR="${ROOT_DIR}/artifacts/public-node-soak/${TS}"
 LOCAL_DATA_DIR="${LOCAL_RUN_DIR}/local-node-data"
@@ -207,7 +240,6 @@ if command -v setsid >/dev/null 2>&1; then
   setsid "${LOCAL_ZEROCHAIN_BIN}" \
     --data-dir "${LOCAL_DATA_DIR}" \
     run \
-    --mine \
     --coinbase "${COINBASE}" \
     --rpc-coinbase "${COINBASE}" \
     --http-port "${LOCAL_RPC_PORT}" \
@@ -222,7 +254,6 @@ else
   nohup "${LOCAL_ZEROCHAIN_BIN}" \
     --data-dir "${LOCAL_DATA_DIR}" \
     run \
-    --mine \
     --coinbase "${COINBASE}" \
     --rpc-coinbase "${COINBASE}" \
     --http-port "${LOCAL_RPC_PORT}" \
@@ -243,12 +274,59 @@ NODE_PID=${LOCAL_PID}
 ENV
 echo "${LOCAL_PID}" > artifacts/public-node-soak/local-node.pid
 
+log "启动 observer 节点（follower，双 bootnode）"
+OBSERVER_RUN_DIR="${ROOT_DIR}/artifacts/public-node-observer/${TS}"
+OBSERVER_DATA_DIR="${OBSERVER_RUN_DIR}/observer-node-data"
+OBSERVER_LOG_FILE="${OBSERVER_RUN_DIR}/observer-node.log"
+mkdir -p "${OBSERVER_RUN_DIR}"
+if command -v setsid >/dev/null 2>&1; then
+  setsid "${LOCAL_ZEROCHAIN_BIN}" \
+    --data-dir "${OBSERVER_DATA_DIR}" \
+    run \
+    --http-port "${OBSERVER_RPC_PORT}" \
+    --ws-port "${OBSERVER_WS_PORT}" \
+    --p2p-listen-addr 0.0.0.0 \
+    --p2p-listen-port "${OBSERVER_P2P_PORT}" \
+    --bootnode "enode://local-public@127.0.0.1:${LOCAL_P2P_PORT}" \
+    --bootnode "enode://remote-public@${REMOTE_HOST}:${REMOTE_P2P_PORT}" \
+    --chain-id "${CHAIN_ID}" \
+    --rpc-network-id "${NETWORK_ID}" \
+    --rpc-coinbase "${COINBASE}" \
+    >"${OBSERVER_LOG_FILE}" 2>&1 < /dev/null &
+else
+  nohup "${LOCAL_ZEROCHAIN_BIN}" \
+    --data-dir "${OBSERVER_DATA_DIR}" \
+    run \
+    --http-port "${OBSERVER_RPC_PORT}" \
+    --ws-port "${OBSERVER_WS_PORT}" \
+    --p2p-listen-addr 0.0.0.0 \
+    --p2p-listen-port "${OBSERVER_P2P_PORT}" \
+    --bootnode "enode://local-public@127.0.0.1:${LOCAL_P2P_PORT}" \
+    --bootnode "enode://remote-public@${REMOTE_HOST}:${REMOTE_P2P_PORT}" \
+    --chain-id "${CHAIN_ID}" \
+    --rpc-network-id "${NETWORK_ID}" \
+    --rpc-coinbase "${COINBASE}" \
+    >"${OBSERVER_LOG_FILE}" 2>&1 < /dev/null &
+fi
+OBSERVER_PID=$!
+cat > artifacts/public-node-observer/current.env <<ENV
+RUN_DIR=${OBSERVER_RUN_DIR}
+DATA_DIR=${OBSERVER_DATA_DIR}
+LOG_FILE=${OBSERVER_LOG_FILE}
+NODE_PID=${OBSERVER_PID}
+ENV
+echo "${OBSERVER_PID}" > artifacts/public-node-observer/observer-node.pid
+
 if ! wait_rpc_up remote 25; then
   echo "remote rpc did not become ready" >&2
   exit 1
 fi
 if ! wait_rpc_up local 25; then
   echo "local rpc did not become ready" >&2
+  exit 1
+fi
+if ! wait_rpc_up observer 25; then
+  echo "observer rpc did not become ready" >&2
   exit 1
 fi
 
@@ -272,6 +350,8 @@ log "启动公网监控"
 log "验证公网节点高度增长与同步"
 start_ts="$(date +%s)"
 pass=0
+local_remote_hash_ok=0
+observer_remote_hash_ok=0
 while true; do
   now_ts="$(date +%s)"
   if (( now_ts - start_ts > VERIFY_TIMEOUT_SECS )); then
@@ -280,23 +360,57 @@ while true; do
 
   local_peers_hex="$(rpc_local net_peerCount | extract_result_hex || true)"
   remote_peers_hex="$(rpc_remote net_peerCount | extract_result_hex || true)"
+  observer_peers_hex="$(rpc_observer net_peerCount | extract_result_hex || true)"
   local_block_hex="$(rpc_local zero_getLatestBlock | extract_block_hex || true)"
   remote_block_hex="$(rpc_remote zero_getLatestBlock | extract_block_hex || true)"
+  observer_block_hex="$(rpc_observer zero_getLatestBlock | extract_block_hex || true)"
 
-  if [[ -n "${local_peers_hex}" && -n "${remote_peers_hex}" && -n "${local_block_hex}" && -n "${remote_block_hex}" ]]; then
+  if [[ -n "${local_peers_hex}" && -n "${remote_peers_hex}" && -n "${observer_peers_hex}" && -n "${local_block_hex}" && -n "${remote_block_hex}" && -n "${observer_block_hex}" ]]; then
     local_peers_dec="$(hex_to_dec "${local_peers_hex}")"
     remote_peers_dec="$(hex_to_dec "${remote_peers_hex}")"
+    observer_peers_dec="$(hex_to_dec "${observer_peers_hex}")"
     local_block_dec="$(hex_to_dec "${local_block_hex}")"
     remote_block_dec="$(hex_to_dec "${remote_block_hex}")"
+    observer_block_dec="$(hex_to_dec "${observer_block_hex}")"
 
-    gap=$(( local_block_dec - remote_block_dec ))
-    if (( gap < 0 )); then gap=$(( -gap )); fi
+    local_gap=$(( local_block_dec - remote_block_dec ))
+    if (( local_gap < 0 )); then local_gap=$(( -local_gap )); fi
+    observer_gap=$(( observer_block_dec - remote_block_dec ))
+    if (( observer_gap < 0 )); then observer_gap=$(( -observer_gap )); fi
 
-    log "sample peers(local=${local_peers_dec},remote=${remote_peers_dec}) blocks(local=${local_block_dec},remote=${remote_block_dec}) gap=${gap}"
+    log "sample peers(local=${local_peers_dec},observer=${observer_peers_dec},remote=${remote_peers_dec}) blocks(local=${local_block_dec},observer=${observer_block_dec},remote=${remote_block_dec}) gap(local=${local_gap},observer=${observer_gap})"
 
-    if (( local_peers_dec >= 1 && remote_peers_dec >= 1 && local_block_dec >= VERIFY_MIN_HEIGHT && remote_block_dec >= VERIFY_MIN_HEIGHT && gap <= VERIFY_MAX_GAP )); then
-      pass=1
-      break
+    if (( local_peers_dec >= 1 && observer_peers_dec >= 1 && remote_peers_dec >= 1 && local_block_dec >= VERIFY_MIN_HEIGHT && observer_block_dec >= VERIFY_MIN_HEIGHT && remote_block_dec >= VERIFY_MIN_HEIGHT && local_gap <= VERIFY_MAX_GAP && observer_gap <= VERIFY_MAX_OBSERVER_GAP )); then
+      local_hash="$(
+        rpc_local zero_getBlockByNumber "[\"${local_block_hex}\"]" \
+          | sed -n 's/.*"hash":"\([^"]*\)".*/\1/p'
+      )"
+      remote_hash_for_local="$(
+        ssh_cmd "curl -fsS --max-time 8 -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"method\":\"zero_getBlockByNumber\",\"params\":[\"${local_block_hex}\"],\"id\":1}' http://127.0.0.1:${REMOTE_RPC_PORT}" \
+          | sed -n 's/.*"hash":"\([^"]*\)".*/\1/p'
+      )"
+      observer_hash="$(
+        rpc_observer zero_getBlockByNumber "[\"${observer_block_hex}\"]" \
+          | sed -n 's/.*"hash":"\([^"]*\)".*/\1/p'
+      )"
+      remote_hash_for_observer="$(
+        ssh_cmd "curl -fsS --max-time 8 -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"method\":\"zero_getBlockByNumber\",\"params\":[\"${observer_block_hex}\"],\"id\":1}' http://127.0.0.1:${REMOTE_RPC_PORT}" \
+          | sed -n 's/.*"hash":"\([^"]*\)".*/\1/p'
+      )"
+
+      if [[ -n "${local_hash}" && "${local_hash}" == "${remote_hash_for_local}" ]]; then
+        local_remote_hash_ok=1
+      fi
+      if [[ -n "${observer_hash}" && "${observer_hash}" == "${remote_hash_for_observer}" ]]; then
+        observer_remote_hash_ok=1
+      fi
+
+      if (( local_remote_hash_ok == 1 && observer_remote_hash_ok == 1 )); then
+        log "hash parity(local=${local_block_hex}, observer=${observer_block_hex}) verified"
+        pass=1
+        break
+      fi
+      log "hash parity not ready yet(local_ok=${local_remote_hash_ok}, observer_ok=${observer_remote_hash_ok})"
     fi
   fi
 
@@ -309,6 +423,7 @@ if (( pass != 1 )); then
 fi
 
 log "重置与验证完成"
-log "local_pid=${LOCAL_PID} remote_pid=${REMOTE_PID}"
+log "local_pid=${LOCAL_PID} observer_pid=${OBSERVER_PID} remote_pid=${REMOTE_PID}"
 log "local_run_dir=${LOCAL_RUN_DIR}"
-log "use scripts/node_sync_check.sh for periodic checks"
+log "observer_run_dir=${OBSERVER_RUN_DIR}"
+log "use scripts/mainnet_checklist.sh for periodic checks"

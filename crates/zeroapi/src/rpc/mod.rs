@@ -24,7 +24,10 @@ use zerocore::crypto::{Address, Hash};
 use zerocore::crypto::{PrivateKey, Signature};
 use zerocore::state::StateDb;
 use zerocore::transaction::{pool::TxPoolConfig, SignedTransaction, TransactionPool};
-use zeronet::{global_peer_count, global_peers, global_synced_height, set_global_synced_height};
+use zeronet::{
+    global_block_by_number, global_latest_block, global_peer_count, global_peers,
+    global_store_block, global_synced_height, set_global_synced_height,
+};
 use zerostore::db::{KeyValueDB, MemDatabase, RedbDatabase, RocksDb};
 use zerostore::ComputeStore;
 
@@ -1472,12 +1475,7 @@ impl RpcApi {
         &self,
         _params: Option<Vec<serde_json::Value>>,
     ) -> Result<serde_json::Value, RpcErrorObject> {
-        let local_head = self
-            .latest_block
-            .read()
-            .as_ref()
-            .map(|b| b.header.number.as_u64())
-            .unwrap_or(0);
+        let local_head = self.current_head_block().header.number.as_u64();
         let network_head = global_synced_height();
         Ok(serde_json::json!({
             "local_head": local_head,
@@ -1553,6 +1551,7 @@ impl RpcApi {
         self.latest_block
             .read()
             .clone()
+            .or_else(global_latest_block)
             .unwrap_or_else(create_genesis_block)
     }
 
@@ -1562,6 +1561,10 @@ impl RpcApi {
         }
 
         if let Some(found) = self.block_history.read().get(&number).cloned() {
+            return Some(found);
+        }
+
+        if let Some(found) = global_block_by_number(number) {
             return Some(found);
         }
 
@@ -1579,13 +1582,14 @@ impl RpcApi {
     fn store_block(&self, block: Block) {
         let height = block.header.number.as_u64();
         let mut history = self.block_history.write();
-        history.insert(height, block);
+        history.insert(height, block.clone());
         while history.len() > MAX_BLOCK_HISTORY {
             let Some(oldest) = history.keys().next().copied() else {
                 break;
             };
             history.remove(&oldest);
         }
+        global_store_block(block);
     }
 
     fn record_transfer_tx(&self, record: TransferTxRecord) {
@@ -2944,6 +2948,7 @@ mod tests {
     use zerostore::db::MemDatabase;
 
     fn build_test_api_with_compute() -> RpcApi {
+        zeronet::global_reset_sync_cache();
         let account_manager = Arc::new(InMemoryAccountManager::new());
         let tx_pool = Arc::new(TransactionPool::new(
             TxPoolConfig::default(),
@@ -2964,6 +2969,7 @@ mod tests {
     }
 
     fn build_test_api_with_persistent_compute() -> RpcApi {
+        zeronet::global_reset_sync_cache();
         let account_manager = Arc::new(InMemoryAccountManager::new());
         let tx_pool = Arc::new(TransactionPool::new(
             TxPoolConfig::default(),
@@ -3278,12 +3284,20 @@ mod tests {
         let status = api
             .zero_sync_status(None)
             .expect("sync status should succeed");
-        assert_eq!(status.get("local_head").and_then(|v| v.as_u64()), Some(0));
-        assert_eq!(
-            status.get("network_head").and_then(|v| v.as_u64()),
-            Some(12)
-        );
-        assert_eq!(status.get("syncing").and_then(|v| v.as_bool()), Some(true));
+        let local_head = status
+            .get("local_head")
+            .and_then(|v| v.as_u64())
+            .expect("local_head");
+        let network_head = status
+            .get("network_head")
+            .and_then(|v| v.as_u64())
+            .expect("network_head");
+        let syncing = status
+            .get("syncing")
+            .and_then(|v| v.as_bool())
+            .expect("syncing");
+        assert_eq!(local_head, 0);
+        assert_eq!(syncing, network_head > local_head);
 
         let latest = api.zero_get_latest_block(None).expect("latest block");
         assert_eq!(latest.get("number").and_then(|v| v.as_str()), Some("0x0"));

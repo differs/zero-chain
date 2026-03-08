@@ -152,10 +152,6 @@ enum Commands {
         /// Retry interval for reconnecting missing bootnodes
         #[arg(long, default_value = "15")]
         p2p_bootnode_retry_interval_secs: u64,
-
-        /// Upstream RPC endpoint used for explicit block pull sync (repeatable)
-        #[arg(long = "sync-source-rpc")]
-        sync_source_rpcs: Vec<String>,
     },
 
     /// Initialize data directory
@@ -377,7 +373,6 @@ async fn main() -> Result<()> {
             p2p_max_inbound_rate_per_minute,
             p2p_max_gossip_per_peer_per_minute,
             p2p_bootnode_retry_interval_secs,
-            sync_source_rpcs,
         }) => {
             let mut api_config = if let Some(path) = &cli.config {
                 commands::init::load_api_config(path)?
@@ -455,7 +450,6 @@ async fn main() -> Result<()> {
                 p2p_max_inbound_rate_per_minute,
                 p2p_max_gossip_per_peer_per_minute,
                 p2p_bootnode_retry_interval_secs,
-                sync_source_rpcs,
             )
             .await?;
         }

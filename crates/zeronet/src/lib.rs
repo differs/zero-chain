@@ -25,7 +25,7 @@ pub use sync::{SyncManager, SyncState};
 
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -41,6 +41,8 @@ use zerocore::crypto::Hash;
 static GLOBAL_PEER_COUNT: AtomicUsize = AtomicUsize::new(0);
 static GLOBAL_PEER_INFOS: Lazy<RwLock<Vec<PeerInfo>>> = Lazy::new(|| RwLock::new(Vec::new()));
 static GLOBAL_SYNCED_HEIGHT: AtomicU64 = AtomicU64::new(0);
+static GLOBAL_BLOCKS: Lazy<RwLock<BTreeMap<u64, zerocore::block::Block>>> =
+    Lazy::new(|| RwLock::new(BTreeMap::new()));
 static SEEN_TX_HASHES: Lazy<RwLock<HashMap<String, u64>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
 static SEEN_BLOCK_HASHES: Lazy<RwLock<HashMap<String, u64>>> =
@@ -57,6 +59,7 @@ const PEER_IDLE_TIMEOUT_SECS: u64 = 45;
 const PEER_SEND_BUFFER: usize = 256;
 const DEFAULT_DEDUP_TTL_SECS: u64 = 5 * 60;
 const MAX_DEDUP_ENTRIES: usize = 8192;
+const MAX_GLOBAL_BLOCKS: usize = 8192;
 const DISCOVERY_DIAL_INTERVAL_SECS: u64 = 5;
 const SYNC_HEAD_ANNOUNCE_INTERVAL_SECS: u64 = 10;
 
@@ -85,6 +88,50 @@ pub fn global_synced_height() -> u64 {
 
 pub fn set_global_synced_height(height: u64) {
     GLOBAL_SYNCED_HEIGHT.store(height, Ordering::Relaxed);
+}
+
+/// Store a canonical block snapshot for sync/read APIs.
+pub fn global_store_block(block: zerocore::block::Block) {
+    let height = block.header.number.as_u64();
+    let mut blocks = GLOBAL_BLOCKS.write();
+    blocks.insert(height, block);
+    while blocks.len() > MAX_GLOBAL_BLOCKS {
+        let Some(oldest) = blocks.keys().next().copied() else {
+            break;
+        };
+        blocks.remove(&oldest);
+    }
+    let prev = global_synced_height();
+    if height > prev {
+        set_global_synced_height(height);
+    }
+}
+
+/// Read a canonical block snapshot by number.
+pub fn global_block_by_number(number: u64) -> Option<zerocore::block::Block> {
+    GLOBAL_BLOCKS.read().get(&number).cloned()
+}
+
+/// Read latest canonical block snapshot.
+pub fn global_latest_block() -> Option<zerocore::block::Block> {
+    GLOBAL_BLOCKS
+        .read()
+        .last_key_value()
+        .map(|(_, b)| b.clone())
+}
+
+/// Resolve block number from hash in canonical snapshot cache.
+pub fn global_block_number_for_hash(target: &Hash) -> Option<u64> {
+    GLOBAL_BLOCKS
+        .read()
+        .iter()
+        .find_map(|(n, b)| (b.header.hash == *target).then_some(*n))
+}
+
+/// Reset in-process sync cache (blocks + advertised synced height).
+pub fn global_reset_sync_cache() {
+    GLOBAL_BLOCKS.write().clear();
+    set_global_synced_height(0);
 }
 
 /// Network error types
@@ -646,14 +693,9 @@ async fn connect_node_record(
     if peer_manager.get_peer(&record.peer_id).is_some() {
         return Ok(());
     }
-    if peer_manager
-        .get_active_peer_infos()
-        .iter()
-        .any(|peer| {
-            peer.remote_addr.ip().to_string() == record.ip
-                && peer.remote_addr.port() == record.tcp_port
-        })
-    {
+    if peer_manager.get_active_peer_infos().iter().any(|peer| {
+        peer.remote_addr.ip().to_string() == record.ip && peer.remote_addr.port() == record.tcp_port
+    }) {
         return Ok(());
     }
 
@@ -700,7 +742,10 @@ async fn connect_node_record(
     let (tx, rx) = mpsc::channel(PEER_SEND_BUFFER);
     let inserted = peer_manager.add_peer_with_sender(node_record, tx)?;
     if !inserted {
-        tracing::debug!("skipping duplicate outbound registration {}", remote_peer_id);
+        tracing::debug!(
+            "skipping duplicate outbound registration {}",
+            remote_peer_id
+        );
         return Ok(());
     }
     set_global_peer_count(peer_manager.peer_count());
@@ -1110,6 +1155,23 @@ fn parse_hash(raw: &str) -> Option<Hash> {
     Some(Hash::from_bytes(out))
 }
 
+fn parse_u64_decimal_or_hex(raw: &str) -> Option<u64> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(hex) = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+    {
+        if hex.is_empty() {
+            return Some(0);
+        }
+        return u64::from_str_radix(hex, 16).ok();
+    }
+    trimmed.parse::<u64>().ok()
+}
+
 fn hash_to_hex(hash: &Hash) -> String {
     format!("0x{}", hex::encode(hash.as_bytes()))
 }
@@ -1119,10 +1181,16 @@ fn format_sync_headers(headers: &[SyncHeader]) -> String {
         .iter()
         .map(|header| {
             format!(
-                "{}@{}@{}",
+                "{}@{}@{}@{}@0x{:x}@{}@0x{}@{}@{}",
                 header.number,
                 hash_to_hex(&header.hash),
-                hash_to_hex(&header.parent_hash)
+                hash_to_hex(&header.parent_hash),
+                header.timestamp,
+                header.difficulty,
+                header.nonce,
+                header.coinbase.to_hex(),
+                hash_to_hex(&header.mix_hash),
+                hex::encode(&header.extra_data),
             )
         })
         .collect::<Vec<_>>()
@@ -1156,10 +1224,49 @@ fn parse_sync_headers(raw: &str) -> std::result::Result<Vec<SyncHeader>, String>
                     .ok_or_else(|| "missing header parent hash".to_string())?,
             )
             .ok_or_else(|| "invalid header parent hash".to_string())?;
+            let timestamp = parts
+                .next()
+                .ok_or_else(|| "missing header timestamp".to_string())?
+                .parse::<u64>()
+                .map_err(|e| format!("invalid header timestamp: {e}"))?;
+            let difficulty = parse_u64_decimal_or_hex(
+                parts
+                    .next()
+                    .ok_or_else(|| "missing difficulty".to_string())?,
+            )
+            .ok_or_else(|| "invalid difficulty".to_string())?;
+            let nonce = parts
+                .next()
+                .ok_or_else(|| "missing header nonce".to_string())?
+                .parse::<u64>()
+                .map_err(|e| format!("invalid header nonce: {e}"))?;
+            let coinbase_raw = parts
+                .next()
+                .ok_or_else(|| "missing header coinbase".to_string())?;
+            let coinbase = zerocore::crypto::Address::from_hex(coinbase_raw)
+                .map_err(|_| "invalid header coinbase".to_string())?;
+            let mix_hash = parse_hash(
+                parts
+                    .next()
+                    .ok_or_else(|| "missing header mix hash".to_string())?,
+            )
+            .ok_or_else(|| "invalid header mix hash".to_string())?;
+            let extra_data = match parts.next() {
+                Some(raw_extra) if !raw_extra.is_empty() => {
+                    hex::decode(raw_extra).map_err(|e| format!("invalid header extra data: {e}"))?
+                }
+                _ => Vec::new(),
+            };
             Ok(SyncHeader {
                 number,
                 hash,
                 parent_hash,
+                timestamp,
+                difficulty,
+                nonce,
+                coinbase,
+                mix_hash,
+                extra_data,
             })
         })
         .collect::<std::result::Result<Vec<_>, String>>()

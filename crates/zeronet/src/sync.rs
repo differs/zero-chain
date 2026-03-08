@@ -1,7 +1,10 @@
 //! Sync module - header/body/state request-response sync manager.
 
 use crate::protocol::{ProtocolMessage, SyncBlockBody, SyncHeader, SyncStateSnapshot};
-use crate::{global_synced_height, set_global_synced_height, NetworkError, Result};
+use crate::{
+    global_block_by_number, global_block_number_for_hash, global_latest_block, global_store_block,
+    global_synced_height, set_global_synced_height, NetworkError, Result,
+};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -9,6 +12,9 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::{interval, timeout, Duration, MissedTickBehavior};
+use zerocore::account::U256;
+use zerocore::block::{Block, BlockHeader};
+use zerocore::crypto::Address;
 use zerocore::crypto::Hash;
 
 const SYNC_TICK_SECS: u64 = 2;
@@ -134,25 +140,21 @@ impl SyncManager {
     }
 
     pub fn build_headers_response(&self, start: u64, limit: u64) -> Vec<SyncHeader> {
-        headers_for_head(self.local_height(), start, limit)
+        headers_from_local_chain(start, limit)
     }
 
     pub fn build_block_body_response(&self, block_hash: &Hash) -> Option<SyncBlockBody> {
-        let head = self.local_height();
-        let number = find_block_number_for_hash(head, block_hash)?;
+        let number = global_block_number_for_hash(block_hash)?;
+        let block = global_block_by_number(number)?;
         Some(SyncBlockBody {
             block_hash: *block_hash,
-            tx_count: synthetic_tx_count(number),
+            tx_count: block.transactions.len() as u32,
         })
     }
 
     pub fn build_state_snapshot_response(&self, block_number: u64) -> Option<SyncStateSnapshot> {
-        let local_head = self.local_height();
-        if block_number > local_head {
-            return None;
-        }
-
-        let block_hash = synthetic_hash_at(block_number);
+        let block = global_block_by_number(block_number)?;
+        let block_hash = block.header.hash;
         Some(SyncStateSnapshot {
             block_number,
             state_root: derive_state_root(&block_hash),
@@ -223,7 +225,10 @@ impl SyncManager {
 
                 let local = *local_height.read();
                 let external_head = global_synced_height();
-                let local = local.max(external_head);
+                let chain_head = global_latest_block()
+                    .map(|b| b.header.number.as_u64())
+                    .unwrap_or(0);
+                let local = local.max(external_head).max(chain_head);
                 if local > *local_height.read() {
                     *local_height.write() = local;
                 }
@@ -285,6 +290,12 @@ impl SyncManager {
 
                 if let Err(err) = validate_headers(request_start, &headers) {
                     retries = retries.saturating_add(1);
+                    tracing::warn!(
+                        "sync invalid headers from peer {} start {}: {}",
+                        peer_id,
+                        request_start,
+                        err
+                    );
                     *state.write() = SyncState::Recovering {
                         reason: format!("invalid_headers:{err}"),
                         retries,
@@ -385,6 +396,15 @@ impl SyncManager {
                     continue;
                 }
 
+                for header in &headers {
+                    if global_block_by_number(header.number)
+                        .map(|b| b.header.hash == header.hash)
+                        .unwrap_or(false)
+                    {
+                        continue;
+                    }
+                    global_store_block(block_from_sync_header(header));
+                }
                 *local_height.write() = last_header.number;
                 set_global_synced_height(last_header.number);
                 *state.write() = SyncState::Syncing {
@@ -425,30 +445,67 @@ impl SyncManager {
     }
 }
 
-fn headers_for_head(head: u64, start: u64, limit: u64) -> Vec<SyncHeader> {
-    if limit == 0 || start > head {
+fn headers_from_local_chain(start: u64, limit: u64) -> Vec<SyncHeader> {
+    if limit == 0 {
         return Vec::new();
     }
 
-    let end = head.min(start.saturating_add(limit).saturating_sub(1));
     let mut out = Vec::new();
-    let mut parent = if start == 0 {
-        Hash::zero()
-    } else {
-        synthetic_hash_at(start.saturating_sub(1))
-    };
-
+    let end = start.saturating_add(limit).saturating_sub(1);
     for number in start..=end {
-        let hash = derive_header_hash(number, &parent);
-        out.push(SyncHeader {
-            number,
-            hash,
-            parent_hash: parent,
-        });
-        parent = hash;
+        let Some(block) = global_block_by_number(number) else {
+            break;
+        };
+        out.push(sync_header_from_block(&block));
     }
 
     out
+}
+
+fn sync_header_from_block(block: &Block) -> SyncHeader {
+    SyncHeader {
+        number: block.header.number.as_u64(),
+        hash: block.header.hash,
+        parent_hash: block.header.parent_hash,
+        timestamp: block.header.timestamp,
+        difficulty: block.header.difficulty.as_u64(),
+        nonce: block.header.nonce,
+        coinbase: block.header.coinbase,
+        mix_hash: block.header.mix_hash,
+        extra_data: block.header.extra_data.clone(),
+    }
+}
+
+fn block_from_sync_header(header: &SyncHeader) -> Block {
+    let block_header = BlockHeader {
+        version: 1,
+        parent_hash: header.parent_hash,
+        uncle_hashes: Vec::new(),
+        coinbase: header.coinbase,
+        state_root: Hash::zero(),
+        transactions_root: Hash::zero(),
+        receipts_root: Hash::zero(),
+        number: U256::from(header.number),
+        gas_limit: 30_000_000,
+        gas_used: 0,
+        timestamp: header.timestamp,
+        difficulty: U256::from(header.difficulty),
+        nonce: header.nonce,
+        extra_data: header.extra_data.clone(),
+        mix_hash: header.mix_hash,
+        base_fee_per_gas: U256::from(1_000_000_000u64),
+        hash: header.hash,
+    };
+    Block {
+        header: block_header,
+        transactions: Vec::new(),
+        uncles: Vec::new(),
+    }
+}
+
+fn verify_sync_header_hash(header: &SyncHeader) -> bool {
+    let mut reconstructed = block_from_sync_header(header);
+    reconstructed.header.compute_hash() == header.hash
 }
 
 fn validate_headers(
@@ -475,10 +532,12 @@ fn validate_headers(
             if header.parent_hash != prev.hash {
                 return Err("parent_hash_mismatch".to_string());
             }
+            if header.timestamp < prev.timestamp {
+                return Err("timestamp_regressed".to_string());
+            }
         }
 
-        let expected_hash = derive_header_hash(header.number, &header.parent_hash);
-        if header.hash != expected_hash {
+        if !verify_sync_header_hash(header) {
             return Err("header_hash_verification_failed".to_string());
         }
     }
@@ -563,41 +622,8 @@ async fn wait_for_state_snapshot(
     .map_err(|_| "timeout".to_string())?
 }
 
-fn synthetic_hash_at(number: u64) -> Hash {
-    let mut parent = Hash::zero();
-    for height in 0..=number {
-        parent = derive_header_hash(height, &parent);
-    }
-    parent
-}
-
-fn find_block_number_for_hash(head: u64, target_hash: &Hash) -> Option<u64> {
-    let mut parent = Hash::zero();
-    for number in 0..=head {
-        let hash = derive_header_hash(number, &parent);
-        if &hash == target_hash {
-            return Some(number);
-        }
-        parent = hash;
-    }
-    None
-}
-
-fn synthetic_tx_count(number: u64) -> u32 {
-    // Keep body metadata deterministic but non-constant.
-    ((number % 9) + 1) as u32
-}
-
 fn synthetic_account_count(number: u64) -> u64 {
     1_000u64.saturating_add(number.saturating_mul(13))
-}
-
-pub(crate) fn derive_header_hash(number: u64, parent_hash: &Hash) -> Hash {
-    let mut data = Vec::with_capacity(48);
-    data.extend_from_slice(b"ZERO-SYNC-H");
-    data.extend_from_slice(&number.to_be_bytes());
-    data.extend_from_slice(parent_hash.as_bytes());
-    Hash::from_bytes(zerocore::crypto::keccak256(&data))
 }
 
 pub(crate) fn derive_state_root(block_hash: &Hash) -> Hash {
@@ -618,10 +644,60 @@ pub(crate) fn derive_state_proof(block_hash: &Hash, block_number: u64) -> Vec<u8
 #[cfg(test)]
 mod tests {
     use super::*;
+    use once_cell::sync::Lazy;
+    use std::sync::Mutex;
+    use zerocore::block::create_genesis_block;
+
+    static TEST_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+    fn make_block(number: u64, parent_hash: Hash, timestamp: u64) -> Block {
+        let mut header = BlockHeader {
+            version: 1,
+            parent_hash,
+            uncle_hashes: Vec::new(),
+            coinbase: Address::zero(),
+            state_root: Hash::zero(),
+            transactions_root: Hash::zero(),
+            receipts_root: Hash::zero(),
+            number: U256::from(number),
+            gas_limit: 30_000_000,
+            gas_used: 0,
+            timestamp,
+            difficulty: U256::from(1_000_000_000_000_000u64),
+            nonce: number.saturating_mul(17).saturating_add(7),
+            extra_data: format!("sync-test-{number}").into_bytes(),
+            mix_hash: Hash::from_bytes(zerocore::crypto::keccak256(
+                format!("mix-{number}").as_bytes(),
+            )),
+            base_fee_per_gas: U256::from(1_000_000_000u64),
+            hash: Hash::zero(),
+        };
+        header.hash = header.compute_hash();
+        Block {
+            header,
+            transactions: Vec::new(),
+            uncles: Vec::new(),
+        }
+    }
+
+    fn seed_chain(head: u64) {
+        crate::global_reset_sync_cache();
+        let genesis = create_genesis_block();
+        let mut parent_hash = genesis.header.hash;
+        crate::global_store_block(genesis);
+
+        for number in 1..=head {
+            let block = make_block(number, parent_hash, number.saturating_mul(10));
+            parent_hash = block.header.hash;
+            crate::global_store_block(block);
+        }
+    }
 
     #[test]
-    fn test_synthetic_responses() {
+    fn test_chain_responses_from_global_blocks() {
+        let _guard = TEST_LOCK.lock().expect("test lock");
         let manager = SyncManager::new(Arc::new(crate::PeerManager::new(4)));
+        seed_chain(6);
         manager.set_local_height(6);
 
         let headers = manager.build_headers_response(2, 3);
@@ -647,6 +723,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sync_progresses_with_real_request_response_flow() {
+        let _guard = TEST_LOCK.lock().expect("test lock");
         let peer_manager = Arc::new(crate::PeerManager::new(8));
         let sync = Arc::new(SyncManager::new(peer_manager.clone()));
 
@@ -664,6 +741,7 @@ mod tests {
             )
             .unwrap();
         let _ = peer_manager.update_peer_height("peer-sync-a", 3);
+        seed_chain(3);
 
         sync.start_default().await.unwrap();
 
@@ -672,7 +750,7 @@ mod tests {
             while let Some(msg) = rx.recv().await {
                 match msg {
                     ProtocolMessage::SyncGetHeaders { start, limit } => {
-                        let headers = headers_for_head(3, start, limit);
+                        let headers = headers_from_local_chain(start, limit);
                         sync_clone.handle_sync_headers("peer-sync-a".to_string(), headers);
                     }
                     ProtocolMessage::SyncGetBlockBody { block_hash } => {
@@ -685,7 +763,10 @@ mod tests {
                         );
                     }
                     ProtocolMessage::SyncGetStateSnapshot { block_number } => {
-                        let block_hash = synthetic_hash_at(block_number);
+                        let block_hash = crate::global_block_by_number(block_number)
+                            .expect("seeded block")
+                            .header
+                            .hash;
                         sync_clone.handle_sync_state_snapshot(
                             "peer-sync-a".to_string(),
                             SyncStateSnapshot {
@@ -719,6 +800,7 @@ mod tests {
 
     #[test]
     fn checkpoint_roundtrip_restores_height_and_state() {
+        let _guard = TEST_LOCK.lock().expect("test lock");
         let manager = SyncManager::new(Arc::new(crate::PeerManager::new(4)));
         manager.set_local_height(12);
         manager.import_checkpoint(&SyncCheckpoint {

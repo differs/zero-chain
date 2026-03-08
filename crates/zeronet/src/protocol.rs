@@ -1,6 +1,6 @@
 //! Protocol message definitions.
 
-use zerocore::{block::Block, crypto::Hash, transaction::SignedTransaction};
+use zerocore::{block::Block, crypto::Address, crypto::Hash, transaction::SignedTransaction};
 
 /// Minimal sync header payload used by header-first sync.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -8,6 +8,12 @@ pub struct SyncHeader {
     pub number: u64,
     pub hash: Hash,
     pub parent_hash: Hash,
+    pub timestamp: u64,
+    pub difficulty: u64,
+    pub nonce: u64,
+    pub coinbase: Address,
+    pub mix_hash: Hash,
+    pub extra_data: Vec<u8>,
 }
 
 /// Minimal block-body metadata used by body sync.

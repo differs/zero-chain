@@ -37,6 +37,20 @@ log_fail() {
   FAILURES=$((FAILURES + 1))
 }
 
+check_no_sync_source_flag() {
+  local scope="$1"
+  local cmdline="$2"
+  if [[ -z "${cmdline}" ]]; then
+    log_fail "${scope} 进程命令行为空，无法校验是否含 sync-source-rpc"
+    return
+  fi
+  if [[ "${cmdline}" == *"--sync-source-rpc"* ]]; then
+    log_fail "${scope} 启动参数包含 --sync-source-rpc（旁路同步）"
+  else
+    log_pass "${scope} 未使用 --sync-source-rpc（纯 P2P 同步）"
+  fi
+}
+
 rpc_local() {
   local url="$1"
   local method="$2"
@@ -158,6 +172,50 @@ if observer_net_json="$(rpc_local "${OBSERVER_RPC_URL}" net_version 2>/dev/null)
 else
   log_fail "observer 节点 RPC 不可达 (${OBSERVER_RPC_URL})"
 fi
+
+if [[ -f "${ROOT_DIR}/artifacts/public-node-soak/current.env" ]]; then
+  # shellcheck disable=SC1091
+  source "${ROOT_DIR}/artifacts/public-node-soak/current.env" || true
+  if [[ -n "${NODE_PID:-}" ]]; then
+    local_cmdline="$(ps -p "${NODE_PID}" -o args= 2>/dev/null || true)"
+    check_no_sync_source_flag "public-local" "${local_cmdline}"
+  else
+    log_fail "public-local current.env 未包含 NODE_PID"
+  fi
+else
+  log_fail "public-local current.env 不存在"
+fi
+
+if [[ -f "${ROOT_DIR}/artifacts/public-node-observer/current.env" ]]; then
+  # shellcheck disable=SC1091
+  source "${ROOT_DIR}/artifacts/public-node-observer/current.env" || true
+  if [[ -n "${NODE_PID:-}" ]]; then
+    observer_cmdline="$(ps -p "${NODE_PID}" -o args= 2>/dev/null || true)"
+    check_no_sync_source_flag "observer" "${observer_cmdline}"
+  else
+    log_fail "observer current.env 未包含 NODE_PID"
+  fi
+else
+  log_fail "observer current.env 不存在"
+fi
+
+remote_cmdline="$(
+  ssh \
+    -i "${SSH_KEY}" \
+    -o StrictHostKeyChecking=no \
+    -o BatchMode=yes \
+    -o ConnectTimeout="${SSH_TIMEOUT_SECS}" \
+    "${REMOTE_USER}@${REMOTE_HOST}" \
+    'set -euo pipefail
+if [ -f /root/works/zero-chain-public-soak/current.env ]; then
+  . /root/works/zero-chain-public-soak/current.env || true
+  if [ -n "${NODE_PID:-}" ]; then
+    ps -p "${NODE_PID}" -o args= 2>/dev/null || true
+  fi
+fi' \
+    2>/dev/null || true
+)"
+check_no_sync_source_flag "public-remote" "${remote_cmdline}"
 
 local_net="$(safe_extract_result_hex "${local_net_json}")"
 local_peers_hex="$(safe_extract_result_hex "${local_peer_json}")"
