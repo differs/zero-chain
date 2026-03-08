@@ -3140,10 +3140,39 @@ fn parse_bytes_hex_opt(v: Option<&serde_json::Value>) -> Result<Option<Vec<u8>>,
 mod tests {
     use super::*;
     use ed25519_dalek::Signer as _;
-    use std::sync::Arc;
+    use std::ops::{Deref, DerefMut};
+    use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
     use zerostore::db::MemDatabase;
 
-    fn build_test_api_with_compute() -> RpcApi {
+    struct LockedTestApi {
+        _guard: MutexGuard<'static, ()>,
+        api: RpcApi,
+    }
+
+    impl Deref for LockedTestApi {
+        type Target = RpcApi;
+
+        fn deref(&self) -> &Self::Target {
+            &self.api
+        }
+    }
+
+    impl DerefMut for LockedTestApi {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.api
+        }
+    }
+
+    fn test_guard() -> MutexGuard<'static, ()> {
+        static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("zeroapi test lock poisoned")
+    }
+
+    fn build_test_api_with_compute() -> LockedTestApi {
+        let guard = test_guard();
         zeronet::global_reset_sync_cache();
         let account_manager = Arc::new(InMemoryAccountManager::new());
         let tx_pool = Arc::new(TransactionPool::new(
@@ -3163,10 +3192,16 @@ mod tests {
 
         let mut config = RpcConfig::default();
         config.mining_enabled = true;
-        RpcApi::with_compute(config, state_db, tx_pool, store, domains)
+        let api = RpcApi::with_compute(config, state_db, tx_pool, store, domains);
+        let mut test_head = create_genesis_block();
+        test_head.header.difficulty = U256::from_u128(BASE_MINING_DIFFICULTY);
+        test_head.header.hash = test_head.header.compute_hash();
+        *api.latest_block.write() = Some(test_head);
+        LockedTestApi { _guard: guard, api }
     }
 
-    fn build_test_api_with_persistent_compute() -> RpcApi {
+    fn build_test_api_with_persistent_compute() -> LockedTestApi {
+        let guard = test_guard();
         zeronet::global_reset_sync_cache();
         let account_manager = Arc::new(InMemoryAccountManager::new());
         let tx_pool = Arc::new(TransactionPool::new(
@@ -3187,11 +3222,18 @@ mod tests {
 
         let mut config = RpcConfig::default();
         config.mining_enabled = true;
-        RpcApi::with_persistent_compute(config, state_db, tx_pool, persistent_store, domains)
+        let api =
+            RpcApi::with_persistent_compute(config, state_db, tx_pool, persistent_store, domains);
+        let mut test_head = create_genesis_block();
+        test_head.header.difficulty = U256::from_u128(BASE_MINING_DIFFICULTY);
+        test_head.header.hash = test_head.header.compute_hash();
+        *api.latest_block.write() = Some(test_head);
+        LockedTestApi { _guard: guard, api }
     }
 
     #[test]
     fn test_mining_rpc_disabled_by_default() {
+        let _guard = test_guard();
         zeronet::global_reset_sync_cache();
         let account_manager = Arc::new(InMemoryAccountManager::new());
         let tx_pool = Arc::new(TransactionPool::new(
@@ -3594,6 +3636,22 @@ mod tests {
     }
 
     #[test]
+    fn test_zero_get_blocks_range_rejects_non_object_params() {
+        let api = build_test_api_with_persistent_compute();
+        let err = api
+            .zero_get_blocks_range(Some(vec![serde_json::json!("bad-query")]))
+            .expect_err("non-object query should be rejected");
+        assert_eq!(err.code, -32602);
+        assert_eq!(err.message, "Invalid params");
+        assert_eq!(
+            err.data,
+            Some(serde_json::Value::String(
+                "query object required for zero_getBlocksRange".to_string(),
+            ))
+        );
+    }
+
+    #[test]
     fn test_zero_get_block_by_number_and_range() {
         let api = build_test_api_with_persistent_compute();
 
@@ -3630,6 +3688,132 @@ mod tests {
         assert_eq!(items[0].get("number").and_then(|v| v.as_str()), Some("0x3"));
         assert_eq!(items[1].get("number").and_then(|v| v.as_str()), Some("0x2"));
         assert_eq!(items[2].get("number").and_then(|v| v.as_str()), Some("0x1"));
+    }
+
+    #[test]
+    fn test_zero_get_block_by_number_requires_param() {
+        let api = build_test_api_with_persistent_compute();
+        let err = api
+            .zero_get_block_by_number(None)
+            .expect_err("missing number should fail");
+        assert_eq!(err.code, -32602);
+    }
+
+    #[test]
+    fn test_zero_get_block_by_number_returns_null_for_missing_height() {
+        let api = build_test_api_with_persistent_compute();
+        let block = api
+            .zero_get_block_by_number(Some(vec![serde_json::json!("0x9")]))
+            .expect("request should succeed");
+        assert!(block.is_null());
+    }
+
+    #[test]
+    fn test_zero_get_blocks_range_defaults_to_latest_and_clamps_limit() {
+        let api = build_test_api_with_persistent_compute();
+        assert_eq!(
+            mine_one_block(&api, 201, "window-miner")["accepted"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            mine_one_block(&api, 202, "window-miner")["accepted"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            mine_one_block(&api, 203, "window-miner")["accepted"].as_bool(),
+            Some(true)
+        );
+
+        let range = api
+            .zero_get_blocks_range(Some(vec![serde_json::json!({ "limit": 9_999 })]))
+            .expect("range should succeed");
+        assert_eq!(range.get("limit").and_then(|v| v.as_u64()), Some(500));
+        assert_eq!(range.get("to").and_then(|v| v.as_u64()), Some(3));
+        assert_eq!(range.get("from").and_then(|v| v.as_u64()), Some(1));
+        let items = range
+            .get("items")
+            .and_then(|v| v.as_array())
+            .expect("items missing");
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].get("number").and_then(|v| v.as_str()), Some("0x3"));
+        assert_eq!(items[2].get("number").and_then(|v| v.as_str()), Some("0x1"));
+    }
+
+    #[test]
+    fn test_zero_get_blocks_range_rejects_non_object_query() {
+        let api = build_test_api_with_persistent_compute();
+        let err = api
+            .zero_get_blocks_range(Some(vec![serde_json::json!("bad")]))
+            .expect_err("non-object query should fail");
+        assert_eq!(err.code, -32602);
+    }
+
+    #[test]
+    fn test_zero_list_compute_tx_results_falls_back_to_global_synced_records() {
+        let api = build_test_api_with_persistent_compute();
+        let newer_hash = Hash::from_bytes([0x81u8; 32]);
+        let older_hash = Hash::from_bytes([0x71u8; 32]);
+        zeronet::global_replace_compute_txs(vec![
+            SyncComputeTxRecord {
+                tx_hash: older_hash,
+                result: serde_json::json!({
+                    "submitted_at_unix": 9_000_000_010u64,
+                    "status": "ok"
+                }),
+            },
+            SyncComputeTxRecord {
+                tx_hash: newer_hash,
+                result: serde_json::json!({
+                    "submitted_at_unix": 9_000_000_020u64,
+                    "status": "ok"
+                }),
+            },
+        ]);
+
+        let page_one = api
+            .zero_list_compute_tx_results(Some(vec![serde_json::json!({
+                "page": 1,
+                "limit": 1
+            })]))
+            .expect("page one should succeed");
+        assert_eq!(page_one.get("total").and_then(|v| v.as_u64()), Some(2));
+        assert_eq!(
+            page_one.get("has_more").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        let page_one_items = page_one
+            .get("items")
+            .and_then(|v| v.as_array())
+            .expect("page one items missing");
+        assert_eq!(page_one_items.len(), 1);
+        let expected_newer_tx_id = format!("0x{}", hex::encode(newer_hash.as_bytes()));
+        assert_eq!(
+            page_one_items[0].get("tx_id").and_then(|v| v.as_str()),
+            Some(expected_newer_tx_id.as_str()),
+        );
+
+        let page_two = api
+            .zero_list_compute_tx_results(Some(vec![serde_json::json!({
+                "page": 2,
+                "limit": 1
+            })]))
+            .expect("page two should succeed");
+        assert_eq!(
+            page_two.get("has_more").and_then(|v| v.as_bool()),
+            Some(false)
+        );
+        let page_two_items = page_two
+            .get("items")
+            .and_then(|v| v.as_array())
+            .expect("page two items missing");
+        assert_eq!(page_two_items.len(), 1);
+        let expected_older_tx_id = format!("0x{}", hex::encode(older_hash.as_bytes()));
+        assert_eq!(
+            page_two_items[0].get("tx_id").and_then(|v| v.as_str()),
+            Some(expected_older_tx_id.as_str()),
+        );
+
+        zeronet::global_reset_sync_cache();
     }
 
     #[test]
@@ -3724,6 +3908,7 @@ mod tests {
 
     #[test]
     fn test_zero_transfer_moves_balance_between_addresses() {
+        let _guard = test_guard();
         let account_manager = Arc::new(InMemoryAccountManager::new());
         let tx_pool = Arc::new(TransactionPool::new(
             TxPoolConfig::default(),
@@ -3788,7 +3973,35 @@ mod tests {
     }
 
     #[test]
+    fn test_zero_transfer_rejects_insufficient_balance() {
+        let api = build_test_api_with_persistent_compute();
+        let from = parse_address("ZER0x1111111111111111111111111111111111111111").unwrap();
+
+        let mut from_account = Account {
+            address: from,
+            state: AccountState::Active,
+            created_at: 1,
+            updated_at: 1,
+            ..Account::default()
+        };
+        from_account.balance = U256::from(3u64);
+        api.state_db.insert_account(from, from_account);
+
+        let err = api
+            .zero_transfer(Some(vec![serde_json::json!({
+                "from": "ZER0x1111111111111111111111111111111111111111",
+                "to": "ZER0x2222222222222222222222222222222222222222",
+                "value": "0x4"
+            })]))
+            .expect_err("insufficient balance should fail");
+        assert_eq!(err.code, -32602);
+        assert_eq!(api.state_db.get_balance(&from).as_u64(), 3);
+        assert_eq!(api.state_db.get_nonce(&from), 0);
+    }
+
+    #[test]
     fn test_zero_transfer_query_and_address_history() {
+        let _guard = test_guard();
         zeronet::global_replace_transfer_txs(Vec::new());
         zeronet::global_reset_sync_cache();
         let account_manager = Arc::new(InMemoryAccountManager::new());
@@ -3882,6 +4095,120 @@ mod tests {
             )]))
             .expect("recipient txs should succeed");
         assert_eq!(by_to.get("total").and_then(|v| v.as_u64()), Some(1));
+    }
+
+    #[test]
+    fn test_zero_list_transactions_compute_filter_and_pagination() {
+        let api = build_test_api_with_persistent_compute();
+        let older_hash = Hash::from_bytes([0x31; 32]);
+        let newer_hash = Hash::from_bytes([0x32; 32]);
+
+        {
+            let mut results = api.submitted_compute_results.write();
+            results.insert(
+                older_hash,
+                serde_json::json!({
+                    "ok": true,
+                    "submitted_at_unix": 9_000_000_010u64,
+                    "created_outputs": 1,
+                }),
+            );
+            results.insert(
+                newer_hash,
+                serde_json::json!({
+                    "ok": false,
+                    "submitted_at_unix": 9_000_000_020u64,
+                    "created_outputs": 0,
+                }),
+            );
+        }
+        {
+            let mut order = api.submitted_compute_order.write();
+            order.push_back(older_hash);
+            order.push_back(newer_hash);
+        }
+
+        let first_page = api
+            .zero_list_transactions(Some(vec![serde_json::json!({
+                "page": 1,
+                "limit": 1,
+                "kind": "compute"
+            })]))
+            .expect("compute tx list should succeed");
+        assert!(
+            first_page
+                .get("total")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+                >= 2
+        );
+        assert_eq!(
+            first_page.get("has_more").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            first_page
+                .get("items")
+                .and_then(|v| v.as_array())
+                .map(|items| items.len()),
+            Some(1)
+        );
+        assert_eq!(
+            first_page
+                .get("items")
+                .and_then(|v| v.as_array())
+                .and_then(|items| items.first())
+                .and_then(|item| item.get("kind"))
+                .and_then(|v| v.as_str()),
+            Some("compute")
+        );
+        let newer_hash_hex = format!("0x{}", hex::encode(newer_hash.as_bytes()));
+        assert_eq!(
+            first_page
+                .get("items")
+                .and_then(|v| v.as_array())
+                .and_then(|items| items.first())
+                .and_then(|item| item.get("tx_hash"))
+                .and_then(|v| v.as_str()),
+            Some(newer_hash_hex.as_str())
+        );
+
+        let second_page = api
+            .zero_list_transactions(Some(vec![serde_json::json!({
+                "page": 2,
+                "limit": 1,
+                "kind": "compute"
+            })]))
+            .expect("compute tx second page should succeed");
+        let older_hash_hex = format!("0x{}", hex::encode(older_hash.as_bytes()));
+        assert_eq!(
+            second_page
+                .get("items")
+                .and_then(|v| v.as_array())
+                .and_then(|items| items.first())
+                .and_then(|item| item.get("tx_hash"))
+                .and_then(|v| v.as_str()),
+            Some(older_hash_hex.as_str())
+        );
+    }
+
+    #[test]
+    fn test_zero_list_transactions_rejects_invalid_kind() {
+        let api = build_test_api_with_persistent_compute();
+        let err = api
+            .zero_list_transactions(Some(vec![serde_json::json!({
+                "page": 1,
+                "limit": 10,
+                "kind": "native-only"
+            })]))
+            .expect_err("invalid kind should be rejected");
+        assert_eq!(err.code, -32602);
+        assert_eq!(
+            err.data,
+            Some(serde_json::Value::String(
+                "kind must be one of all|transfer|compute".to_string(),
+            ))
+        );
     }
 
     #[test]
