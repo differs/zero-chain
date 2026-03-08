@@ -1,0 +1,36 @@
+name: PR Fast Checks
+
+on:
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: zero-chain-pr-fast-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust-fast-checks:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run redline guard
+        run: bash scripts/no_silent_fallback.sh
+
+      - name: Test zeroapi and zeronet
+        run: cargo test -p zeronet -p zeroapi
+
+      - name: Check zerocli
+        run: cargo check -p zerocli
