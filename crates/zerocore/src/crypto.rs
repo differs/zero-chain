@@ -6,8 +6,7 @@
 //! - Digital signatures (ECDSA)
 //! - Address derivation
 
-use k256::ecdsa::{SigningKey, VerifyingKey};
-use rand::rngs::OsRng;
+use rand::{rngs::OsRng, RngCore};
 use secp256k1::{
     ecdsa::{RecoverableSignature, RecoveryId, Signature as SecpSignature},
     Message as SecpMessage, PublicKey as SecpPublicKey, Secp256k1, SecretKey,
@@ -295,71 +294,78 @@ impl fmt::Debug for PublicKey {
 }
 
 /// 256-bit private key (secp256k1)
-#[derive(Clone, PartialEq, Eq)]
-pub struct PrivateKey([u8; 32]);
+pub struct PrivateKey {
+    bytes: [u8; 32],
+    secret_key: SecretKey,
+}
 
-fn invariant_signing_key(bytes: &[u8; 32]) -> SigningKey {
-    match SigningKey::from_bytes(bytes.into()) {
-        Ok(signing_key) => signing_key,
-        Err(_) => unreachable!("PrivateKey invariant violated"),
+#[derive(Clone, Copy)]
+struct SecpMessageHash([u8; 32]);
+
+impl secp256k1::ThirtyTwoByteHash for SecpMessageHash {
+    fn into_32(self) -> [u8; 32] {
+        self.0
     }
 }
 
-fn invariant_secret_key(bytes: &[u8; 32]) -> SecretKey {
-    match SecretKey::from_slice(bytes) {
-        Ok(secret_key) => secret_key,
-        Err(_) => unreachable!("PrivateKey invariant violated"),
+fn message_from_hash(hash: [u8; 32]) -> SecpMessage {
+    SecpMessage::from(SecpMessageHash(hash))
+}
+
+impl Clone for PrivateKey {
+    fn clone(&self) -> Self {
+        Self {
+            bytes: self.bytes,
+            secret_key: self.secret_key,
+        }
     }
 }
 
-fn invariant_message(hash: [u8; 32]) -> SecpMessage {
-    match SecpMessage::from_slice(&hash) {
-        Ok(message) => message,
-        Err(_) => unreachable!("keccak256 must produce 32-byte output"),
+impl PartialEq for PrivateKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.bytes == other.bytes
     }
 }
+
+impl Eq for PrivateKey {}
 
 impl PrivateKey {
     /// Generate a new random private key
     pub fn random() -> Self {
-        let signing_key = SigningKey::random(&mut OsRng);
-        let bytes = signing_key.to_bytes();
-        Self(*bytes.as_ref())
+        loop {
+            let mut bytes = [0u8; 32];
+            OsRng.fill_bytes(&mut bytes);
+            if let Ok(secret_key) = SecretKey::from_slice(&bytes) {
+                return Self { bytes, secret_key };
+            }
+        }
     }
 
     /// Create from bytes
     pub fn from_bytes(bytes: [u8; 32]) -> Result<Self, CryptoError> {
-        SecretKey::from_slice(&bytes).map_err(|_| CryptoError::InvalidPrivateKey)?;
-        Ok(Self(bytes))
+        let secret_key =
+            SecretKey::from_slice(&bytes).map_err(|_| CryptoError::InvalidPrivateKey)?;
+        Ok(Self { bytes, secret_key })
     }
 
     /// Get the private key as bytes
     pub fn as_bytes(&self) -> &[u8] {
-        &self.0
+        &self.bytes
     }
 
     /// Get the corresponding public key
     pub fn public_key(&self) -> PublicKey {
-        let signing_key = invariant_signing_key(&self.0);
-        let verifying_key = VerifyingKey::from(&signing_key);
-        let encoded_bytes = verifying_key.to_encoded_point(false);
-        let encoded_slice = encoded_bytes.as_bytes();
-        debug_assert_eq!(encoded_slice.len(), 65);
-        if encoded_slice.len() != 65 {
-            unreachable!("uncompressed secp256k1 public key must be 65 bytes");
-        }
-        let mut bytes = [0u8; 65];
-        bytes.copy_from_slice(encoded_slice);
-        PublicKey(bytes)
+        let secp = Secp256k1::new();
+        let public_key = SecpPublicKey::from_secret_key(&secp, &self.secret_key);
+        PublicKey(public_key.serialize_uncompressed())
     }
 
     /// Sign a message
     pub fn sign(&self, message: &[u8]) -> Signature {
         let hash = keccak256(message);
         let secp = Secp256k1::new();
-        let sk = invariant_secret_key(&self.0);
-        let msg = invariant_message(hash);
-        let recoverable = secp.sign_ecdsa_recoverable(&msg, &sk);
+        let msg = message_from_hash(hash);
+        let recoverable = secp.sign_ecdsa_recoverable(&msg, &self.secret_key);
         let (rec_id, sig64) = recoverable.serialize_compact();
 
         let mut r = [0u8; 32];
@@ -374,7 +380,7 @@ impl PrivateKey {
 
     /// Convert to hex string
     pub fn to_hex(&self) -> String {
-        hex::encode(self.0)
+        hex::encode(self.bytes)
     }
 }
 
@@ -386,8 +392,7 @@ impl fmt::Debug for PrivateKey {
 
 impl Drop for PrivateKey {
     fn drop(&mut self) {
-        // Zero out the private key bytes
-        self.0.iter_mut().for_each(|b| *b = 0);
+        self.bytes.iter_mut().for_each(|b| *b = 0);
     }
 }
 
@@ -457,7 +462,7 @@ impl Signature {
         let signature =
             SecpSignature::from_compact(&sig64).map_err(|_| CryptoError::InvalidSignature)?;
 
-        let msg = invariant_message(hash);
+        let msg = message_from_hash(hash);
         secp.verify_ecdsa(&msg, &signature, &pubkey)
             .map(|_| true)
             .map_err(|_| CryptoError::VerificationFailed)
@@ -467,7 +472,7 @@ impl Signature {
     pub fn recover(&self, message: &[u8]) -> Result<PublicKey, CryptoError> {
         let hash = keccak256(message);
         let secp = Secp256k1::verification_only();
-        let msg = invariant_message(hash);
+        let msg = message_from_hash(hash);
 
         let mut sig64 = [0u8; 64];
         sig64[0..32].copy_from_slice(&self.r);

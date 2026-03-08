@@ -292,7 +292,9 @@ pub async fn handle_wallet(data_dir: &str, cmd: WalletCommand) -> Result<()> {
                 env_name, session_token
             );
         }
-        WalletCommand::MigrateV1 { .. } => unreachable!("handled before wallet load"),
+        WalletCommand::MigrateV1 { .. } => {
+            anyhow::bail!("migrate-v1 should be handled before wallet load")
+        }
     }
 
     Ok(())

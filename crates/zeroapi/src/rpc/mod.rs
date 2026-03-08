@@ -2060,10 +2060,9 @@ impl RpcServer {
         })
     }
 
-    /// Creates server and fails fast on invalid configuration.
-    pub fn new(config: RpcConfig) -> Self {
+    /// Creates server with validation.
+    pub fn new(config: RpcConfig) -> Result<Self, crate::ApiError> {
         Self::try_new(config)
-            .unwrap_or_else(|err| panic!("invalid rpc config for RpcServer::new: {err}"))
     }
 
     /// Create server with externally provided RPC API instance.
@@ -3790,6 +3789,7 @@ mod tests {
 
     #[test]
     fn test_zero_transfer_query_and_address_history() {
+        zeronet::global_replace_transfer_txs(Vec::new());
         zeronet::global_reset_sync_cache();
         let account_manager = Arc::new(InMemoryAccountManager::new());
         let tx_pool = Arc::new(TransactionPool::new(

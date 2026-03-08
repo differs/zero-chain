@@ -115,10 +115,9 @@ impl ApiService {
         })
     }
 
-    /// Create new API service and fail fast on invalid configuration.
-    pub fn new(config: ApiConfig) -> Self {
+    /// Create new API service with validation.
+    pub fn new(config: ApiConfig) -> Result<Self> {
         Self::try_new(config)
-            .unwrap_or_else(|err| panic!("invalid ApiConfig for ApiService::new: {err}"))
     }
 
     /// Start API service

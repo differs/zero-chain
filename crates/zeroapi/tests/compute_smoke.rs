@@ -18,7 +18,7 @@ async fn compute_submit_result_output_smoke() {
         compute_backend: ComputeBackend::Mem,
         ..RpcConfig::default()
     };
-    let server = RpcServer::new(config);
+    let server = RpcServer::new(config).expect("rpc server should initialize");
     let api = server.api().expect("api should be initialized");
 
     let mut tx = ComputeTx {
