@@ -35,6 +35,7 @@ const MAX_MINER_EXTRA_DATA_BYTES: usize = 64;
 const MAX_SEEN_MINING_SUBMISSIONS: usize = 16_384;
 const MAX_BLOCK_HISTORY: usize = 50_000;
 const MAX_SUBMITTED_COMPUTE_RESULTS: usize = 50_000;
+const MAX_TRANSFER_HISTORY: usize = 50_000;
 const TARGET_BLOCK_INTERVAL_SECS: u64 = 10;
 const MIN_MINING_DIFFICULTY: u128 = 250_000;
 const BASE_MINING_DIFFICULTY: u128 = 1_000_000;
@@ -317,6 +318,8 @@ pub struct RpcApi {
     domain_registry: Arc<InMemoryDomainRegistry>,
     submitted_compute_results: RwLock<HashMap<Hash, serde_json::Value>>,
     submitted_compute_order: RwLock<VecDeque<Hash>>,
+    transfer_txs: RwLock<HashMap<Hash, TransferTxRecord>>,
+    transfer_tx_order: RwLock<VecDeque<Hash>>,
     persistent_compute_store: Option<Arc<ComputeStore>>,
     mining_jobs: RwLock<HashMap<String, MiningWork>>,
     mining_job_order: RwLock<VecDeque<String>>,
@@ -349,6 +352,17 @@ struct SubmitWorkRequest {
     miner: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct TransferTxRecord {
+    tx_hash: Hash,
+    from: Address,
+    to: Address,
+    value_hex: String,
+    from_nonce: u64,
+    timestamp: u64,
+    block_number: u64,
+}
+
 impl RpcApi {
     pub fn new(config: RpcConfig, state_db: Arc<StateDb>, tx_pool: Arc<TransactionPool>) -> Self {
         let domain_registry = Arc::new(InMemoryDomainRegistry::new());
@@ -369,6 +383,8 @@ impl RpcApi {
             domain_registry,
             submitted_compute_results: RwLock::new(HashMap::new()),
             submitted_compute_order: RwLock::new(VecDeque::new()),
+            transfer_txs: RwLock::new(HashMap::new()),
+            transfer_tx_order: RwLock::new(VecDeque::new()),
             persistent_compute_store: None,
             mining_jobs: RwLock::new(HashMap::new()),
             mining_job_order: RwLock::new(VecDeque::new()),
@@ -396,6 +412,8 @@ impl RpcApi {
             domain_registry,
             submitted_compute_results: RwLock::new(HashMap::new()),
             submitted_compute_order: RwLock::new(VecDeque::new()),
+            transfer_txs: RwLock::new(HashMap::new()),
+            transfer_tx_order: RwLock::new(VecDeque::new()),
             persistent_compute_store: None,
             mining_jobs: RwLock::new(HashMap::new()),
             mining_job_order: RwLock::new(VecDeque::new()),
@@ -423,6 +441,8 @@ impl RpcApi {
             domain_registry,
             submitted_compute_results: RwLock::new(HashMap::new()),
             submitted_compute_order: RwLock::new(VecDeque::new()),
+            transfer_txs: RwLock::new(HashMap::new()),
+            transfer_tx_order: RwLock::new(VecDeque::new()),
             persistent_compute_store: Some(compute_store),
             mining_jobs: RwLock::new(HashMap::new()),
             mining_job_order: RwLock::new(VecDeque::new()),
@@ -488,6 +508,9 @@ impl RpcApi {
             "zero_submitComputeTx" => self.zero_submit_compute_tx(params),
             "zero_getComputeTxResult" => self.zero_get_compute_tx_result(params),
             "zero_listComputeTxResults" => self.zero_list_compute_tx_results(params),
+            "zero_getTransactionByHash" => self.zero_get_transaction_by_hash(params),
+            "zero_listTransactions" => self.zero_list_transactions(params),
+            "zero_getTransactionsByAddress" => self.zero_get_transactions_by_address(params),
             "zero_getWork" => self.zero_get_work(params),
             "zero_submitWork" => self.zero_submit_work(params),
             "zero_getLatestBlock" => self.zero_get_latest_block(params),
@@ -614,6 +637,17 @@ impl RpcApi {
         hash_input.extend_from_slice(&from_account.nonce.to_be_bytes());
         hash_input.extend_from_slice(&now.to_be_bytes());
         let tx_hash = Hash::from_bytes(zerocore::crypto::keccak256(&hash_input));
+        let current_block_number = self.current_head_block().header.number.as_u64();
+        let record = TransferTxRecord {
+            tx_hash,
+            from,
+            to,
+            value_hex: format_u256_hex(value),
+            from_nonce: from_account.nonce,
+            timestamp: now,
+            block_number: current_block_number,
+        };
+        self.record_transfer_tx(record);
 
         Ok(serde_json::json!(format!(
             "0x{}",
@@ -800,6 +834,7 @@ impl RpcApi {
         let report = executor
             .execute(&tx)
             .map_err(|e| RpcErrorObject::invalid_params(format!("compute execute failed: {e}")))?;
+        let submitted_at_unix = current_unix_secs();
 
         let result = serde_json::json!({
             "ok": true,
@@ -807,6 +842,7 @@ impl RpcApi {
             "consumed_inputs": report.inputs.len(),
             "read_objects": report.reads.len(),
             "created_outputs": tx.output_proposals.len(),
+            "submitted_at_unix": submitted_at_unix,
         });
 
         if let Some(persistent) = &self.persistent_compute_store {
@@ -912,6 +948,222 @@ impl RpcApi {
 
         let has_more = skip.saturating_add(items.len()) < total;
         Ok(serde_json::json!({
+            "page": page,
+            "limit": limit,
+            "total": total,
+            "has_more": has_more,
+            "items": items,
+        }))
+    }
+
+    fn zero_get_transaction_by_hash(
+        &self,
+        params: Option<Vec<serde_json::Value>>,
+    ) -> Result<serde_json::Value, RpcErrorObject> {
+        let params = params.ok_or(RpcErrorObject::invalid_params("Missing params".to_string()))?;
+        let tx_hash = params
+            .first()
+            .ok_or_else(|| RpcErrorObject::invalid_params("Missing tx hash".to_string()))?
+            .as_str()
+            .ok_or_else(|| RpcErrorObject::invalid_params("tx hash must be string".to_string()))
+            .and_then(parse_hash)?;
+
+        if let Some(record) = self.transfer_txs.read().get(&tx_hash).cloned() {
+            return Ok(transfer_record_to_json(&record));
+        }
+        if let Some(result) = self.submitted_compute_results.read().get(&tx_hash).cloned() {
+            return Ok(compute_tx_to_json(tx_hash, &result));
+        }
+        if let Some(persistent) = &self.persistent_compute_store {
+            let maybe = persistent
+                .get_tx_result(zerocore::compute::TxId(tx_hash))
+                .map_err(|e| {
+                    RpcErrorObject::internal_error(format!("load tx result failed: {e}"))
+                })?;
+            if let Some(raw) = maybe {
+                let value = serde_json::from_str::<serde_json::Value>(&raw).map_err(|e| {
+                    RpcErrorObject::internal_error(format!("decode tx result failed: {e}"))
+                })?;
+                return Ok(compute_tx_to_json(tx_hash, &value));
+            }
+        }
+
+        Ok(serde_json::Value::Null)
+    }
+
+    fn zero_list_transactions(
+        &self,
+        params: Option<Vec<serde_json::Value>>,
+    ) -> Result<serde_json::Value, RpcErrorObject> {
+        let mut page: usize = 1;
+        let mut limit: usize = 20;
+        let mut include_transfer = true;
+        let mut include_compute = true;
+        if let Some(values) = params {
+            if let Some(first) = values.first() {
+                let obj = first.as_object().ok_or_else(|| {
+                    RpcErrorObject::invalid_params(
+                        "query object required for zero_listTransactions".to_string(),
+                    )
+                })?;
+                if let Some(parsed_page) = parse_u64_opt(obj.get("page"))? {
+                    page = usize::try_from(parsed_page)
+                        .map_err(|_| RpcErrorObject::invalid_params("page overflow".to_string()))?;
+                }
+                if let Some(parsed_limit) = parse_u64_opt(obj.get("limit"))? {
+                    limit = usize::try_from(parsed_limit).map_err(|_| {
+                        RpcErrorObject::invalid_params("limit overflow".to_string())
+                    })?;
+                }
+                if let Some(kind) = obj.get("kind").and_then(|v| v.as_str()) {
+                    match kind {
+                        "all" => {
+                            include_transfer = true;
+                            include_compute = true;
+                        }
+                        "transfer" => {
+                            include_transfer = true;
+                            include_compute = false;
+                        }
+                        "compute" => {
+                            include_transfer = false;
+                            include_compute = true;
+                        }
+                        _ => {
+                            return Err(RpcErrorObject::invalid_params(
+                                "kind must be one of all|transfer|compute".to_string(),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        page = page.max(1);
+        limit = limit.clamp(1, 200);
+        let skip = page.saturating_sub(1).saturating_mul(limit);
+        let mut items: Vec<(u64, serde_json::Value)> = Vec::new();
+
+        if include_transfer {
+            let order = self.transfer_tx_order.read();
+            let txs = self.transfer_txs.read();
+            for tx_hash in order.iter().rev() {
+                if let Some(record) = txs.get(tx_hash) {
+                    items.push((record.timestamp, transfer_record_to_json(record)));
+                }
+            }
+        }
+
+        if include_compute {
+            let order = self.submitted_compute_order.read();
+            let results = self.submitted_compute_results.read();
+            for tx_hash in order.iter().rev() {
+                if let Some(result) = results.get(tx_hash) {
+                    let ts = result
+                        .get("submitted_at_unix")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    items.push((ts, compute_tx_to_json(*tx_hash, result)));
+                }
+            }
+        }
+
+        items.sort_by(|a, b| b.0.cmp(&a.0));
+        let total = items.len();
+        let page_items = items
+            .into_iter()
+            .skip(skip)
+            .take(limit)
+            .map(|(_, item)| item)
+            .collect::<Vec<_>>();
+        let has_more = skip.saturating_add(page_items.len()) < total;
+
+        Ok(serde_json::json!({
+            "page": page,
+            "limit": limit,
+            "total": total,
+            "has_more": has_more,
+            "items": page_items,
+        }))
+    }
+
+    fn zero_get_transactions_by_address(
+        &self,
+        params: Option<Vec<serde_json::Value>>,
+    ) -> Result<serde_json::Value, RpcErrorObject> {
+        let params = params.ok_or(RpcErrorObject::invalid_params("Missing params".to_string()))?;
+        let mut address: Option<Address> = None;
+        let mut page: usize = 1;
+        let mut limit: usize = 20;
+
+        if let Some(first) = params.first() {
+            match first {
+                serde_json::Value::String(s) => {
+                    address = Some(parse_address(s)?);
+                    if let Some(second) = params.get(1).and_then(|v| v.as_object()) {
+                        if let Some(parsed_page) = parse_u64_opt(second.get("page"))? {
+                            page = usize::try_from(parsed_page).map_err(|_| {
+                                RpcErrorObject::invalid_params("page overflow".to_string())
+                            })?;
+                        }
+                        if let Some(parsed_limit) = parse_u64_opt(second.get("limit"))? {
+                            limit = usize::try_from(parsed_limit).map_err(|_| {
+                                RpcErrorObject::invalid_params("limit overflow".to_string())
+                            })?;
+                        }
+                    }
+                }
+                serde_json::Value::Object(obj) => {
+                    let addr = obj.get("address").and_then(|v| v.as_str()).ok_or_else(|| {
+                        RpcErrorObject::invalid_params("address is required".to_string())
+                    })?;
+                    address = Some(parse_address(addr)?);
+                    if let Some(parsed_page) = parse_u64_opt(obj.get("page"))? {
+                        page = usize::try_from(parsed_page).map_err(|_| {
+                            RpcErrorObject::invalid_params("page overflow".to_string())
+                        })?;
+                    }
+                    if let Some(parsed_limit) = parse_u64_opt(obj.get("limit"))? {
+                        limit = usize::try_from(parsed_limit).map_err(|_| {
+                            RpcErrorObject::invalid_params("limit overflow".to_string())
+                        })?;
+                    }
+                }
+                _ => {
+                    return Err(RpcErrorObject::invalid_params(
+                        "address query must be string or object".to_string(),
+                    ));
+                }
+            }
+        }
+
+        let address = address
+            .ok_or_else(|| RpcErrorObject::invalid_params("address is required".to_string()))?;
+        page = page.max(1);
+        limit = limit.clamp(1, 200);
+        let skip = page.saturating_sub(1).saturating_mul(limit);
+
+        let order = self.transfer_tx_order.read();
+        let txs = self.transfer_txs.read();
+        let mut filtered = Vec::new();
+        for tx_hash in order.iter().rev() {
+            if let Some(record) = txs.get(tx_hash) {
+                if record.from == address || record.to == address {
+                    filtered.push(transfer_record_to_json(record));
+                }
+            }
+        }
+
+        let total = filtered.len();
+        let items = filtered
+            .into_iter()
+            .skip(skip)
+            .take(limit)
+            .collect::<Vec<_>>();
+        let has_more = skip.saturating_add(items.len()) < total;
+
+        Ok(serde_json::json!({
+            "address": format_zero_address(address),
             "page": page,
             "limit": limit,
             "total": total,
@@ -1326,6 +1578,20 @@ impl RpcApi {
                 break;
             };
             history.remove(&oldest);
+        }
+    }
+
+    fn record_transfer_tx(&self, record: TransferTxRecord) {
+        let tx_hash = record.tx_hash;
+        let mut txs = self.transfer_txs.write();
+        let mut order = self.transfer_tx_order.write();
+        txs.insert(tx_hash, record);
+        order.retain(|h| h != &tx_hash);
+        order.push_back(tx_hash);
+        while order.len() > MAX_TRANSFER_HISTORY {
+            if let Some(stale) = order.pop_front() {
+                txs.remove(&stale);
+            }
         }
     }
 
@@ -1838,9 +2104,22 @@ fn build_compute_kv_backend(config: &RpcConfig) -> Arc<dyn KeyValueDB> {
 
 fn parse_address(s: &str) -> Result<Address, RpcErrorObject> {
     let raw = s.trim();
-    let body = raw.strip_prefix("ZER0x").ok_or_else(|| {
+    if raw.len() != 45 {
+        return Err(RpcErrorObject::invalid_params(
+            "Address must be 20 bytes".to_string(),
+        ));
+    }
+    let prefix = raw.get(..5).ok_or_else(|| {
         RpcErrorObject::invalid_params("Address must use ZER0x prefix".to_string())
     })?;
+    if !prefix.eq_ignore_ascii_case("ZER0x") {
+        return Err(RpcErrorObject::invalid_params(
+            "Address must use ZER0x prefix".to_string(),
+        ));
+    }
+    let body = raw
+        .get(5..)
+        .ok_or_else(|| RpcErrorObject::invalid_params("Address must be 20 bytes".to_string()))?;
     if body.len() != 40 || !body.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(RpcErrorObject::invalid_params(
             "Address must be 20 bytes".to_string(),
@@ -1940,6 +2219,31 @@ fn format_zero_address(address: Address) -> String {
     }
 
     format!("ZER0x{}", checksummed)
+}
+
+fn transfer_record_to_json(record: &TransferTxRecord) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "transfer",
+        "tx_hash": format!("0x{}", hex::encode(record.tx_hash.as_bytes())),
+        "hash": format!("0x{}", hex::encode(record.tx_hash.as_bytes())),
+        "from": format_zero_address(record.from),
+        "to": format_zero_address(record.to),
+        "value": record.value_hex,
+        "from_nonce": format!("0x{:x}", record.from_nonce),
+        "timestamp": record.timestamp,
+        "block_number": record.block_number,
+        "status": "executed",
+    })
+}
+
+fn compute_tx_to_json(tx_hash: Hash, result: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "compute",
+        "tx_hash": format!("0x{}", hex::encode(tx_hash.as_bytes())),
+        "hash": format!("0x{}", hex::encode(tx_hash.as_bytes())),
+        "timestamp": result.get("submitted_at_unix").and_then(|v| v.as_u64()).unwrap_or(0),
+        "result": result,
+    })
 }
 
 fn block_to_zero_block_json(block: &Block) -> serde_json::Value {
@@ -3186,6 +3490,98 @@ mod tests {
     }
 
     #[test]
+    fn test_zero_transfer_query_and_address_history() {
+        let account_manager = Arc::new(InMemoryAccountManager::new());
+        let tx_pool = Arc::new(TransactionPool::new(
+            TxPoolConfig::default(),
+            account_manager,
+        ));
+        let state_db = Arc::new(StateDb::new(Hash::zero()));
+        let db = Arc::new(MemDatabase::new());
+        let persistent_store = Arc::new(ComputeStore::new(db));
+
+        let domains = Arc::new(InMemoryDomainRegistry::new());
+        domains.upsert_domain(DomainConfig {
+            domain_id: DomainId(0),
+            name: "main".to_string(),
+            vm: "wasm".to_string(),
+            public: true,
+        });
+        let api = RpcApi::with_persistent_compute(
+            RpcConfig::default(),
+            state_db,
+            tx_pool,
+            persistent_store,
+            domains,
+        );
+        let from = parse_address("ZER0x1111111111111111111111111111111111111111").unwrap();
+        let to = parse_address("ZER0x2222222222222222222222222222222222222222").unwrap();
+
+        let mut from_account = Account {
+            address: from,
+            state: AccountState::Active,
+            created_at: 1,
+            updated_at: 1,
+            ..Account::default()
+        };
+        from_account.balance = U256::from(9_000);
+        api.state_db.insert_account(from, from_account);
+
+        let tx_hash = api
+            .zero_transfer(Some(vec![serde_json::json!({
+                "from": "ZER0x1111111111111111111111111111111111111111",
+                "to": "ZER0x2222222222222222222222222222222222222222",
+                "value": "0x3e8"
+            })]))
+            .expect("transfer should succeed")
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let tx_detail = api
+            .zero_get_transaction_by_hash(Some(vec![serde_json::json!(tx_hash.clone())]))
+            .expect("tx detail should succeed");
+        assert_eq!(
+            tx_detail.get("kind").and_then(|v| v.as_str()),
+            Some("transfer")
+        );
+        assert_eq!(
+            tx_detail.get("from").and_then(|v| v.as_str()),
+            Some("ZER0x1111111111111111111111111111111111111111")
+        );
+
+        let list = api
+            .zero_list_transactions(Some(vec![serde_json::json!({
+                "page": 1,
+                "limit": 10,
+                "kind": "transfer"
+            })]))
+            .expect("list should succeed");
+        assert_eq!(list.get("total").and_then(|v| v.as_u64()), Some(1));
+
+        let by_addr = api
+            .zero_get_transactions_by_address(Some(vec![serde_json::json!({
+                "address": "ZER0x1111111111111111111111111111111111111111",
+                "page": 1,
+                "limit": 10
+            })]))
+            .expect("address txs should succeed");
+        assert_eq!(
+            by_addr.get("address").and_then(|v| v.as_str()),
+            Some("ZER0x1111111111111111111111111111111111111111")
+        );
+        assert_eq!(by_addr.get("total").and_then(|v| v.as_u64()), Some(1));
+
+        // Ensure recipient side can also query same transfer.
+        let by_to = api
+            .zero_get_transactions_by_address(Some(vec![serde_json::json!(
+                "ZER0x2222222222222222222222222222222222222222"
+            )]))
+            .expect("recipient txs should succeed");
+        assert_eq!(by_to.get("total").and_then(|v| v.as_u64()), Some(1));
+    }
+
+    #[test]
     fn test_zero_submit_work_rejects_stale_work_id() {
         let api = build_test_api_with_persistent_compute();
         let submit = api.zero_submit_work(Some(vec![serde_json::json!({
@@ -3424,6 +3820,12 @@ mod tests {
     fn test_parse_address_rejects_native1() {
         let err = parse_address("native10000000000000000000000000000000000000001");
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_parse_address_accepts_case_insensitive_prefix() {
+        let addr = parse_address("zer0x1111111111111111111111111111111111111111");
+        assert!(addr.is_ok());
     }
 
     #[test]

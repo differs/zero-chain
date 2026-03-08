@@ -92,6 +92,30 @@ curl -X POST http://127.0.0.1:8545 \
   -d '{"jsonrpc":"2.0","method":"zero_listComputeTxResults","params":[{"page":1,"limit":20}],"id":1}'
 ```
 
+### 11) 按哈希查询交易（新增）
+
+```bash
+curl -X POST http://127.0.0.1:8545 \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"zero_getTransactionByHash","params":["0x..."],"id":1}'
+```
+
+### 12) 最近交易列表（新增，含 transfer + compute）
+
+```bash
+curl -X POST http://127.0.0.1:8545 \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"zero_listTransactions","params":[{"page":1,"limit":20,"kind":"all"}],"id":1}'
+```
+
+### 13) 按地址查询交易列表（新增）
+
+```bash
+curl -X POST http://127.0.0.1:8545 \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"zero_getTransactionsByAddress","params":[{"address":"ZER0x...","page":1,"limit":20}],"id":1}'
+```
+
 ## WebSocket 订阅
 
 ### 建立订阅
