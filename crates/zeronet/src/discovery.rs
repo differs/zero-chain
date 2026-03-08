@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::task::JoinHandle;
 use tokio::time::{interval, Duration, MissedTickBehavior};
-use zerocore::crypto::Hash;
+use zerocore::crypto::{keccak256, Hash};
 
 const DISCOVERY_QUERY_INTERVAL_SECS: u64 = 12;
 
@@ -422,17 +422,27 @@ fn generate_node_id() -> String {
 
 fn calculate_distance(id1: &str, id2: &str) -> Hash {
     // XOR distance
-    let bytes1 = hex::decode(id1).unwrap_or_default();
-    let bytes2 = hex::decode(id2).unwrap_or_default();
+    let bytes1 = normalize_node_id_bytes(id1);
+    let bytes2 = normalize_node_id_bytes(id2);
 
     let mut distance = [0u8; 32];
     for (i, slot) in distance.iter_mut().enumerate() {
-        let b1 = bytes1.get(i).copied().unwrap_or(0);
-        let b2 = bytes2.get(i).copied().unwrap_or(0);
-        *slot = b1 ^ b2;
+        *slot = bytes1[i] ^ bytes2[i];
     }
 
     Hash::from_bytes(distance)
+}
+
+fn normalize_node_id_bytes(id: &str) -> [u8; 32] {
+    let normalized = id.trim().strip_prefix("0x").unwrap_or(id.trim());
+    if let Ok(decoded) = hex::decode(normalized) {
+        if decoded.len() >= 32 {
+            let mut out = [0u8; 32];
+            out.copy_from_slice(&decoded[..32]);
+            return out;
+        }
+    }
+    keccak256(normalized.as_bytes())
 }
 
 fn current_timestamp() -> u64 {
@@ -461,6 +471,15 @@ mod tests {
         let err = NodeRecord::from_enode("enode://peer123@127.0.0.1:not-a-port")
             .expect_err("invalid port should fail");
         assert!(matches!(err, NetworkError::ProtocolError(_)));
+    }
+
+    #[test]
+    fn test_calculate_distance_supports_non_hex_peer_ids() {
+        let same = calculate_distance("peer-A", "peer-A");
+        assert_eq!(same, Hash::zero());
+
+        let different = calculate_distance("peer-A", "peer-B");
+        assert_ne!(different, Hash::zero());
     }
 
     #[test]
