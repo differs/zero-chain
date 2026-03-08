@@ -7,7 +7,7 @@ use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 use prometheus::{Encoder, IntCounterVec, IntGauge, Registry, TextEncoder};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use tokio::sync::oneshot;
 use tower_http::cors::{Any, CorsLayer};
@@ -33,6 +33,8 @@ const MAX_MINING_JOBS: usize = 2_048;
 const MAX_MINING_JOB_AGE_SECS: u64 = 300;
 const MAX_MINER_EXTRA_DATA_BYTES: usize = 64;
 const MAX_SEEN_MINING_SUBMISSIONS: usize = 16_384;
+const MAX_BLOCK_HISTORY: usize = 50_000;
+const MAX_SUBMITTED_COMPUTE_RESULTS: usize = 50_000;
 const TARGET_BLOCK_INTERVAL_SECS: u64 = 10;
 const MIN_MINING_DIFFICULTY: u128 = 250_000;
 const BASE_MINING_DIFFICULTY: u128 = 1_000_000;
@@ -310,9 +312,11 @@ pub struct RpcApi {
     state_db: Arc<StateDb>,
     tx_pool: Arc<TransactionPool>,
     latest_block: RwLock<Option<Block>>,
+    block_history: RwLock<BTreeMap<u64, Block>>,
     compute_store: Arc<dyn ObjectStore>,
     domain_registry: Arc<InMemoryDomainRegistry>,
     submitted_compute_results: RwLock<HashMap<Hash, serde_json::Value>>,
+    submitted_compute_order: RwLock<VecDeque<Hash>>,
     persistent_compute_store: Option<Arc<ComputeStore>>,
     mining_jobs: RwLock<HashMap<String, MiningWork>>,
     mining_job_order: RwLock<VecDeque<String>>,
@@ -360,9 +364,11 @@ impl RpcApi {
             state_db,
             tx_pool,
             latest_block: RwLock::new(None),
+            block_history: RwLock::new(BTreeMap::new()),
             compute_store: Arc::new(InMemoryObjectStore::new()),
             domain_registry,
             submitted_compute_results: RwLock::new(HashMap::new()),
+            submitted_compute_order: RwLock::new(VecDeque::new()),
             persistent_compute_store: None,
             mining_jobs: RwLock::new(HashMap::new()),
             mining_job_order: RwLock::new(VecDeque::new()),
@@ -385,9 +391,11 @@ impl RpcApi {
             state_db,
             tx_pool,
             latest_block: RwLock::new(None),
+            block_history: RwLock::new(BTreeMap::new()),
             compute_store,
             domain_registry,
             submitted_compute_results: RwLock::new(HashMap::new()),
+            submitted_compute_order: RwLock::new(VecDeque::new()),
             persistent_compute_store: None,
             mining_jobs: RwLock::new(HashMap::new()),
             mining_job_order: RwLock::new(VecDeque::new()),
@@ -410,9 +418,11 @@ impl RpcApi {
             state_db,
             tx_pool,
             latest_block: RwLock::new(None),
+            block_history: RwLock::new(BTreeMap::new()),
             compute_store: compute_store.clone(),
             domain_registry,
             submitted_compute_results: RwLock::new(HashMap::new()),
+            submitted_compute_order: RwLock::new(VecDeque::new()),
             persistent_compute_store: Some(compute_store),
             mining_jobs: RwLock::new(HashMap::new()),
             mining_job_order: RwLock::new(VecDeque::new()),
@@ -477,9 +487,12 @@ impl RpcApi {
             "zero_simulateComputeTx" => self.zero_simulate_compute_tx(params),
             "zero_submitComputeTx" => self.zero_submit_compute_tx(params),
             "zero_getComputeTxResult" => self.zero_get_compute_tx_result(params),
+            "zero_listComputeTxResults" => self.zero_list_compute_tx_results(params),
             "zero_getWork" => self.zero_get_work(params),
             "zero_submitWork" => self.zero_submit_work(params),
             "zero_getLatestBlock" => self.zero_get_latest_block(params),
+            "zero_getBlockByNumber" => self.zero_get_block_by_number(params),
+            "zero_getBlocksRange" => self.zero_get_blocks_range(params),
             "zero_importBlock" => self.zero_import_block(params),
             "zero_getMetrics" => self.zero_get_metrics(params),
             "zero_peers" => self.zero_peers(params),
@@ -807,9 +820,19 @@ impl RpcApi {
                 })?;
         }
 
-        self.submitted_compute_results
-            .write()
-            .insert(tx.tx_id.0, result.clone());
+        {
+            let mut results = self.submitted_compute_results.write();
+            let mut order = self.submitted_compute_order.write();
+            let tx_hash = tx.tx_id.0;
+            results.insert(tx_hash, result.clone());
+            order.retain(|existing| existing != &tx_hash);
+            order.push_back(tx_hash);
+            while order.len() > MAX_SUBMITTED_COMPUTE_RESULTS {
+                if let Some(stale) = order.pop_front() {
+                    results.remove(&stale);
+                }
+            }
+        }
 
         Ok(result)
     }
@@ -843,6 +866,58 @@ impl RpcApi {
         }
 
         Ok(serde_json::Value::Null)
+    }
+
+    fn zero_list_compute_tx_results(
+        &self,
+        params: Option<Vec<serde_json::Value>>,
+    ) -> Result<serde_json::Value, RpcErrorObject> {
+        let mut page: usize = 1;
+        let mut limit: usize = 20;
+        if let Some(values) = params {
+            if let Some(first) = values.first() {
+                let obj = first.as_object().ok_or_else(|| {
+                    RpcErrorObject::invalid_params(
+                        "query object required for zero_listComputeTxResults".to_string(),
+                    )
+                })?;
+                if let Some(parsed_page) = parse_u64_opt(obj.get("page"))? {
+                    page = usize::try_from(parsed_page)
+                        .map_err(|_| RpcErrorObject::invalid_params("page overflow".to_string()))?;
+                }
+                if let Some(parsed_limit) = parse_u64_opt(obj.get("limit"))? {
+                    limit = usize::try_from(parsed_limit).map_err(|_| {
+                        RpcErrorObject::invalid_params("limit overflow".to_string())
+                    })?;
+                }
+            }
+        }
+        page = page.max(1);
+        limit = limit.clamp(1, 200);
+        let skip = page.saturating_sub(1).saturating_mul(limit);
+
+        let order = self.submitted_compute_order.read();
+        let results = self.submitted_compute_results.read();
+        let total = order.len();
+        let mut items = Vec::new();
+
+        for tx_hash in order.iter().rev().skip(skip).take(limit) {
+            if let Some(result) = results.get(tx_hash) {
+                items.push(serde_json::json!({
+                    "tx_id": format!("0x{}", hex::encode(tx_hash.as_bytes())),
+                    "result": result.clone(),
+                }));
+            }
+        }
+
+        let has_more = skip.saturating_add(items.len()) < total;
+        Ok(serde_json::json!({
+            "page": page,
+            "limit": limit,
+            "total": total,
+            "has_more": has_more,
+            "items": items,
+        }))
     }
 
     fn zero_get_work(
@@ -1074,6 +1149,7 @@ impl RpcApi {
             transactions: Vec::new(),
             uncles: Vec::new(),
         };
+        self.store_block(block.clone());
         *self.latest_block.write() = Some(block);
         set_global_synced_height(header.number.as_u64());
         self.credit_block_reward(header.coinbase, header.number);
@@ -1139,6 +1215,69 @@ impl RpcApi {
         Ok(block_to_zero_block_json(&self.current_head_block()))
     }
 
+    fn zero_get_block_by_number(
+        &self,
+        params: Option<Vec<serde_json::Value>>,
+    ) -> Result<serde_json::Value, RpcErrorObject> {
+        let params = params.ok_or(RpcErrorObject::invalid_params("Missing params".to_string()))?;
+        let number = parse_u64_opt(params.first())?
+            .ok_or_else(|| RpcErrorObject::invalid_params("number is required".to_string()))?;
+        let block = self.block_by_number(number);
+        Ok(block
+            .as_ref()
+            .map(block_to_zero_block_json)
+            .unwrap_or(serde_json::Value::Null))
+    }
+
+    fn zero_get_blocks_range(
+        &self,
+        params: Option<Vec<serde_json::Value>>,
+    ) -> Result<serde_json::Value, RpcErrorObject> {
+        let latest = self.current_head_block().header.number.as_u64();
+        let mut from: Option<u64> = None;
+        let mut to: Option<u64> = None;
+        let mut limit: usize = 20;
+
+        if let Some(values) = params {
+            if let Some(first) = values.first() {
+                let obj = first.as_object().ok_or_else(|| {
+                    RpcErrorObject::invalid_params(
+                        "query object required for zero_getBlocksRange".to_string(),
+                    )
+                })?;
+                from = parse_u64_opt(obj.get("from"))?;
+                to = parse_u64_opt(obj.get("to"))?;
+                if let Some(parsed_limit) = parse_u64_opt(obj.get("limit"))? {
+                    limit = usize::try_from(parsed_limit).map_err(|_| {
+                        RpcErrorObject::invalid_params("limit overflow".to_string())
+                    })?;
+                }
+            }
+        }
+        limit = limit.clamp(1, 500);
+        let to = to.unwrap_or(latest).min(latest);
+        let from = from
+            .unwrap_or_else(|| to.saturating_sub(limit as u64).saturating_add(1))
+            .min(to);
+
+        let mut items = Vec::new();
+        for number in (from..=to).rev() {
+            if items.len() >= limit {
+                break;
+            }
+            if let Some(block) = self.block_by_number(number) {
+                items.push(block_to_zero_block_json(&block));
+            }
+        }
+
+        Ok(serde_json::json!({
+            "from": from,
+            "to": to,
+            "limit": limit,
+            "items": items,
+        }))
+    }
+
     fn current_head_block(&self) -> Block {
         let synced_height = global_synced_height();
         let latest = self.latest_block.read().clone();
@@ -1163,11 +1302,31 @@ impl RpcApi {
             return Some(create_genesis_block());
         }
 
+        if let Some(found) = self.block_history.read().get(&number).cloned() {
+            return Some(found);
+        }
+
         self.latest_block
             .read()
             .as_ref()
             .filter(|block| block.header.number.as_u64() == number)
             .cloned()
+            .or_else(|| {
+                let head = self.current_head_block();
+                (head.header.number.as_u64() == number).then_some(head)
+            })
+    }
+
+    fn store_block(&self, block: Block) {
+        let height = block.header.number.as_u64();
+        let mut history = self.block_history.write();
+        history.insert(height, block);
+        while history.len() > MAX_BLOCK_HISTORY {
+            let Some(oldest) = history.keys().next().copied() else {
+                break;
+            };
+            history.remove(&oldest);
+        }
     }
 
     fn credit_block_reward(&self, coinbase: Address, block_number: U256) {
@@ -1263,11 +1422,13 @@ impl RpcApi {
             base_fee_per_gas: U256::from(1_000_000_000u64),
             hash,
         };
-        *latest = Some(Block {
+        let block = Block {
             header: header.clone(),
             transactions: Vec::new(),
             uncles: Vec::new(),
-        });
+        };
+        self.store_block(block.clone());
+        *latest = Some(block);
         set_global_synced_height(number);
 
         Ok(serde_json::json!({
@@ -2557,6 +2718,33 @@ mod tests {
         tx_json
     }
 
+    fn mine_one_block(api: &RpcApi, nonce: u64, miner: &str) -> serde_json::Value {
+        let work = api.zero_get_work(None).expect("work should be available");
+        let work_id = work["work_id"].as_str().unwrap().to_string();
+        let prev_hash = work["prev_hash"].as_str().unwrap().to_string();
+        let height = work["height"].as_u64().unwrap();
+        {
+            let mut jobs = api.mining_jobs.write();
+            if let Some(job) = jobs.get_mut(&work_id) {
+                job.target_leading_zero_bytes = 0;
+            }
+        }
+        let prev_hash_bytes =
+            hex::decode(prev_hash.strip_prefix("0x").unwrap_or(&prev_hash)).unwrap();
+        let mut data = Vec::new();
+        data.extend_from_slice(&prev_hash_bytes);
+        data.extend_from_slice(&height.to_be_bytes());
+        data.extend_from_slice(&nonce.to_be_bytes());
+        let digest = zerocore::crypto::keccak256(&data);
+        api.zero_submit_work(Some(vec![serde_json::json!({
+            "work_id": work_id,
+            "nonce": nonce,
+            "hash_hex": format!("0x{}", hex::encode(digest)),
+            "miner": miner
+        })]))
+        .expect("submit work")
+    }
+
     #[test]
     fn test_parse_compute_tx_accepts_ed25519_witness_and_owner() {
         let signer = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
@@ -2801,6 +2989,135 @@ mod tests {
         let latest = api.zero_get_latest_block(None).expect("latest block");
         assert_eq!(latest.get("number").and_then(|v| v.as_str()), Some("0x0"));
         assert!(latest.get("hash").and_then(|v| v.as_str()).is_some());
+    }
+
+    #[test]
+    fn test_zero_get_block_by_number_and_range() {
+        let api = build_test_api_with_persistent_compute();
+
+        assert_eq!(
+            mine_one_block(&api, 101, "range-miner")["accepted"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            mine_one_block(&api, 102, "range-miner")["accepted"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            mine_one_block(&api, 103, "range-miner")["accepted"].as_bool(),
+            Some(true)
+        );
+
+        let block_2 = api
+            .zero_get_block_by_number(Some(vec![serde_json::json!("0x2")]))
+            .expect("block by number should succeed");
+        assert_eq!(block_2.get("number").and_then(|v| v.as_str()), Some("0x2"));
+
+        let range = api
+            .zero_get_blocks_range(Some(vec![serde_json::json!({
+                "from": "0x1",
+                "to": "0x3",
+                "limit": 10
+            })]))
+            .expect("range should succeed");
+        let items = range
+            .get("items")
+            .and_then(|v| v.as_array())
+            .expect("items missing");
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].get("number").and_then(|v| v.as_str()), Some("0x3"));
+        assert_eq!(items[1].get("number").and_then(|v| v.as_str()), Some("0x2"));
+        assert_eq!(items[2].get("number").and_then(|v| v.as_str()), Some("0x1"));
+    }
+
+    #[test]
+    fn test_zero_list_compute_tx_results_returns_paginated_items() {
+        let api = build_test_api_with_persistent_compute();
+        let witness_sig = format!(
+            "0x{}",
+            hex::encode(Signature::new([9; 32], [10; 32], 27).as_bytes())
+        );
+
+        let tx_a = canonicalize_compute_tx_id(serde_json::json!({
+            "tx_id": format!("0x{}", hex::encode([0x21u8; 32])),
+            "domain_id": 0,
+            "chain_id": 10086,
+            "network_id": 1,
+            "command": "Mint",
+            "nonce": 1,
+            "input_set": [],
+            "read_set": [],
+            "output_proposals": [
+                {
+                    "output_id": format!("0x{}", hex::encode([0x31u8; 32])),
+                    "object_id": format!("0x{}", hex::encode([0x41u8; 32])),
+                    "domain_id": 0,
+                    "kind": "State",
+                    "owner": { "type": "Shared" },
+                    "predecessor": null,
+                    "version": 1,
+                    "state": "0x01",
+                    "logic": null
+                }
+            ],
+            "payload": "0x",
+            "deadline_unix_secs": null,
+            "witness": {"signatures": [witness_sig.clone()], "threshold": 1}
+        }));
+        let tx_b = canonicalize_compute_tx_id(serde_json::json!({
+            "tx_id": format!("0x{}", hex::encode([0x22u8; 32])),
+            "domain_id": 0,
+            "chain_id": 10086,
+            "network_id": 1,
+            "command": "Mint",
+            "nonce": 2,
+            "input_set": [],
+            "read_set": [],
+            "output_proposals": [
+                {
+                    "output_id": format!("0x{}", hex::encode([0x32u8; 32])),
+                    "object_id": format!("0x{}", hex::encode([0x42u8; 32])),
+                    "domain_id": 0,
+                    "kind": "State",
+                    "owner": { "type": "Shared" },
+                    "predecessor": null,
+                    "version": 1,
+                    "state": "0x02",
+                    "logic": null
+                }
+            ],
+            "payload": "0x",
+            "deadline_unix_secs": null,
+            "witness": {"signatures": [witness_sig], "threshold": 1}
+        }));
+
+        let _ = api
+            .zero_submit_compute_tx(Some(vec![tx_a]))
+            .expect("submit compute tx a");
+        let _ = api
+            .zero_submit_compute_tx(Some(vec![tx_b]))
+            .expect("submit compute tx b");
+
+        let listed = api
+            .zero_list_compute_tx_results(Some(vec![serde_json::json!({
+                "page": 1,
+                "limit": 1
+            })]))
+            .expect("list tx results");
+        assert_eq!(listed.get("page").and_then(|v| v.as_u64()), Some(1));
+        assert_eq!(listed.get("limit").and_then(|v| v.as_u64()), Some(1));
+        assert_eq!(listed.get("total").and_then(|v| v.as_u64()), Some(2));
+        assert_eq!(listed.get("has_more").and_then(|v| v.as_bool()), Some(true));
+        let items = listed
+            .get("items")
+            .and_then(|v| v.as_array())
+            .expect("items missing");
+        assert_eq!(items.len(), 1);
+        let tx_id = items[0]
+            .get("tx_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        assert!(tx_id.starts_with("0x"));
     }
 
     #[test]

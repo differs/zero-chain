@@ -68,6 +68,30 @@ curl -X POST http://127.0.0.1:8545 \
   -d '{"jsonrpc":"2.0","method":"zero_transfer","params":[{"from":"ZER0x...","to":"ZER0x...","value":"0x64"}],"id":1}'
 ```
 
+### 8) 按高度查询区块（新增）
+
+```bash
+curl -X POST http://127.0.0.1:8545 \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"zero_getBlockByNumber","params":["0x2a"],"id":1}'
+```
+
+### 9) 区块范围查询（新增）
+
+```bash
+curl -X POST http://127.0.0.1:8545 \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"zero_getBlocksRange","params":[{"from":"0x1","to":"0x64","limit":50}],"id":1}'
+```
+
+### 10) 最近 Compute 交易列表（新增）
+
+```bash
+curl -X POST http://127.0.0.1:8545 \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"zero_listComputeTxResults","params":[{"page":1,"limit":20}],"id":1}'
+```
+
 ## WebSocket 订阅
 
 ### 建立订阅
