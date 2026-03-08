@@ -204,7 +204,7 @@ impl PeerManager {
         &self,
         node_record: crate::discovery::NodeRecord,
         tx: mpsc::Sender<ProtocolMessage>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         self.cleanup_expired_bans();
 
         if self.peers.read().len() >= self.max_peers as usize {
@@ -227,7 +227,7 @@ impl PeerManager {
 
         let peer_id = node_record.peer_id.clone();
         if self.peers.read().contains_key(&peer_id) {
-            return Ok(());
+            return Ok(false);
         }
 
         let remote_addr: SocketAddr = format!("{}:{}", node_record.ip, node_record.tcp_port)
@@ -254,13 +254,14 @@ impl PeerManager {
         set_global_peer_count(self.peer_count());
         set_global_peers(self.get_active_peer_infos());
 
-        Ok(())
+        Ok(true)
     }
 
     /// Add peer
     pub fn add_peer(&self, node_record: crate::discovery::NodeRecord) -> Result<()> {
         let (tx, _rx) = mpsc::channel(64);
-        self.add_peer_with_sender(node_record, tx)
+        let _ = self.add_peer_with_sender(node_record, tx)?;
+        Ok(())
     }
 
     /// Remove peer

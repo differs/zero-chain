@@ -446,13 +446,25 @@ impl NetworkService {
                         };
 
                         let (tx, rx) = mpsc::channel(PEER_SEND_BUFFER);
-                        if let Err(err) = peer_manager.add_peer_with_sender(node_record, tx) {
-                            tracing::warn!(
-                                "failed to register inbound peer {}: {}",
-                                remote_addr,
-                                err
-                            );
-                            continue;
+                        match peer_manager.add_peer_with_sender(node_record, tx) {
+                            Ok(inserted) => {
+                                if !inserted {
+                                    tracing::debug!(
+                                        "skipping duplicate inbound peer {} from {}",
+                                        remote_peer_id,
+                                        remote_addr
+                                    );
+                                    continue;
+                                }
+                            }
+                            Err(err) => {
+                                tracing::warn!(
+                                    "failed to register inbound peer {}: {}",
+                                    remote_addr,
+                                    err
+                                );
+                                continue;
+                            }
                         }
 
                         set_global_peer_count(peer_manager.peer_count());
@@ -624,6 +636,16 @@ async fn connect_node_record(
     if peer_manager.get_peer(&record.peer_id).is_some() {
         return Ok(());
     }
+    if peer_manager
+        .get_active_peer_infos()
+        .iter()
+        .any(|peer| {
+            peer.remote_addr.ip().to_string() == record.ip
+                && peer.remote_addr.port() == record.tcp_port
+        })
+    {
+        return Ok(());
+    }
 
     if peer_manager.is_ip_banned(&record.ip) {
         return Err(NetworkError::ConnectionError(format!(
@@ -660,8 +682,17 @@ async fn connect_node_record(
         network_id: remote_network_id,
     };
 
+    if peer_manager.get_peer(&remote_peer_id).is_some() {
+        tracing::debug!("skipping duplicate outbound peer {}", remote_peer_id);
+        return Ok(());
+    }
+
     let (tx, rx) = mpsc::channel(PEER_SEND_BUFFER);
-    peer_manager.add_peer_with_sender(node_record, tx)?;
+    let inserted = peer_manager.add_peer_with_sender(node_record, tx)?;
+    if !inserted {
+        tracing::debug!("skipping duplicate outbound registration {}", remote_peer_id);
+        return Ok(());
+    }
     set_global_peer_count(peer_manager.peer_count());
     set_global_peers(peer_manager.get_active_peer_infos());
 
