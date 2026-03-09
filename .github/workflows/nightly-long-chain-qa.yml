@@ -1,0 +1,97 @@
+name: Nightly Long-Chain QA
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '45 1 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: zero-chain-nightly-long-chain-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  p2p-three-node-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout zero-chain
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust builds
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run P2P 3-node smoke
+        run: bash scripts/p2p_three_node_smoke.sh
+
+      - name: Upload P2P smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zero-chain-p2p-three-node-smoke
+          path: |
+            artifacts/p2p-3node-logs
+          if-no-files-found: warn
+
+  full-chain-native-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+
+    steps:
+      - name: Checkout zero-chain
+        uses: actions/checkout@v4
+        with:
+          path: zero-chain
+
+      - name: Checkout zero-mining-stack
+        uses: actions/checkout@v4
+        with:
+          repository: zero-chain-devs/zero-mining-stack
+          path: zero-mining-stack
+
+      - name: Checkout zero-explore
+        uses: actions/checkout@v4
+        with:
+          repository: zero-chain-devs/zero-explore
+          path: zero-explore
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust builds
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            zero-chain -> target
+            zero-mining-stack -> target
+            zero-explore/backend -> target
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.18.1'
+          cache: npm
+          cache-dependency-path: zero-explore/frontend/package-lock.json
+
+      - name: Run full-chain native E2E
+        working-directory: zero-chain
+        env:
+          MINING_STACK_DIR: ${{ github.workspace }}/zero-mining-stack
+          EXPLORER_DIR: ${{ github.workspace }}/zero-explore
+        run: bash scripts/full_chain_e2e.sh
+
+      - name: Upload full-chain artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zero-chain-full-chain-native-e2e
+          path: |
+            zero-chain/artifacts/release-gate/full-chain-e2e-report.md
+            zero-chain/artifacts/full-chain-e2e-logs
+          if-no-files-found: warn
