@@ -67,3 +67,6 @@ doc/
 # Debug
 debug/
 *.dSYM/
+
+# generated artifacts
+artifacts/
