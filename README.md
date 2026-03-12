@@ -96,6 +96,7 @@ cargo test
 
 ## Engineering Redlines
 
+- 设计理念：`docs/DESIGN_PHILOSOPHY.md`
 - 规范文档：`docs/ENGINEERING_REDLINES.md`
 - CI 阻断：`.github/workflows/redline-guard.yml`
 - 发布门禁包含 redline 检查：`scripts/run_tests.sh`

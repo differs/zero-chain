@@ -24,6 +24,7 @@
 ## 文档入口
 
 - `README.md`
+- `docs/DESIGN_PHILOSOPHY.md`
 - `ARCHITECTURE.md`
 - `docs/GETTING_STARTED.md`
 - `docs/API.md`
