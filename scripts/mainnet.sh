@@ -8,7 +8,6 @@ DATA_DIR="${HOME}/.zerochain/mainnet"
 LOG_FILE="${DATA_DIR}/mainnet.log"
 PID_FILE="${DATA_DIR}/mainnet.pid"
 
-NETWORK_ID=10086
 HTTP_PORT=8545
 WS_PORT=8546
 
@@ -79,10 +78,6 @@ start_node() {
         run
         --http-port "${HTTP_PORT}"
         --ws-port "${WS_PORT}"
-        --rpc-network-id "${NETWORK_ID}"
-        --chain-id "${NETWORK_ID}"
-        --compute-backend rocksdb
-        --compute-db-path "${DATA_DIR}/compute-db"
     )
 
     if [[ "${mine}" == "true" ]]; then

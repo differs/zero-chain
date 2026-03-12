@@ -19,7 +19,7 @@ cargo build --release
 
 ```bash
 # 初始化数据目录
-./target/release/zerochain init
+./target/release/zerochain --network local init
 
 # 启动本地节点
 ./target/release/zerochain --network local run

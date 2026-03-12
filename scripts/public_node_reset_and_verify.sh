@@ -201,7 +201,7 @@ if command -v setsid >/dev/null 2>&1; then
     --p2p-listen-addr 0.0.0.0 \\
     --p2p-listen-port ${REMOTE_P2P_PORT} \\
     --chain-id ${CHAIN_ID} \\
-    --rpc-network-id ${NETWORK_ID} \\
+    --network-id ${NETWORK_ID} \\
     --rpc-coinbase ${COINBASE} \\
     >\"\${LOG_FILE}\" 2>&1 < /dev/null &
 else
@@ -215,7 +215,7 @@ else
     --p2p-listen-addr 0.0.0.0 \\
     --p2p-listen-port ${REMOTE_P2P_PORT} \\
     --chain-id ${CHAIN_ID} \\
-    --rpc-network-id ${NETWORK_ID} \\
+    --network-id ${NETWORK_ID} \\
     --rpc-coinbase ${COINBASE} \\
     >\"\${LOG_FILE}\" 2>&1 < /dev/null &
 fi
@@ -248,7 +248,7 @@ if command -v setsid >/dev/null 2>&1; then
     --p2p-listen-port "${LOCAL_P2P_PORT}" \
     --bootnode "enode://remote-public@${REMOTE_HOST}:${REMOTE_P2P_PORT}" \
     --chain-id "${CHAIN_ID}" \
-    --rpc-network-id "${NETWORK_ID}" \
+    --network-id "${NETWORK_ID}" \
     >"${LOCAL_LOG_FILE}" 2>&1 < /dev/null &
 else
   nohup "${LOCAL_ZEROCHAIN_BIN}" \
@@ -262,7 +262,7 @@ else
     --p2p-listen-port "${LOCAL_P2P_PORT}" \
     --bootnode "enode://remote-public@${REMOTE_HOST}:${REMOTE_P2P_PORT}" \
     --chain-id "${CHAIN_ID}" \
-    --rpc-network-id "${NETWORK_ID}" \
+    --network-id "${NETWORK_ID}" \
     >"${LOCAL_LOG_FILE}" 2>&1 < /dev/null &
 fi
 LOCAL_PID=$!
@@ -290,7 +290,7 @@ if command -v setsid >/dev/null 2>&1; then
     --bootnode "enode://local-public@127.0.0.1:${LOCAL_P2P_PORT}" \
     --bootnode "enode://remote-public@${REMOTE_HOST}:${REMOTE_P2P_PORT}" \
     --chain-id "${CHAIN_ID}" \
-    --rpc-network-id "${NETWORK_ID}" \
+    --network-id "${NETWORK_ID}" \
     --rpc-coinbase "${COINBASE}" \
     >"${OBSERVER_LOG_FILE}" 2>&1 < /dev/null &
 else
@@ -304,7 +304,7 @@ else
     --bootnode "enode://local-public@127.0.0.1:${LOCAL_P2P_PORT}" \
     --bootnode "enode://remote-public@${REMOTE_HOST}:${REMOTE_P2P_PORT}" \
     --chain-id "${CHAIN_ID}" \
-    --rpc-network-id "${NETWORK_ID}" \
+    --network-id "${NETWORK_ID}" \
     --rpc-coinbase "${COINBASE}" \
     >"${OBSERVER_LOG_FILE}" 2>&1 < /dev/null &
 fi

@@ -9,14 +9,14 @@ LOG_DIR="${BASE_DIR}/logs"
 PID_DIR="${BASE_DIR}/pids"
 
 DEFAULT_NODE_COUNT=3
-NETWORK_ID=10087
-BASE_HTTP_PORT=8545
-BASE_WS_PORT=8645
+BASE_HTTP_PORT=18545
+BASE_WS_PORT=18546
+BASE_P2P_PORT=30303
 
 usage() {
-    cat <<'EOF'
+    cat <<'EOF_USAGE'
 Usage:
-  scripts/testnet.sh start [--nodes N] [--clean-data]
+  scripts/testnet.sh start [--nodes N] [--mine] [--coinbase ZER0x...] [--clean-data]
   scripts/testnet.sh stop
   scripts/testnet.sh status
   scripts/testnet.sh logs [NODE_INDEX]
@@ -24,11 +24,12 @@ Usage:
 Examples:
   scripts/testnet.sh start
   scripts/testnet.sh start --nodes 4
+  scripts/testnet.sh start --nodes 3 --mine --coinbase ZER0x0000000000000000000000000000000000000001
   scripts/testnet.sh start --nodes 5 --clean-data
   scripts/testnet.sh status
   scripts/testnet.sh logs 2
   scripts/testnet.sh stop
-EOF
+EOF_USAGE
 }
 
 ensure_binary() {
@@ -53,6 +54,21 @@ ensure_dirs() {
 is_running_pid() {
     local pid="$1"
     kill -0 "${pid}" 2>/dev/null
+}
+
+node_http_port() {
+    local index="$1"
+    echo $((BASE_HTTP_PORT + (index - 1) * 2))
+}
+
+node_ws_port() {
+    local index="$1"
+    echo $((BASE_WS_PORT + (index - 1) * 2))
+}
+
+node_p2p_port() {
+    local index="$1"
+    echo $((BASE_P2P_PORT + index - 1))
 }
 
 stop_nodes() {
@@ -98,7 +114,9 @@ clean_logs() {
 
 start_nodes() {
     local node_count="$1"
-    local clean_data="$2"
+    local mine="$2"
+    local coinbase="$3"
+    local clean_data="$4"
 
     if ! [[ "${node_count}" =~ ^[0-9]+$ ]] || [[ "${node_count}" -lt 1 ]]; then
         echo "Invalid node count: ${node_count}"
@@ -111,39 +129,59 @@ start_nodes() {
     clean_logs
 
     if [[ "${clean_data}" == "true" ]]; then
-        for i in $(seq 1 "${node_count}"); do
-            rm -rf "${BASE_DIR}/node${i}"
-        done
-        echo "Cleaned node data directories for node1..node${node_count}"
+        find "${BASE_DIR}" -maxdepth 1 -mindepth 1 -type d -name 'node*' -exec rm -rf {} +
+        echo "Cleaned node data directories under ${BASE_DIR}"
     fi
 
-    echo "Starting ${node_count} testnet nodes (network_id=${NETWORK_ID})"
+    echo "Starting ${node_count} testnet nodes"
+    if [[ "${mine}" == "true" ]]; then
+        echo "Mining enabled on node1 only"
+    fi
+
+    local bootnode_enode
+    bootnode_enode="enode://testnet-node1@127.0.0.1:$(node_p2p_port 1)"
+
     for i in $(seq 1 "${node_count}"); do
-        local node_dir http_port ws_port log_file pid_file pid
+        local node_dir http_port ws_port p2p_port log_file pid_file pid
         node_dir="${BASE_DIR}/node${i}"
-        http_port=$((BASE_HTTP_PORT + i - 1))
-        ws_port=$((BASE_WS_PORT + i - 1))
+        http_port="$(node_http_port "${i}")"
+        ws_port="$(node_ws_port "${i}")"
+        p2p_port="$(node_p2p_port "${i}")"
         log_file="${LOG_DIR}/node${i}.log"
         pid_file="${PID_DIR}/node${i}.pid"
 
         mkdir -p "${node_dir}"
 
-        nohup "${BIN}" \
-            -d "${node_dir}" \
-            --network testnet \
-            run \
-            --http-port "${http_port}" \
-            --ws-port "${ws_port}" \
-            --rpc-network-id "${NETWORK_ID}" \
-            --chain-id "${NETWORK_ID}" \
-            >"${log_file}" 2>&1 &
+        local args=(
+            -d "${node_dir}"
+            --network testnet
+            run
+            --http-port "${http_port}"
+            --ws-port "${ws_port}"
+            --p2p-listen-addr "127.0.0.1"
+            --p2p-listen-port "${p2p_port}"
+        )
 
+        if [[ "${i}" -gt 1 ]]; then
+            args+=(--bootnode "${bootnode_enode}")
+        fi
+        if [[ -n "${coinbase}" ]]; then
+            args+=(--rpc-coinbase "${coinbase}")
+        fi
+        if [[ "${i}" -eq 1 && "${mine}" == "true" ]]; then
+            args+=(--mine)
+            if [[ -n "${coinbase}" ]]; then
+                args+=(--coinbase "${coinbase}")
+            fi
+        fi
+
+        nohup "${BIN}" "${args[@]}" >"${log_file}" 2>&1 &
         pid=$!
         echo "${pid}" > "${pid_file}"
         sleep 0.5
 
         if is_running_pid "${pid}"; then
-            echo "Started node${i}: pid=${pid}, http=${http_port}, ws=${ws_port}, log=${log_file}"
+            echo "Started node${i}: pid=${pid}, http=${http_port}, ws=${ws_port}, p2p=${p2p_port}, log=${log_file}"
         else
             echo "Failed to start node${i}. Last log output:"
             tail -n 40 "${log_file}" || true
@@ -179,17 +217,18 @@ status_nodes() {
     ensure_dirs
     local found=0
 
-    printf "%-8s %-8s %-10s %-8s %-8s %s\n" "NODE" "PID" "STATUS" "HTTP" "WS" "LOG"
+    printf "%-8s %-8s %-10s %-8s %-8s %-8s %s\n" "NODE" "PID" "STATUS" "HTTP" "WS" "P2P" "LOG"
     for pid_file in "${PID_DIR}"/node*.pid; do
         [[ -f "${pid_file}" ]] || continue
         found=1
 
-        local name index pid status http_port ws_port
+        local name index pid status http_port ws_port p2p_port
         name="$(basename "${pid_file}" .pid)"
         index="${name#node}"
         pid="$(cat "${pid_file}" 2>/dev/null || true)"
-        http_port=$((BASE_HTTP_PORT + index - 1))
-        ws_port=$((BASE_WS_PORT + index - 1))
+        http_port="$(node_http_port "${index}")"
+        ws_port="$(node_ws_port "${index}")"
+        p2p_port="$(node_p2p_port "${index}")"
 
         if [[ -n "${pid}" ]] && is_running_pid "${pid}"; then
             status="running"
@@ -197,8 +236,8 @@ status_nodes() {
             status="stopped"
         fi
 
-        printf "%-8s %-8s %-10s %-8s %-8s %s\n" \
-            "${name}" "${pid:-n/a}" "${status}" "${http_port}" "${ws_port}" "${LOG_DIR}/${name}.log"
+        printf "%-8s %-8s %-10s %-8s %-8s %-8s %s\n" \
+            "${name}" "${pid:-n/a}" "${status}" "${http_port}" "${ws_port}" "${p2p_port}" "${LOG_DIR}/${name}.log"
     done
 
     if [[ "${found}" -eq 0 ]]; then
@@ -223,6 +262,8 @@ shift || true
 case "${command}" in
     start)
         node_count="${DEFAULT_NODE_COUNT}"
+        mine="false"
+        coinbase=""
         clean_data="false"
         while [[ $# -gt 0 ]]; do
             case "$1" in
@@ -230,23 +271,26 @@ case "${command}" in
                     node_count="${2:-}"
                     shift 2
                     ;;
-                ''|*[!0-9]*)
-                    if [[ "$1" == "--clean-data" ]]; then
-                        clean_data="true"
-                        shift
-                    else
-                        echo "Unknown option for start: $1"
-                        usage
-                        exit 1
-                    fi
+                --mine)
+                    mine="true"
+                    shift
+                    ;;
+                --coinbase)
+                    coinbase="${2:-}"
+                    shift 2
+                    ;;
+                --clean-data)
+                    clean_data="true"
+                    shift
                     ;;
                 *)
-                    node_count="$1"
-                    shift
+                    echo "Unknown option for start: $1"
+                    usage
+                    exit 1
                     ;;
             esac
         done
-        start_nodes "${node_count}" "${clean_data}"
+        start_nodes "${node_count}" "${mine}" "${coinbase}" "${clean_data}"
         ;;
     stop)
         stop_nodes

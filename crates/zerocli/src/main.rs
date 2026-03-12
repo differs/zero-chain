@@ -25,13 +25,9 @@ struct Cli {
     #[arg(short, long, default_value = "info")]
     log_level: String,
 
-    /// Data directory
-    #[arg(short, long, default_value = "~/.zerochain")]
-    data_dir: String,
-
-    /// Network ID
-    #[arg(short, long, default_value = "10086")]
-    network_id: u64,
+    /// Data directory override
+    #[arg(short, long)]
+    data_dir: Option<String>,
 
     /// Network profile (mainnet|testnet|devnet|local)
     #[arg(long, default_value = "local")]
@@ -69,21 +65,21 @@ enum Commands {
         #[arg(long)]
         coinbase: Option<String>,
 
-        /// HTTP RPC port
-        #[arg(long, default_value = "8545")]
-        http_port: u16,
+        /// HTTP RPC port override (default follows --network)
+        #[arg(long)]
+        http_port: Option<u16>,
 
-        /// WebSocket RPC port
-        #[arg(long, default_value = "8546")]
-        ws_port: u16,
+        /// WebSocket RPC port override (default follows --network)
+        #[arg(long)]
+        ws_port: Option<u16>,
 
-        /// Compute persistent backend (mem|rocksdb|redb)
-        #[arg(long, default_value = "mem")]
-        compute_backend: String,
+        /// Compute persistent backend override (default follows --network)
+        #[arg(long)]
+        compute_backend: Option<String>,
 
-        /// Compute database path for rocksdb/redb
-        #[arg(long, default_value = "./data/compute-db")]
-        compute_db_path: String,
+        /// Compute database path override for rocksdb/redb
+        #[arg(long)]
+        compute_db_path: Option<String>,
 
         /// Optional chain id override (hex or decimal)
         #[arg(long)]
@@ -91,7 +87,7 @@ enum Commands {
 
         /// Optional network id override (decimal)
         #[arg(long)]
-        rpc_network_id: Option<u64>,
+        network_id: Option<u64>,
 
         /// Optional coinbase override
         #[arg(long)]
@@ -318,24 +314,31 @@ enum BlockAction {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cli = Cli::parse();
-    let data_dir = expand_data_dir(&cli.data_dir);
-    let rpc_url = cli
-        .rpc_url
-        .clone()
-        .unwrap_or_else(|| default_rpc_url_for_network(&cli.network));
+    let Cli {
+        log_level,
+        data_dir,
+        network,
+        rpc_url,
+        config,
+        otel_enabled,
+        otel_endpoint,
+        command,
+    } = Cli::parse();
+    let profile = NetworkProfile::parse(&network)?;
+    let rpc_url = rpc_url.unwrap_or_else(|| profile.default_rpc_url());
+    let shared_data_dir = resolve_shared_data_dir(data_dir.as_deref());
 
     // Initialize logging / tracing
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         format!(
             "info,zeroccore={},zeronet={},zeroapi={}",
-            cli.log_level, cli.log_level, cli.log_level
+            log_level, log_level, log_level
         )
         .into()
     });
 
-    if cli.otel_enabled {
-        let tracer = init_otel_tracer(&cli.otel_endpoint)?;
+    if otel_enabled {
+        let tracer = init_otel_tracer(&otel_endpoint)?;
         tracing_subscriber::registry()
             .with(env_filter)
             .with(tracing_subscriber::fmt::layer())
@@ -348,7 +351,7 @@ async fn main() -> Result<()> {
             .init();
     }
 
-    match cli.command {
+    match command {
         Some(Commands::Run {
             mine,
             coinbase,
@@ -357,7 +360,7 @@ async fn main() -> Result<()> {
             compute_backend,
             compute_db_path,
             chain_id,
-            rpc_network_id,
+            network_id,
             rpc_coinbase,
             rpc_auth_token,
             rpc_rate_limit_per_minute,
@@ -374,23 +377,32 @@ async fn main() -> Result<()> {
             p2p_max_gossip_per_peer_per_minute,
             p2p_bootnode_retry_interval_secs,
         }) => {
-            let mut api_config = if let Some(path) = &cli.config {
-                commands::init::load_api_config(path)?
+            let data_dir = resolve_node_data_dir(data_dir.as_deref(), profile);
+            let mut api_config = if let Some(path) = &config {
+                let mut cfg = commands::init::load_api_config(path)?;
+                profile.apply_defaults(&mut cfg, &data_dir);
+                cfg
             } else {
-                ApiConfig::default()
+                profile.default_api_config(&data_dir)
             };
 
-            let profile = NetworkProfile::parse(&cli.network)?;
-            profile.apply_defaults(&mut api_config, &data_dir);
-
             // CLI flags override config file.
-            let backend = parse_compute_backend(&compute_backend)?;
+            let http_port = http_port.unwrap_or(api_config.http_rpc.port);
+            let ws_port = ws_port.unwrap_or(api_config.ws.port);
+            let backend = match compute_backend {
+                Some(value) => parse_compute_backend(&value)?,
+                None => api_config.http_rpc.compute_backend,
+            };
+            let compute_db_path =
+                compute_db_path.unwrap_or_else(|| api_config.http_rpc.compute_db_path.clone());
             let chain_id = match chain_id {
                 Some(value) => parse_u64_decimal_or_hex(&value)?,
                 None => api_config.http_rpc.chain_id,
             };
-            let rpc_network_id = rpc_network_id.unwrap_or(api_config.http_rpc.network_id);
-            let rpc_coinbase = rpc_coinbase.unwrap_or(api_config.http_rpc.coinbase.clone());
+            let network_id = network_id.unwrap_or(api_config.http_rpc.network_id);
+            let rpc_coinbase = rpc_coinbase
+                .or_else(|| coinbase.clone())
+                .unwrap_or_else(|| api_config.http_rpc.coinbase.clone());
 
             api_config.http_rpc = RpcConfig {
                 address: "127.0.0.1".to_string(),
@@ -398,7 +410,7 @@ async fn main() -> Result<()> {
                 compute_backend: backend,
                 compute_db_path,
                 chain_id,
-                network_id: rpc_network_id,
+                network_id,
                 coinbase: rpc_coinbase,
                 mining_enabled: mine,
                 auth_token: rpc_auth_token,
@@ -455,16 +467,23 @@ async fn main() -> Result<()> {
             .await?;
         }
         Some(Commands::Init) => {
+            let data_dir = resolve_node_data_dir(data_dir.as_deref(), profile);
             commands::init::init_data_dir(&data_dir)?;
+            let api_config = profile.default_api_config(&data_dir);
             let cfg_path = format!("{}/api-config.json", &data_dir);
-            commands::init::write_default_api_config(&cfg_path)?;
-            println!("Default API config written to {}", cfg_path);
+            commands::init::write_api_config(&cfg_path, &api_config)?;
+            println!(
+                "Initialized {} profile under {}",
+                profile.as_str(),
+                data_dir
+            );
+            println!("API config written to {}", cfg_path);
         }
         Some(Commands::Account { action }) => {
-            commands::account::handle_account(action, &data_dir, &rpc_url).await?;
+            commands::account::handle_account(action, &shared_data_dir, &rpc_url).await?;
         }
         Some(Commands::Transaction { action }) => {
-            commands::transaction::handle_transaction(action, &data_dir, &rpc_url).await?;
+            commands::transaction::handle_transaction(action, &shared_data_dir, &rpc_url).await?;
         }
         Some(Commands::Block { action }) => {
             commands::block::handle_block(format!("{:?}", action)).await?;
@@ -477,7 +496,7 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Wallet { action }) => {
             let cmd = map_wallet_action(action)?;
-            commands::wallet::handle_wallet(&data_dir, cmd).await?;
+            commands::wallet::handle_wallet(&shared_data_dir, cmd).await?;
         }
         None => {
             // Default: show help
@@ -516,6 +535,17 @@ fn expand_data_dir(input: &str) -> String {
         }
     }
     input.to_string()
+}
+
+fn resolve_shared_data_dir(input: Option<&str>) -> String {
+    expand_data_dir(input.unwrap_or("~/.zerochain"))
+}
+
+fn resolve_node_data_dir(input: Option<&str>, profile: NetworkProfile) -> String {
+    match input {
+        Some(value) => expand_data_dir(value),
+        None => format!("{}/{}", resolve_shared_data_dir(None), profile.as_str()),
+    }
 }
 
 fn parse_wallet_scheme(value: &str) -> Result<WalletScheme> {
@@ -617,44 +647,61 @@ impl NetworkProfile {
         }
     }
 
-    fn apply_defaults(self, cfg: &mut ApiConfig, data_dir: &str) {
+    fn default_http_port(self) -> u16 {
         match self {
-            Self::Mainnet => {
-                cfg.http_rpc.port = 8545;
-                cfg.ws.port = 8546;
-                cfg.http_rpc.chain_id = 10086;
-                cfg.http_rpc.network_id = 10086;
-                if cfg.http_rpc.compute_db_path == "./data/compute-db" {
-                    cfg.http_rpc.compute_db_path = format!("{}/mainnet/compute-db", data_dir);
-                }
-            }
-            Self::Testnet => {
-                cfg.http_rpc.port = 18545;
-                cfg.ws.port = 18546;
-                cfg.http_rpc.chain_id = 10087;
-                cfg.http_rpc.network_id = 10087;
-                if cfg.http_rpc.compute_db_path == "./data/compute-db" {
-                    cfg.http_rpc.compute_db_path = format!("{}/testnet/compute-db", data_dir);
-                }
-            }
-            Self::Devnet => {
-                cfg.http_rpc.port = 28545;
-                cfg.ws.port = 28546;
-                cfg.http_rpc.chain_id = 10088;
-                cfg.http_rpc.network_id = 10088;
-                if cfg.http_rpc.compute_db_path == "./data/compute-db" {
-                    cfg.http_rpc.compute_db_path = format!("{}/devnet/compute-db", data_dir);
-                }
-            }
-            Self::Local => {
-                cfg.http_rpc.port = 8545;
-                cfg.ws.port = 8546;
-                cfg.http_rpc.chain_id = 31337;
-                cfg.http_rpc.network_id = 31337;
-                if cfg.http_rpc.compute_db_path == "./data/compute-db" {
-                    cfg.http_rpc.compute_db_path = format!("{}/local/compute-db", data_dir);
-                }
-            }
+            Self::Mainnet | Self::Local => 8545,
+            Self::Testnet => 18545,
+            Self::Devnet => 28545,
+        }
+    }
+
+    fn default_ws_port(self) -> u16 {
+        match self {
+            Self::Mainnet | Self::Local => 8546,
+            Self::Testnet => 18546,
+            Self::Devnet => 28546,
+        }
+    }
+
+    fn default_chain_id(self) -> u64 {
+        match self {
+            Self::Mainnet => 10086,
+            Self::Testnet => 10087,
+            Self::Devnet => 10088,
+            Self::Local => 31337,
+        }
+    }
+
+    fn default_network_id(self) -> u64 {
+        self.default_chain_id()
+    }
+
+    fn default_compute_backend(self) -> ComputeBackend {
+        match self {
+            Self::Local => ComputeBackend::Mem,
+            Self::Mainnet | Self::Testnet | Self::Devnet => ComputeBackend::RocksDb,
+        }
+    }
+
+    fn default_rpc_url(self) -> String {
+        format!("http://127.0.0.1:{}", self.default_http_port())
+    }
+
+    fn default_api_config(self, data_dir: &str) -> ApiConfig {
+        let mut cfg = ApiConfig::default();
+        self.apply_defaults(&mut cfg, data_dir);
+        cfg.http_rpc.compute_backend = self.default_compute_backend();
+        cfg
+    }
+
+    fn apply_defaults(self, cfg: &mut ApiConfig, data_dir: &str) {
+        cfg.http_rpc.port = self.default_http_port();
+        cfg.ws.port = self.default_ws_port();
+        cfg.http_rpc.chain_id = self.default_chain_id();
+        cfg.http_rpc.network_id = self.default_network_id();
+        cfg.rest.port = self.default_http_port().saturating_add(10);
+        if cfg.http_rpc.compute_db_path == "./data/compute-db" {
+            cfg.http_rpc.compute_db_path = format!("{}/compute-db", data_dir);
         }
     }
 }
@@ -667,14 +714,5 @@ fn parse_u64_decimal_or_hex(value: &str) -> Result<u64> {
     } else {
         v.parse::<u64>()
             .map_err(|e| anyhow::anyhow!("invalid integer '{value}': {e}"))
-    }
-}
-
-fn default_rpc_url_for_network(network: &str) -> String {
-    match network.to_ascii_lowercase().as_str() {
-        "testnet" => "http://127.0.0.1:18545".to_string(),
-        "devnet" => "http://127.0.0.1:28545".to_string(),
-        "mainnet" | "local" => "http://127.0.0.1:8545".to_string(),
-        _ => "http://127.0.0.1:8545".to_string(),
     }
 }

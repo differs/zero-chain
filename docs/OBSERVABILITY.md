@@ -39,7 +39,7 @@ scripts/testnet.sh start --nodes 3 --clean-data
 调用 RPC 方法 `zero_getMetrics`：
 
 ```bash
-curl -s http://127.0.0.1:8545 \
+curl -s http://127.0.0.1:18545 \
   -H 'content-type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"zero_getMetrics","params":[]}' | jq -r '.result.text'
 ```

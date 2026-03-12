@@ -27,14 +27,20 @@ cargo test
 ## Run a Node
 
 ```bash
-# Initialize data directory
-./target/release/zerochain init
+# Initialize data directory (once per network profile)
+./target/release/zerochain --network local init
+./target/release/zerochain --network testnet init
+./target/release/zerochain --network devnet init
+./target/release/zerochain --network mainnet init
 
 # Run local profile
 ./target/release/zerochain --network local run
 
 # Run testnet profile
 ./target/release/zerochain --network testnet run
+
+# Run devnet profile
+./target/release/zerochain --network devnet run
 
 # Run mainnet profile
 ./target/release/zerochain --network mainnet run
@@ -70,6 +76,10 @@ zerochain transaction get --tx-id 0x...
 ## RPC Example
 
 ```bash
+# Default RPC ports:
+# - local/mainnet: 8545
+# - testnet: 18545
+# - devnet: 28545
 curl -X POST http://localhost:8545 \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","method":"zero_getAccount","params":["ZER0x..."],"id":1}'
