@@ -60,13 +60,9 @@ curl -X POST http://127.0.0.1:8545 \
   -d '{"jsonrpc":"2.0","method":"zero_getComputeTxResult","params":["0x..."],"id":1}'
 ```
 
-### 7) 简化余额转账（测试用途）
+### 7) 旧 transfer RPC 已移除
 
-```bash
-curl -X POST http://127.0.0.1:8545 \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"zero_transfer","params":[{"from":"ZER0x...","to":"ZER0x...","value":"0x64"}],"id":1}'
-```
+余额变动与对象更新统一通过 compute 交易完成；节点不再提供 `zero_transfer`。
 
 ### 8) 按高度查询区块（新增）
 
@@ -100,7 +96,7 @@ curl -X POST http://127.0.0.1:8545 \
   -d '{"jsonrpc":"2.0","method":"zero_getTransactionByHash","params":["0x..."],"id":1}'
 ```
 
-### 12) 最近交易列表（新增，含 transfer + compute）
+### 12) 最近交易列表（新增，compute-only）
 
 ```bash
 curl -X POST http://127.0.0.1:8545 \
@@ -115,6 +111,8 @@ curl -X POST http://127.0.0.1:8545 \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","method":"zero_getTransactionsByAddress","params":[{"address":"ZER0x...","page":1,"limit":20}],"id":1}'
 ```
+
+当前节点会返回 `unsupported: true`，因为旧 transfer 索引已移除，地址级交易历史尚未在 compute-only 路径下重建。
 
 ## WebSocket 订阅
 

@@ -1,9 +1,10 @@
+use ed25519_dalek::Signer as _;
 use zeroapi::rpc::{ComputeBackend, JsonRpcRequest, RpcConfig, RpcServer};
 use zerocore::compute::{
     Command, ComputeTx, DomainId, ObjectId, ObjectKind, ObjectReadRef, OutputId, OutputProposal,
     Ownership, Script, TxId, TxSignature, TxWitness, Version,
 };
-use zerocore::crypto::{Hash, Signature};
+use zerocore::crypto::Hash;
 
 fn parse_result(resp: &zeroapi::rpc::JsonRpcResponse) -> serde_json::Value {
     if let Some(result) = &resp.result {
@@ -21,6 +22,8 @@ async fn compute_submit_result_output_smoke() {
     let server = RpcServer::new(config).expect("rpc server should initialize");
     let api = server.api().expect("api should be initialized");
 
+    let signer = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+    let public_key = signer.verifying_key().to_bytes();
     let mut tx = ComputeTx {
         tx_id: TxId(Hash::from_bytes([0xB1u8; 32])),
         domain_id: DomainId(0),
@@ -54,16 +57,19 @@ async fn compute_submit_result_output_smoke() {
         chain_id: Some(10086),
         network_id: Some(1),
         witness: TxWitness {
-            signatures: vec![TxSignature::secp256k1(Signature::new([1; 32], [2; 32], 27))],
+            signatures: vec![],
             threshold: Some(1),
         },
     };
     tx.assign_expected_tx_id();
+    let sig = signer.sign(&tx.signing_preimage()).to_bytes();
+    tx.witness.signatures = vec![TxSignature::ed25519(sig, public_key)];
 
     let tx_id = format!("0x{}", tx.tx_id.0.to_hex());
     let output_id = format!("0x{}", hex::encode([0xB2u8; 32]));
     let object_id = format!("0x{}", hex::encode([0xB3u8; 32]));
     let sig_hex = format!("0x{}", hex::encode(&tx.witness.signatures[0].bytes));
+    let public_key_hex = format!("0x{}", hex::encode(public_key));
 
     let submit_req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
@@ -90,7 +96,11 @@ async fn compute_submit_result_output_smoke() {
             }],
             "payload": "0x",
             "deadline_unix_secs": null,
-            "witness": {"signatures": [sig_hex], "threshold": 1}
+            "witness": {"signatures": [{
+                "scheme": "ed25519",
+                "signature": sig_hex,
+                "public_key": public_key_hex
+            }], "threshold": 1}
         })]),
         id: serde_json::json!(1),
     };

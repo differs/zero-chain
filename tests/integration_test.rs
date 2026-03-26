@@ -71,7 +71,7 @@ async fn test_transaction_execution() {
     let recipient_addr = Address::from_public_key(&recipient_key.public_key());
     
     // Fund sender account
-    let mut sender_account = Account::new_signer_account(sender_key.public_key(), sender_addr);
+    let mut sender_account = Account::new_user_account(sender_key.public_key(), sender_addr);
     sender_account.balance = U256::from(1_000_000_000_000_000_000u128);  // 1 ETH
     fixture.account_manager.create_account(
         sender_account.account_type.clone(),
@@ -136,7 +136,7 @@ async fn test_state_transitions() {
     let key = PrivateKey::random();
     let addr = Address::from_public_key(&key.public_key());
     
-    let mut account = Account::new_signer_account(key.public_key(), addr);
+    let mut account = Account::new_user_account(key.public_key(), addr);
     account.balance = U256::from(1_000_000);
     fixture.account_manager.create_account(
         account.account_type.clone(),
@@ -246,9 +246,8 @@ async fn test_account_management() {
     
     // Create account
     let key = PrivateKey::random();
-    let account_type = AccountType::ExternalOwned {
+    let account_type = AccountType::User {
         public_key: key.public_key(),
-        signature_scheme: Default::default(),
     };
     
     let account = manager.create_account(account_type, Default::default()).await.unwrap();

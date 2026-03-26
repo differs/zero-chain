@@ -21,15 +21,12 @@ use zerocore::compute::{
     Script, SignatureScheme, TxSignature, TxWitness, Version,
 };
 use zerocore::crypto::{Address, Hash};
-use zerocore::crypto::{PrivateKey, Signature};
 use zerocore::state::StateDb;
-use zerocore::transaction::{pool::TxPoolConfig, SignedTransaction, TransactionPool};
+use zerocore::transaction::{pool::TxPoolConfig, TransactionPool};
 use zeronet::{
-    global_block_by_number, global_latest_block, global_peer_count, global_peers,
-    global_record_account, global_record_compute_tx, global_record_transfer_tx, global_store_block,
-    global_synced_account, global_synced_compute_tx, global_synced_compute_txs,
-    global_synced_height, global_synced_transfer_tx, global_synced_transfer_txs,
-    set_global_synced_height, SyncComputeTxRecord, SyncTransferTxRecord,
+    global_block_by_number, global_latest_block, global_peer_count, global_peers, global_record_account,
+    global_record_compute_tx, global_store_block, global_synced_account, global_synced_compute_tx,
+    global_synced_compute_txs, global_synced_height, set_global_synced_height, SyncComputeTxRecord,
 };
 use zerostore::db::{KeyValueDB, MemDatabase, RedbDatabase, RocksDb};
 use zerostore::ComputeStore;
@@ -41,7 +38,6 @@ const MAX_MINER_EXTRA_DATA_BYTES: usize = 64;
 const MAX_SEEN_MINING_SUBMISSIONS: usize = 16_384;
 const MAX_BLOCK_HISTORY: usize = 50_000;
 const MAX_SUBMITTED_COMPUTE_RESULTS: usize = 50_000;
-const MAX_TRANSFER_HISTORY: usize = 50_000;
 const TARGET_BLOCK_INTERVAL_SECS: u64 = 10;
 const MIN_MINING_DIFFICULTY: u128 = 250_000;
 const BASE_MINING_DIFFICULTY: u128 = 1_000_000;
@@ -331,8 +327,6 @@ pub struct RpcApi {
     domain_registry: Arc<InMemoryDomainRegistry>,
     submitted_compute_results: RwLock<HashMap<Hash, serde_json::Value>>,
     submitted_compute_order: RwLock<VecDeque<Hash>>,
-    transfer_txs: RwLock<HashMap<Hash, TransferTxRecord>>,
-    transfer_tx_order: RwLock<VecDeque<Hash>>,
     persistent_compute_store: Option<Arc<ComputeStore>>,
     mining_jobs: RwLock<HashMap<String, MiningWork>>,
     mining_job_order: RwLock<VecDeque<String>>,
@@ -365,17 +359,6 @@ struct SubmitWorkRequest {
     miner: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct TransferTxRecord {
-    tx_hash: Hash,
-    from: Address,
-    to: Address,
-    value_hex: String,
-    from_nonce: u64,
-    timestamp: u64,
-    block_number: u64,
-}
-
 impl RpcApi {
     pub fn new(config: RpcConfig, state_db: Arc<StateDb>, tx_pool: Arc<TransactionPool>) -> Self {
         let domain_registry = Arc::new(InMemoryDomainRegistry::new());
@@ -396,8 +379,6 @@ impl RpcApi {
             domain_registry,
             submitted_compute_results: RwLock::new(HashMap::new()),
             submitted_compute_order: RwLock::new(VecDeque::new()),
-            transfer_txs: RwLock::new(HashMap::new()),
-            transfer_tx_order: RwLock::new(VecDeque::new()),
             persistent_compute_store: None,
             mining_jobs: RwLock::new(HashMap::new()),
             mining_job_order: RwLock::new(VecDeque::new()),
@@ -425,8 +406,6 @@ impl RpcApi {
             domain_registry,
             submitted_compute_results: RwLock::new(HashMap::new()),
             submitted_compute_order: RwLock::new(VecDeque::new()),
-            transfer_txs: RwLock::new(HashMap::new()),
-            transfer_tx_order: RwLock::new(VecDeque::new()),
             persistent_compute_store: None,
             mining_jobs: RwLock::new(HashMap::new()),
             mining_job_order: RwLock::new(VecDeque::new()),
@@ -454,8 +433,6 @@ impl RpcApi {
             domain_registry,
             submitted_compute_results: RwLock::new(HashMap::new()),
             submitted_compute_order: RwLock::new(VecDeque::new()),
-            transfer_txs: RwLock::new(HashMap::new()),
-            transfer_tx_order: RwLock::new(VecDeque::new()),
             persistent_compute_store: Some(compute_store),
             mining_jobs: RwLock::new(HashMap::new()),
             mining_job_order: RwLock::new(VecDeque::new()),
@@ -544,7 +521,6 @@ impl RpcApi {
             "zero_importBlock" => self.zero_import_block(params),
             "zero_getMetrics" => self.zero_get_metrics(params),
             "zero_peers" => self.zero_peers(params),
-            "zero_transfer" => self.zero_transfer(params),
 
             _ => Err(RpcErrorObject::method_not_found(method)),
         }
@@ -599,87 +575,6 @@ impl RpcApi {
         _params: Option<Vec<serde_json::Value>>,
     ) -> Result<serde_json::Value, RpcErrorObject> {
         Ok(serde_json::json!(true))
-    }
-
-    fn zero_transfer(
-        &self,
-        params: Option<Vec<serde_json::Value>>,
-    ) -> Result<serde_json::Value, RpcErrorObject> {
-        let params = params.ok_or(RpcErrorObject::invalid_params("Missing params".to_string()))?;
-        let tx = params
-            .first()
-            .and_then(|v| v.as_object())
-            .ok_or_else(|| RpcErrorObject::invalid_params("transfer object missing".to_string()))?;
-
-        let from = tx
-            .get("from")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| RpcErrorObject::invalid_params("from missing".to_string()))
-            .and_then(parse_address)?;
-        let to = tx
-            .get("to")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| RpcErrorObject::invalid_params("to missing".to_string()))
-            .and_then(parse_address)?;
-        let value = tx
-            .get("value")
-            .and_then(|v| v.as_str())
-            .map(parse_u256_hex)
-            .transpose()?
-            .unwrap_or(U256::zero());
-
-        let now = current_unix_secs();
-        let mut from_account = self
-            .state_db
-            .get_account(&from)
-            .ok_or_else(|| RpcErrorObject::invalid_params("from account not found".to_string()))?;
-        if from_account.balance < value {
-            return Err(RpcErrorObject::invalid_params(
-                "insufficient balance".to_string(),
-            ));
-        }
-
-        from_account.balance = from_account.balance.saturating_sub(value);
-        from_account.nonce = from_account.nonce.saturating_add(1);
-        from_account.updated_at = now;
-        self.state_db.insert_account(from, from_account.clone());
-        global_record_account(from_account.clone());
-
-        let mut to_account = self.state_db.get_account(&to).unwrap_or_else(|| Account {
-            address: to,
-            state: AccountState::Active,
-            created_at: now,
-            updated_at: now,
-            ..Account::default()
-        });
-        to_account.balance = to_account.balance.saturating_add(value);
-        to_account.updated_at = now;
-        self.state_db.insert_account(to, to_account.clone());
-        global_record_account(to_account);
-
-        let mut hash_input = Vec::new();
-        hash_input.extend_from_slice(from.as_bytes());
-        hash_input.extend_from_slice(to.as_bytes());
-        hash_input.extend_from_slice(&value.to_big_endian());
-        hash_input.extend_from_slice(&from_account.nonce.to_be_bytes());
-        hash_input.extend_from_slice(&now.to_be_bytes());
-        let tx_hash = Hash::from_bytes(zerocore::crypto::keccak256(&hash_input));
-        let current_block_number = self.current_head_block().header.number.as_u64();
-        let record = TransferTxRecord {
-            tx_hash,
-            from,
-            to,
-            value_hex: format_u256_hex(value),
-            from_nonce: from_account.nonce,
-            timestamp: now,
-            block_number: current_block_number,
-        };
-        self.record_transfer_tx(record);
-
-        Ok(serde_json::json!(format!(
-            "0x{}",
-            hex::encode(tx_hash.as_bytes())
-        )))
     }
 
     // ============ ZeroChain extensions ============
@@ -1046,9 +941,6 @@ impl RpcApi {
             .ok_or_else(|| RpcErrorObject::invalid_params("tx hash must be string".to_string()))
             .and_then(parse_hash)?;
 
-        if let Some(record) = self.transfer_txs.read().get(&tx_hash).cloned() {
-            return Ok(transfer_record_to_json(&record));
-        }
         if let Some(result) = self.submitted_compute_results.read().get(&tx_hash).cloned() {
             return Ok(compute_tx_to_json(tx_hash, &result));
         }
@@ -1065,18 +957,6 @@ impl RpcApi {
                 return Ok(compute_tx_to_json(tx_hash, &value));
             }
         }
-        if let Some(record) = global_synced_transfer_tx(&tx_hash) {
-            let local = TransferTxRecord {
-                tx_hash: record.tx_hash,
-                from: record.from,
-                to: record.to,
-                value_hex: record.value_hex,
-                from_nonce: record.from_nonce,
-                timestamp: record.timestamp,
-                block_number: record.block_number,
-            };
-            return Ok(transfer_record_to_json(&local));
-        }
         if let Some(record) = global_synced_compute_tx(&tx_hash) {
             return Ok(compute_tx_to_json(record.tx_hash, &record.result));
         }
@@ -1090,7 +970,6 @@ impl RpcApi {
     ) -> Result<serde_json::Value, RpcErrorObject> {
         let mut page: usize = 1;
         let mut limit: usize = 20;
-        let mut include_transfer = true;
         let mut include_compute = true;
         if let Some(values) = params {
             if let Some(first) = values.first() {
@@ -1110,21 +989,10 @@ impl RpcApi {
                 }
                 if let Some(kind) = obj.get("kind").and_then(|v| v.as_str()) {
                     match kind {
-                        "all" => {
-                            include_transfer = true;
-                            include_compute = true;
-                        }
-                        "transfer" => {
-                            include_transfer = true;
-                            include_compute = false;
-                        }
-                        "compute" => {
-                            include_transfer = false;
-                            include_compute = true;
-                        }
+                        "all" | "compute" => include_compute = true,
                         _ => {
                             return Err(RpcErrorObject::invalid_params(
-                                "kind must be one of all|transfer|compute".to_string(),
+                                "kind must be one of all|compute".to_string(),
                             ));
                         }
                     }
@@ -1136,32 +1004,6 @@ impl RpcApi {
         limit = limit.clamp(1, 200);
         let skip = page.saturating_sub(1).saturating_mul(limit);
         let mut items: Vec<(u64, serde_json::Value)> = Vec::new();
-
-        if include_transfer {
-            let order = self.transfer_tx_order.read();
-            let txs = self.transfer_txs.read();
-            let mut seen = HashSet::new();
-            for tx_hash in order.iter().rev() {
-                if let Some(record) = txs.get(tx_hash) {
-                    items.push((record.timestamp, transfer_record_to_json(record)));
-                    seen.insert(*tx_hash);
-                }
-            }
-            for record in global_synced_transfer_txs().into_iter().rev() {
-                if seen.insert(record.tx_hash) {
-                    let local = TransferTxRecord {
-                        tx_hash: record.tx_hash,
-                        from: record.from,
-                        to: record.to,
-                        value_hex: record.value_hex,
-                        from_nonce: record.from_nonce,
-                        timestamp: record.timestamp,
-                        block_number: record.block_number,
-                    };
-                    items.push((local.timestamp, transfer_record_to_json(&local)));
-                }
-            }
-        }
 
         if include_compute {
             let order = self.submitted_compute_order.read();
@@ -1262,54 +1104,15 @@ impl RpcApi {
             .ok_or_else(|| RpcErrorObject::invalid_params("address is required".to_string()))?;
         page = page.max(1);
         limit = limit.clamp(1, 200);
-        let skip = page.saturating_sub(1).saturating_mul(limit);
-
-        let order = self.transfer_tx_order.read();
-        let txs = self.transfer_txs.read();
-        let mut seen = HashSet::new();
-        let mut filtered = Vec::new();
-        for tx_hash in order.iter().rev() {
-            if let Some(record) = txs.get(tx_hash) {
-                if record.from == address || record.to == address {
-                    filtered.push(transfer_record_to_json(record));
-                    seen.insert(*tx_hash);
-                }
-            }
-        }
-        for record in global_synced_transfer_txs().into_iter().rev() {
-            if seen.contains(&record.tx_hash) {
-                continue;
-            }
-            if record.from == address || record.to == address {
-                let local = TransferTxRecord {
-                    tx_hash: record.tx_hash,
-                    from: record.from,
-                    to: record.to,
-                    value_hex: record.value_hex,
-                    from_nonce: record.from_nonce,
-                    timestamp: record.timestamp,
-                    block_number: record.block_number,
-                };
-                filtered.push(transfer_record_to_json(&local));
-                seen.insert(local.tx_hash);
-            }
-        }
-
-        let total = filtered.len();
-        let items = filtered
-            .into_iter()
-            .skip(skip)
-            .take(limit)
-            .collect::<Vec<_>>();
-        let has_more = skip.saturating_add(items.len()) < total;
-
         Ok(serde_json::json!({
             "address": format_zero_address(address),
             "page": page,
             "limit": limit,
-            "total": total,
-            "has_more": has_more,
-            "items": items,
+            "total": 0,
+            "has_more": false,
+            "items": [],
+            "unsupported": true,
+            "reason": "address transaction history is not supported on compute-only nodes",
         }))
     }
 
@@ -1740,29 +1543,6 @@ impl RpcApi {
         global_store_block(block);
     }
 
-    fn record_transfer_tx(&self, record: TransferTxRecord) {
-        let tx_hash = record.tx_hash;
-        global_record_transfer_tx(SyncTransferTxRecord {
-            tx_hash,
-            from: record.from,
-            to: record.to,
-            value_hex: record.value_hex.clone(),
-            from_nonce: record.from_nonce,
-            timestamp: record.timestamp,
-            block_number: record.block_number,
-        });
-        let mut txs = self.transfer_txs.write();
-        let mut order = self.transfer_tx_order.write();
-        txs.insert(tx_hash, record);
-        order.retain(|h| h != &tx_hash);
-        order.push_back(tx_hash);
-        while order.len() > MAX_TRANSFER_HISTORY {
-            if let Some(stale) = order.pop_front() {
-                txs.remove(&stale);
-            }
-        }
-    }
-
     fn credit_block_reward(&self, coinbase: Address, block_number: U256) {
         let reward = block_reward_for_height(block_number.as_u64());
         if reward.is_zero() {
@@ -1822,13 +1602,14 @@ impl RpcApi {
         let extra_data = parse_bytes_hex_opt(block.get("extra_data"))?.unwrap_or_default();
         let transactions = block
             .get("transactions")
-            .map(|value| {
-                serde_json::from_value::<Vec<SignedTransaction>>(value.clone()).map_err(|e| {
-                    RpcErrorObject::invalid_params(format!("transactions decode failed: {e}"))
-                })
-            })
-            .transpose()?
+            .and_then(|value| value.as_array())
+            .cloned()
             .unwrap_or_default();
+        if !transactions.is_empty() {
+            return Err(RpcErrorObject::invalid_params(
+                "legacy block transactions are not supported".to_string(),
+            ));
+        }
 
         let mut latest = self.latest_block.write();
         if let Some(current) = latest.as_ref() {
@@ -1853,7 +1634,7 @@ impl RpcApi {
             uncle_hashes: Vec::new(),
             coinbase,
             state_root: Hash::zero(),
-            transactions_root: derive_transactions_root(&transactions),
+            transactions_root: Hash::zero(),
             receipts_root: Hash::zero(),
             number: U256::from(number),
             gas_limit: 30_000_000,
@@ -1868,25 +1649,12 @@ impl RpcApi {
         };
         let block = Block {
             header: header.clone(),
-            transactions: transactions.clone(),
+            transactions: Vec::new(),
             uncles: Vec::new(),
         };
         self.store_block(block.clone());
         *latest = Some(block);
         set_global_synced_height(number);
-        for tx in transactions {
-            if let Some(to) = tx.to() {
-                self.record_transfer_tx(TransferTxRecord {
-                    tx_hash: tx.hash(),
-                    from: tx.sender(),
-                    to,
-                    value_hex: format_u256_hex(tx.value()),
-                    from_nonce: tx.nonce(),
-                    timestamp,
-                    block_number: number,
-                });
-            }
-        }
 
         Ok(serde_json::json!({
             "imported": true,
@@ -1922,20 +1690,6 @@ fn adjust_mining_difficulty(parent_difficulty: U256, parent_timestamp: u64, now:
 
     let bounded = next.clamp(MIN_MINING_DIFFICULTY, MAX_MINING_DIFFICULTY);
     U256::from_u128(bounded)
-}
-
-fn derive_transactions_root(txs: &[SignedTransaction]) -> Hash {
-    if txs.is_empty() {
-        return Hash::zero();
-    }
-    let mut hashes = txs.iter().map(|tx| tx.hash()).collect::<Vec<_>>();
-    hashes.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
-    let mut data = Vec::with_capacity(12 + hashes.len() * 32);
-    data.extend_from_slice(b"ZERO-SYNC-T");
-    for hash in hashes {
-        data.extend_from_slice(hash.as_bytes());
-    }
-    Hash::from_bytes(zerocore::crypto::keccak256(&data))
 }
 
 fn current_unix_secs() -> u64 {
@@ -2396,21 +2150,6 @@ fn format_zero_address(address: Address) -> String {
     format!("ZER0x{}", checksummed)
 }
 
-fn transfer_record_to_json(record: &TransferTxRecord) -> serde_json::Value {
-    serde_json::json!({
-        "kind": "transfer",
-        "tx_hash": format!("0x{}", hex::encode(record.tx_hash.as_bytes())),
-        "hash": format!("0x{}", hex::encode(record.tx_hash.as_bytes())),
-        "from": format_zero_address(record.from),
-        "to": format_zero_address(record.to),
-        "value": record.value_hex,
-        "from_nonce": format!("0x{:x}", record.from_nonce),
-        "timestamp": record.timestamp,
-        "block_number": record.block_number,
-        "status": "executed",
-    })
-}
-
 fn compute_tx_to_json(tx_hash: Hash, result: &serde_json::Value) -> serde_json::Value {
     serde_json::json!({
         "kind": "compute",
@@ -2599,19 +2338,8 @@ fn parse_witness(v: Option<&serde_json::Value>) -> Result<TxWitness, RpcErrorObj
 
     let mut signatures = Vec::with_capacity(sig_arr.len());
     for raw in sig_arr {
-        if let Some(s) = raw.as_str() {
-            let bytes = hex::decode(s.strip_prefix("0x").unwrap_or(s)).map_err(|e| {
-                RpcErrorObject::invalid_params(format!("invalid signature hex: {e}"))
-            })?;
-            let sig = Signature::from_bytes(&bytes).map_err(|e| {
-                RpcErrorObject::invalid_params(format!("invalid signature bytes: {e}"))
-            })?;
-            signatures.push(TxSignature::secp256k1(sig));
-            continue;
-        }
-
         let obj = raw.as_object().ok_or_else(|| {
-            RpcErrorObject::invalid_params("signature must be string or object".to_string())
+            RpcErrorObject::invalid_params("signature must be object".to_string())
         })?;
         let scheme = obj.get("scheme").and_then(|x| x.as_str()).ok_or_else(|| {
             RpcErrorObject::invalid_params("signature.scheme must be string".to_string())
@@ -2626,12 +2354,6 @@ fn parse_witness(v: Option<&serde_json::Value>) -> Result<TxWitness, RpcErrorObj
             .map_err(|e| RpcErrorObject::invalid_params(format!("invalid signature hex: {e}")))?;
 
         match scheme {
-            "secp256k1" => {
-                let sig = Signature::from_bytes(&sig_bytes).map_err(|e| {
-                    RpcErrorObject::invalid_params(format!("invalid signature bytes: {e}"))
-                })?;
-                signatures.push(TxSignature::secp256k1(sig));
-            }
             "ed25519" => {
                 let pubkey_hex =
                     obj.get("public_key")
@@ -2663,7 +2385,7 @@ fn parse_witness(v: Option<&serde_json::Value>) -> Result<TxWitness, RpcErrorObj
             }
             other => {
                 return Err(RpcErrorObject::invalid_params(format!(
-                    "unsupported signature scheme: {other}"
+                    "unsupported signature scheme: {other}; only ed25519 is supported"
                 )));
             }
         }
@@ -3281,6 +3003,31 @@ mod tests {
         tx_json
     }
 
+    fn canonicalize_and_sign_compute_tx(mut tx_json: serde_json::Value) -> serde_json::Value {
+        tx_json = canonicalize_compute_tx_id(tx_json);
+        attach_ed25519_signature(tx_json, 7)
+    }
+
+    fn ed25519_address_from_seed(seed: u8) -> Address {
+        let signer = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]);
+        let verify = signer.verifying_key();
+        let hash = zerocore::crypto::keccak256(&verify.to_bytes());
+        Address::from_slice(&hash[12..]).expect("address should derive from ed25519 key")
+    }
+
+    fn attach_ed25519_signature(mut tx_json: serde_json::Value, seed: u8) -> serde_json::Value {
+        let tx = parse_compute_tx(tx_json.clone()).expect("tx json should parse after canonicalize");
+        let signer = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]);
+        let verify = signer.verifying_key();
+        let sig = signer.sign(&tx.signing_preimage()).to_bytes();
+        tx_json["witness"]["signatures"] = serde_json::json!([{
+            "scheme": "ed25519",
+            "signature": format!("0x{}", hex::encode(sig)),
+            "public_key": format!("0x{}", hex::encode(verify.to_bytes()))
+        }]);
+        tx_json
+    }
+
     fn mine_one_block(api: &RpcApi, nonce: u64, miner: &str) -> serde_json::Value {
         let work = api.zero_get_work(None).expect("work should be available");
         let work_id = work["work_id"].as_str().unwrap().to_string();
@@ -3546,7 +3293,7 @@ mod tests {
     }
 
     #[test]
-    fn test_zero_import_block_with_transactions_updates_tx_index() {
+    fn test_zero_import_block_rejects_legacy_transactions() {
         let api = build_test_api_with_persistent_compute();
         let latest = api.zero_get_latest_block(None).expect("latest block");
         let parent_hash = latest
@@ -3566,9 +3313,7 @@ mod tests {
             31337,
         )
         .sign(&key);
-        let tx_hash_hex = format!("0x{}", hex::encode(signed.hash().as_bytes()));
-
-        let import = api
+        let err = api
             .zero_import_block(Some(vec![serde_json::json!({
                 "hash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 "parent_hash": parent_hash,
@@ -3581,17 +3326,14 @@ mod tests {
                 "extra_data": "0x",
                 "transactions": [signed]
             })]))
-            .expect("import block");
-        assert_eq!(import.get("imported").and_then(|v| v.as_bool()), Some(true));
-
-        let tx = api
-            .zero_get_transaction_by_hash(Some(vec![serde_json::json!(tx_hash_hex.clone())]))
-            .expect("get tx");
+            .expect_err("legacy transactions should be rejected");
+        assert_eq!(err.code, -32602);
         assert_eq!(
-            tx.get("hash").and_then(|v| v.as_str()),
-            Some(tx_hash_hex.as_str())
+            err.data,
+            Some(serde_json::Value::String(
+                "legacy block transactions are not supported".to_string(),
+            ))
         );
-        assert_eq!(tx.get("kind").and_then(|v| v.as_str()), Some("transfer"));
     }
 
     #[test]
@@ -3922,12 +3664,7 @@ mod tests {
     #[test]
     fn test_zero_list_compute_tx_results_returns_paginated_items() {
         let api = build_test_api_with_persistent_compute();
-        let witness_sig = format!(
-            "0x{}",
-            hex::encode(Signature::new([9; 32], [10; 32], 27).as_bytes())
-        );
-
-        let tx_a = canonicalize_compute_tx_id(serde_json::json!({
+        let tx_a = canonicalize_and_sign_compute_tx(serde_json::json!({
             "tx_id": format!("0x{}", hex::encode([0x21u8; 32])),
             "domain_id": 0,
             "chain_id": 10086,
@@ -3951,9 +3688,9 @@ mod tests {
             ],
             "payload": "0x",
             "deadline_unix_secs": null,
-            "witness": {"signatures": [witness_sig.clone()], "threshold": 1}
+            "witness": {"signatures": [], "threshold": 1}
         }));
-        let tx_b = canonicalize_compute_tx_id(serde_json::json!({
+        let tx_b = canonicalize_and_sign_compute_tx(serde_json::json!({
             "tx_id": format!("0x{}", hex::encode([0x22u8; 32])),
             "domain_id": 0,
             "chain_id": 10086,
@@ -3977,7 +3714,7 @@ mod tests {
             ],
             "payload": "0x",
             "deadline_unix_secs": null,
-            "witness": {"signatures": [witness_sig], "threshold": 1}
+            "witness": {"signatures": [], "threshold": 1}
         }));
 
         let _ = api
@@ -4010,194 +3747,27 @@ mod tests {
     }
 
     #[test]
-    fn test_zero_transfer_moves_balance_between_addresses() {
-        let _guard = test_guard();
-        let account_manager = Arc::new(InMemoryAccountManager::new());
-        let tx_pool = Arc::new(TransactionPool::new(
-            TxPoolConfig::default(),
-            account_manager,
-        ));
-        let state_db = Arc::new(StateDb::new(Hash::zero()));
-        let db = Arc::new(MemDatabase::new());
-        let persistent_store = Arc::new(ComputeStore::new(db));
-
-        let domains = Arc::new(InMemoryDomainRegistry::new());
-        domains.upsert_domain(DomainConfig {
-            domain_id: DomainId(0),
-            name: "main".to_string(),
-            vm: "wasm".to_string(),
-            public: true,
-        });
-        let api = RpcApi::with_persistent_compute(
-            RpcConfig::default(),
-            state_db,
-            tx_pool,
-            persistent_store,
-            domains,
-        );
-        let from = parse_address("ZER0x1111111111111111111111111111111111111111").unwrap();
-        let to = parse_address("ZER0x2222222222222222222222222222222222222222").unwrap();
-
-        let mut from_account = Account {
-            address: from,
-            state: AccountState::Active,
-            created_at: 1,
-            updated_at: 1,
-            ..Account::default()
-        };
-        from_account.balance = U256::from(9_000);
-        api.state_db.insert_account(from, from_account);
-
-        let tx_hash = api
-            .zero_transfer(Some(vec![serde_json::json!({
-                "from": "ZER0x1111111111111111111111111111111111111111",
-                "to": "ZER0x2222222222222222222222222222222222222222",
-                "value": "0x3e8"
-            })]))
-            .expect("send tx should succeed");
-        assert!(tx_hash.as_str().unwrap_or_default().starts_with("0x"));
-
-        assert_eq!(api.state_db.get_balance(&from).as_u64(), 8_000);
-        assert_eq!(api.state_db.get_nonce(&from), 1);
-        assert_eq!(api.state_db.get_balance(&to).as_u64(), 1_000);
-    }
-
-    #[test]
-    fn test_zero_transfer_rejects_missing_from_account() {
+    fn test_zero_get_transactions_by_address_returns_explicit_unsupported_response() {
         let api = build_test_api_with_persistent_compute();
-        let err = api
-            .zero_transfer(Some(vec![serde_json::json!({
-                "from": "ZER0x1111111111111111111111111111111111111111",
-                "to": "ZER0x2222222222222222222222222222222222222222",
-                "value": "0x1"
-            })]))
-            .expect_err("from account should be required");
-        assert_eq!(err.code, -32602);
-    }
-
-    #[test]
-    fn test_zero_transfer_rejects_insufficient_balance() {
-        let api = build_test_api_with_persistent_compute();
-        let from = parse_address("ZER0x1111111111111111111111111111111111111111").unwrap();
-
-        let mut from_account = Account {
-            address: from,
-            state: AccountState::Active,
-            created_at: 1,
-            updated_at: 1,
-            ..Account::default()
-        };
-        from_account.balance = U256::from(3u64);
-        api.state_db.insert_account(from, from_account);
-
-        let err = api
-            .zero_transfer(Some(vec![serde_json::json!({
-                "from": "ZER0x1111111111111111111111111111111111111111",
-                "to": "ZER0x2222222222222222222222222222222222222222",
-                "value": "0x4"
-            })]))
-            .expect_err("insufficient balance should fail");
-        assert_eq!(err.code, -32602);
-        assert_eq!(api.state_db.get_balance(&from).as_u64(), 3);
-        assert_eq!(api.state_db.get_nonce(&from), 0);
-    }
-
-    #[test]
-    fn test_zero_transfer_query_and_address_history() {
-        let _guard = test_guard();
-        zeronet::global_replace_transfer_txs(Vec::new());
-        zeronet::global_reset_sync_cache();
-        let account_manager = Arc::new(InMemoryAccountManager::new());
-        let tx_pool = Arc::new(TransactionPool::new(
-            TxPoolConfig::default(),
-            account_manager,
-        ));
-        let state_db = Arc::new(StateDb::new(Hash::zero()));
-        let db = Arc::new(MemDatabase::new());
-        let persistent_store = Arc::new(ComputeStore::new(db));
-
-        let domains = Arc::new(InMemoryDomainRegistry::new());
-        domains.upsert_domain(DomainConfig {
-            domain_id: DomainId(0),
-            name: "main".to_string(),
-            vm: "wasm".to_string(),
-            public: true,
-        });
-        let api = RpcApi::with_persistent_compute(
-            RpcConfig {
-                mining_enabled: true,
-                ..RpcConfig::default()
-            },
-            state_db,
-            tx_pool,
-            persistent_store,
-            domains,
-        );
-        let from = parse_address("ZER0x1111111111111111111111111111111111111111").unwrap();
-        let to = parse_address("ZER0x2222222222222222222222222222222222222222").unwrap();
-
-        let mut from_account = Account {
-            address: from,
-            state: AccountState::Active,
-            created_at: 1,
-            updated_at: 1,
-            ..Account::default()
-        };
-        from_account.balance = U256::from(9_000);
-        api.state_db.insert_account(from, from_account);
-
-        let tx_hash = api
-            .zero_transfer(Some(vec![serde_json::json!({
-                "from": "ZER0x1111111111111111111111111111111111111111",
-                "to": "ZER0x2222222222222222222222222222222222222222",
-                "value": "0x3e8"
-            })]))
-            .expect("transfer should succeed")
-            .as_str()
-            .unwrap()
-            .to_string();
-
-        let tx_detail = api
-            .zero_get_transaction_by_hash(Some(vec![serde_json::json!(tx_hash.clone())]))
-            .expect("tx detail should succeed");
-        assert_eq!(
-            tx_detail.get("kind").and_then(|v| v.as_str()),
-            Some("transfer")
-        );
-        assert_eq!(
-            tx_detail.get("from").and_then(|v| v.as_str()),
-            Some("ZER0x1111111111111111111111111111111111111111")
-        );
-
-        let list = api
-            .zero_list_transactions(Some(vec![serde_json::json!({
-                "page": 1,
-                "limit": 10,
-                "kind": "transfer"
-            })]))
-            .expect("list should succeed");
-        assert_eq!(list.get("total").and_then(|v| v.as_u64()), Some(1));
-
-        let by_addr = api
+        let result = api
             .zero_get_transactions_by_address(Some(vec![serde_json::json!({
                 "address": "ZER0x1111111111111111111111111111111111111111",
                 "page": 1,
                 "limit": 10
             })]))
-            .expect("address txs should succeed");
+            .expect("address history should return explicit unsupported payload");
         assert_eq!(
-            by_addr.get("address").and_then(|v| v.as_str()),
-            Some("ZER0x1111111111111111111111111111111111111111")
+            result.get("unsupported").and_then(|v| v.as_bool()),
+            Some(true)
         );
-        assert_eq!(by_addr.get("total").and_then(|v| v.as_u64()), Some(1));
-
-        // Ensure recipient side can also query same transfer.
-        let by_to = api
-            .zero_get_transactions_by_address(Some(vec![serde_json::json!(
-                "ZER0x2222222222222222222222222222222222222222"
-            )]))
-            .expect("recipient txs should succeed");
-        assert_eq!(by_to.get("total").and_then(|v| v.as_u64()), Some(1));
+        assert_eq!(
+            result.get("total").and_then(|v| v.as_u64()),
+            Some(0)
+        );
+        assert_eq!(
+            result.get("reason").and_then(|v| v.as_str()),
+            Some("address transaction history is not supported on compute-only nodes")
+        );
     }
 
     #[test]
@@ -4309,7 +3879,7 @@ mod tests {
         assert_eq!(
             err.data,
             Some(serde_json::Value::String(
-                "kind must be one of all|transfer|compute".to_string(),
+                "kind must be one of all|compute".to_string(),
             ))
         );
     }
@@ -4634,12 +4204,7 @@ mod tests {
     fn test_zero_simulate_and_submit_compute_tx() {
         let api = build_test_api_with_compute();
 
-        let witness_sig = format!(
-            "0x{}",
-            hex::encode(Signature::new([1; 32], [2; 32], 27).as_bytes())
-        );
-
-        let tx = canonicalize_compute_tx_id(serde_json::json!({
+        let tx = canonicalize_and_sign_compute_tx(serde_json::json!({
             "tx_id": format!("0x{}", hex::encode([0x55u8; 32])),
             "domain_id": 0,
             "chain_id": 10086,
@@ -4663,10 +4228,7 @@ mod tests {
             ],
             "payload": "0x",
             "deadline_unix_secs": null,
-            "witness": {
-                "signatures": [witness_sig],
-                "threshold": 1
-            }
+            "witness": {"signatures": [], "threshold": 1}
         }));
 
         let sim = api
@@ -4696,7 +4258,7 @@ mod tests {
     #[test]
     fn test_zero_simulate_returns_structured_domain_error() {
         let api = build_test_api_with_compute();
-        let tx = serde_json::json!({
+        let tx = canonicalize_and_sign_compute_tx(serde_json::json!({
             "tx_id": format!("0x{}", hex::encode([0x99u8; 32])),
             "domain_id": 9,
             "chain_id": 10086,
@@ -4718,8 +4280,8 @@ mod tests {
             }],
             "payload": "0x",
             "deadline_unix_secs": null,
-            "witness": {"signatures": [format!("0x{}", hex::encode(Signature::new([1; 32], [2; 32], 27).as_bytes()))], "threshold": 1}
-        });
+            "witness": {"signatures": [], "threshold": 1}
+        }));
 
         let sim = api
             .zero_simulate_compute_tx(Some(vec![tx]))
@@ -4740,10 +4302,10 @@ mod tests {
     }
 
     #[test]
-    fn test_zero_simulate_returns_invalid_signature_error() {
+    fn test_zero_simulate_rejects_malformed_witness_signature() {
         let api = build_test_api_with_compute();
 
-        let tx = canonicalize_compute_tx_id(serde_json::json!({
+        let tx = serde_json::json!({
             "tx_id": format!("0x{}", hex::encode([0xD1u8; 32])),
             "domain_id": 0,
             "chain_id": 10086,
@@ -4765,8 +4327,12 @@ mod tests {
             }],
             "payload": "0x",
             "deadline_unix_secs": null,
-            "witness": {"signatures": ["0x0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"], "threshold": 1}
-        }));
+            "witness": {"signatures": [{
+                "scheme": "ed25519",
+                "signature": "0x00",
+                "public_key": "0x0000000000000000000000000000000000000000000000000000000000000000"
+            }], "threshold": 1}
+        });
 
         // Prepare input object for transfer validation.
         let input = ObjectOutput {
@@ -4793,28 +4359,21 @@ mod tests {
         };
         api.compute_store.insert_output(input).unwrap();
 
-        let sim = api
+        let err = api
             .zero_simulate_compute_tx(Some(vec![tx]))
-            .expect("simulate should return result object");
-        assert_eq!(sim.get("ok").and_then(|v| v.as_bool()), Some(false));
+            .expect_err("malformed witness should be rejected during parsing");
+        assert_eq!(err.code, -32602);
         assert_eq!(
-            sim.get("error")
-                .and_then(|v| v.get("code"))
-                .and_then(|v| v.as_str()),
-            Some("invalid_signature")
-        );
-        assert_eq!(
-            sim.get("error")
-                .and_then(|v| v.get("numeric_code"))
-                .and_then(|v| v.as_i64()),
-            Some(3003)
+            err.data,
+            Some(serde_json::Value::String(
+                "ed25519 signature must be 64 bytes".to_string(),
+            ))
         );
     }
 
     #[test]
     fn test_zero_simulate_returns_owner_mismatch_error() {
         let api = build_test_api_with_compute();
-        let signer = PrivateKey::from_bytes([3u8; 32]).unwrap();
 
         let input = ObjectOutput {
             output_id: OutputId(Hash::from_bytes([0xF2; 32])),
@@ -4865,11 +4424,8 @@ mod tests {
             "witness": {"signatures": [], "threshold": 1}
         });
 
-        let parsed = parse_compute_tx(tx.clone()).expect("tx should parse");
-        let sig = signer.sign(&parsed.signing_preimage());
-        tx["witness"]["signatures"] =
-            serde_json::json!([format!("0x{}", hex::encode(sig.as_bytes()))]);
         let tx = canonicalize_compute_tx_id(tx);
+        let tx = attach_ed25519_signature(tx, 3);
 
         let sim = api
             .zero_simulate_compute_tx(Some(vec![tx]))
@@ -4892,8 +4448,7 @@ mod tests {
     #[test]
     fn test_zero_simulate_returns_tx_id_mismatch_error() {
         let api = build_test_api_with_compute();
-        let owner_key = PrivateKey::from_bytes([9u8; 32]).unwrap();
-        let owner_addr = Address::from_public_key(&owner_key.public_key());
+        let owner_addr = ed25519_address_from_seed(9);
 
         let input = ObjectOutput {
             output_id: OutputId(Hash::from_bytes([0xAB; 32])),
@@ -4942,10 +4497,7 @@ mod tests {
             "witness": {"signatures": [], "threshold": 1}
         });
 
-        let parsed = parse_compute_tx(tx.clone()).expect("tx should parse");
-        let sig = owner_key.sign(&parsed.signing_preimage());
-        tx["witness"]["signatures"] =
-            serde_json::json!([format!("0x{}", hex::encode(sig.as_bytes()))]);
+        let tx = attach_ed25519_signature(tx, 9);
 
         let sim = api
             .zero_simulate_compute_tx(Some(vec![tx]))
@@ -4988,12 +4540,7 @@ mod tests {
     #[test]
     fn test_zero_get_compute_tx_result_with_persistent_store() {
         let api = build_test_api_with_persistent_compute();
-        let sig_hex = format!(
-            "0x{}",
-            hex::encode(Signature::new([1; 32], [2; 32], 27).as_bytes())
-        );
-
-        let tx = serde_json::json!({
+        let tx = canonicalize_and_sign_compute_tx(serde_json::json!({
             "tx_id": format!("0x{}", hex::encode([0xA1u8; 32])),
             "domain_id": 0,
             "chain_id": 10086,
@@ -5015,10 +4562,8 @@ mod tests {
             }],
             "payload": "0x",
             "deadline_unix_secs": null,
-            "witness": {"signatures": [sig_hex], "threshold": 1}
-        });
-
-        let tx = canonicalize_compute_tx_id(tx);
+            "witness": {"signatures": [], "threshold": 1}
+        }));
         let tx_id_hex = tx
             .get("tx_id")
             .and_then(|v| v.as_str())

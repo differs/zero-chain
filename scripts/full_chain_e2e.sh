@@ -29,7 +29,6 @@ EXPLORER_FRONTEND_URL="http://127.0.0.1:${EXPLORER_FRONTEND_PORT}"
 
 COINBASE_NATIVE="${COINBASE_NATIVE:-ZER0x526Dc404e751C7d52F6fFF75d563d8D0857C94E9}"
 RECIPIENT_NATIVE="${RECIPIENT_NATIVE:-ZER0x1111111111111111111111111111111111111111}"
-TRANSFER_VALUE_HEX="${TRANSFER_VALUE_HEX:-0x64}"
 MINER_ID="${MINER_ID:-miner-ci-1}"
 
 mkdir -p "${REPORT_DIR}" "${LOG_DIR}"
@@ -222,27 +221,6 @@ if ! printf '%s' "${account_json}" | grep -q "\"address\":\"${COINBASE_NATIVE}\"
   exit 1
 fi
 
-echo "==> Execute transfer"
-recipient_before_json="$(rpc_call "zero_getAccount" "[\"${RECIPIENT_NATIVE}\"]")"
-recipient_before_hex="$(printf '%s' "${recipient_before_json}" | extract_balance_hex)"
-
-send_json="$(rpc_call "zero_transfer" "[{\"from\":\"${COINBASE_NATIVE}\",\"to\":\"${RECIPIENT_NATIVE}\",\"value\":\"${TRANSFER_VALUE_HEX}\"}]")"
-tx_hash="$(printf '%s' "${send_json}" | extract_result_hex)"
-if [[ ! "${tx_hash}" =~ ^0x[0-9a-fA-F]{64}$ ]]; then
-  echo "Unexpected tx hash from zero_transfer: ${send_json}" >&2
-  exit 1
-fi
-
-sleep 1
-recipient_after_json="$(rpc_call "zero_getAccount" "[\"${RECIPIENT_NATIVE}\"]")"
-recipient_after_hex="$(printf '%s' "${recipient_after_json}" | extract_balance_hex)"
-recipient_before_dec="$(hex_to_dec "${recipient_before_hex}")"
-recipient_after_dec="$(hex_to_dec "${recipient_after_hex}")"
-if (( recipient_after_dec <= recipient_before_dec )); then
-  echo "Recipient balance did not increase: ${recipient_before_hex} -> ${recipient_after_hex}" >&2
-  exit 1
-fi
-
 echo "==> Verify explorer API accepts ZER0x and rejects native1"
 explorer_account_json="$(curl -fsS "${EXPLORER_BACKEND_URL}/api/accounts/${COINBASE_NATIVE}")"
 if ! printf '%s' "${explorer_account_json}" | grep -q "\"address\":\"${COINBASE_NATIVE}\""; then
@@ -281,14 +259,8 @@ cat > "${REPORT_FILE}" <<EOF
 - [x] Block number progressed (${block_before_hex} -> ${block_after_hex})
 - [x] Pool shares accepted (>=1, actual ${pool_shares})
 - [x] \`zero_getAccount\` returns canonical \`ZER0x\` address
-- [x] Address-to-address transfer succeeded
 - [x] Explorer \`/api/accounts\` and \`/api/search\` accept \`ZER0x\`
 - [x] Explorer rejects legacy \`native1...\` with HTTP 400
-
-## Transfer Evidence
-
-- tx hash: \`${tx_hash}\`
-- recipient balance: \`${recipient_before_hex}\` -> \`${recipient_after_hex}\`
 EOF
 
 echo "✅ Full-chain E2E passed"

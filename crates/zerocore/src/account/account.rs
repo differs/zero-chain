@@ -526,12 +526,10 @@ pub enum StateEvent {
 /// Account type enumeration
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AccountType {
-    /// Externally signed account
-    ExternalOwned {
+    /// User-controlled account
+    User {
         /// Public key
         public_key: PublicKey,
-        /// Signature scheme
-        signature_scheme: SignatureScheme,
     },
 
     /// Smart contract account
@@ -567,18 +565,6 @@ pub enum AccountType {
         /// Daily limit
         daily_limit: Option<U256>,
     },
-}
-
-/// Signature scheme
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SignatureScheme {
-    /// ECDSA secp256k1
-    #[default]
-    EcdsaSecp256k1,
-    /// Ed25519
-    Ed25519,
-    /// BLS12-381
-    Bls12_381,
 }
 
 /// Social recovery configuration
@@ -699,9 +685,8 @@ impl Default for Account {
     fn default() -> Self {
         Self {
             address: Address::zero(),
-            account_type: AccountType::ExternalOwned {
+            account_type: AccountType::User {
                 public_key: PublicKey::placeholder(),
-                signature_scheme: SignatureScheme::default(),
             },
             version: 1,
             balance: U256::zero(),
@@ -719,15 +704,12 @@ impl Default for Account {
 
 impl Account {
     /// Create a new externally signed account
-    pub fn new_signer_account(public_key: PublicKey, address: Address) -> Self {
+    pub fn new_user_account(public_key: PublicKey, address: Address) -> Self {
         let now = current_timestamp();
 
         Self {
             address,
-            account_type: AccountType::ExternalOwned {
-                public_key,
-                signature_scheme: SignatureScheme::EcdsaSecp256k1,
-            },
+            account_type: AccountType::User { public_key },
             version: 1,
             balance: U256::zero(),
             utxo_refs: Vec::new(),
@@ -783,7 +765,7 @@ impl Account {
         signature: Signature,
     ) -> Result<bool, AccountError> {
         match &self.account_type {
-            AccountType::ExternalOwned { public_key, .. } => signature
+            AccountType::User { public_key } => signature
                 .verify(tx_hash.as_bytes(), public_key)
                 .map_err(|_| AccountError::InvalidSignature),
             AccountType::MultiSig {
@@ -887,7 +869,7 @@ mod tests {
         .unwrap();
         let addr = Address::from_bytes([1u8; 20]);
 
-        let account = Account::new_signer_account(pk, addr);
+        let account = Account::new_user_account(pk, addr);
 
         assert_eq!(account.address, addr);
         assert!(account.balance.is_zero());
@@ -904,7 +886,7 @@ mod tests {
         .unwrap();
         let addr = Address::from_bytes([1u8; 20]);
 
-        let mut account = Account::new_signer_account(pk, addr);
+        let mut account = Account::new_user_account(pk, addr);
 
         // Add balance
         account.update_balance(I256::from(1000)).unwrap();
@@ -925,7 +907,7 @@ mod tests {
         .unwrap();
         let addr = Address::from_bytes([1u8; 20]);
 
-        let mut account = Account::new_signer_account(pk, addr);
+        let mut account = Account::new_user_account(pk, addr);
 
         // Inactive -> Active (deposit)
         account

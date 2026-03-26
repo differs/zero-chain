@@ -168,9 +168,8 @@ impl StateExecutor {
             Some(account) => account,
             None => Account {
                 address: miner,
-                account_type: AccountType::ExternalOwned {
+                account_type: AccountType::User {
                     public_key: placeholder_public_key(),
-                    signature_scheme: Default::default(),
                 },
                 ..Default::default()
             },
@@ -267,9 +266,8 @@ impl StateExecutor {
             Some(account) => account,
             None => Account {
                 address: to,
-                account_type: AccountType::ExternalOwned {
+                account_type: AccountType::User {
                     public_key: placeholder_public_key(),
-                    signature_scheme: Default::default(),
                 },
                 ..Default::default()
             },

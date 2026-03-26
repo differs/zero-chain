@@ -373,31 +373,16 @@ fn replay_actors(tx: &ComputeTx) -> Vec<String> {
     let preimage = tx.signing_preimage();
     let mut actors = Vec::with_capacity(tx.witness.signatures.len().max(1));
     for sig in &tx.witness.signatures {
-        match sig.scheme {
-            super::tx::SignatureScheme::Secp256k1 => {
-                let actor = Signature::from_bytes(&sig.bytes)
-                    .ok()
-                    .and_then(|parsed| parsed.recover(&preimage).ok())
-                    .map(|pk| {
-                        let addr = Address::from_public_key(&pk);
-                        format!("secp:{}", hex::encode(addr.as_bytes()))
-                    })
-                    .unwrap_or_else(|| format!("secp_sig:{}", hex::encode(keccak256(&sig.bytes))));
-                actors.push(actor);
-            }
-            super::tx::SignatureScheme::Ed25519 => {
-                if let Some(pk) = &sig.public_key {
-                    if pk.len() == 32 {
-                        actors.push(format!("ed25519:{}", hex::encode(pk)));
-                        continue;
-                    }
-                }
-                actors.push(format!(
-                    "ed25519_sig:{}",
-                    hex::encode(keccak256(&sig.bytes))
-                ));
+        if let Some(pk) = &sig.public_key {
+            if pk.len() == 32 {
+                actors.push(format!("ed25519:{}", hex::encode(pk)));
+                continue;
             }
         }
+        actors.push(format!(
+            "ed25519_sig:{}",
+            hex::encode(keccak256(&sig.bytes))
+        ));
     }
     if actors.is_empty() {
         actors.push("anonymous".to_string());
@@ -576,7 +561,7 @@ fn object_from_proposal(proposal: &OutputProposal) -> ObjectOutput {
 mod tests {
     use ed25519_dalek::Signer as _;
 
-    use crate::crypto::{Address, Hash, PrivateKey};
+    use crate::crypto::{Address, Hash};
 
     use super::*;
     use crate::compute::{
@@ -608,6 +593,31 @@ mod tests {
             extensions: vec![],
             spent: false,
         }
+    }
+
+    fn test_ed25519_signing_key(seed: u8) -> ed25519_dalek::SigningKey {
+        ed25519_dalek::SigningKey::from_bytes(&[seed; 32])
+    }
+
+    fn test_ed25519_signature() -> TxSignature {
+        TxSignature::ed25519([0xAB; 64], [0xCD; 32])
+    }
+
+    fn address_from_ed25519_public_key(public_key: &[u8; 32]) -> Address {
+        let hash = crate::crypto::keccak256(public_key);
+        Address::from_slice(&hash[12..]).expect("ed25519 address should derive")
+    }
+
+    fn sign_compute_tx_with_ed25519(tx: &ComputeTx, seed: u8) -> (TxSignature, Address, [u8; 32]) {
+        let signing_key = test_ed25519_signing_key(seed);
+        let verify_key = signing_key.verifying_key();
+        let public_key = verify_key.to_bytes();
+        let signature = signing_key.sign(&tx.signing_preimage()).to_bytes();
+        (
+            TxSignature::ed25519(signature, public_key),
+            address_from_ed25519_public_key(&public_key),
+            public_key,
+        )
     }
 
     #[test]
@@ -657,9 +667,7 @@ mod tests {
             chain_id: None,
             network_id: None,
             witness: TxWitness {
-                signatures: vec![TxSignature::secp256k1(crate::crypto::Signature::new(
-                    [1; 32], [2; 32], 27,
-                ))],
+                signatures: vec![test_ed25519_signature()],
                 threshold: None,
             },
         }
@@ -739,9 +747,7 @@ mod tests {
             chain_id: None,
             network_id: None,
             witness: TxWitness {
-                signatures: vec![TxSignature::secp256k1(crate::crypto::Signature::new(
-                    [1; 32], [2; 32], 27,
-                ))],
+                signatures: vec![test_ed25519_signature()],
                 threshold: None,
             },
         }
@@ -801,9 +807,7 @@ mod tests {
             chain_id: None,
             network_id: None,
             witness: TxWitness {
-                signatures: vec![TxSignature::secp256k1(crate::crypto::Signature::new(
-                    [1; 32], [2; 32], 27,
-                ))],
+                signatures: vec![test_ed25519_signature()],
                 threshold: None,
             },
         }
@@ -866,9 +870,7 @@ mod tests {
             chain_id: None,
             network_id: None,
             witness: TxWitness {
-                signatures: vec![TxSignature::secp256k1(crate::crypto::Signature::new(
-                    [1; 32], [2; 32], 27,
-                ))],
+                signatures: vec![test_ed25519_signature()],
                 threshold: None,
             },
         }
@@ -890,8 +892,9 @@ mod tests {
     #[test]
     fn validate_rejects_transfer_when_tx_id_mismatch_for_address_owner() {
         let store = InMemoryObjectStore::new();
-        let owner_key = PrivateKey::from_bytes([7u8; 32]).expect("valid private key");
-        let owner_addr = Address::from_public_key(&owner_key.public_key());
+        let owner_addr = address_from_ed25519_public_key(
+            &test_ed25519_signing_key(7).verifying_key().to_bytes(),
+        );
 
         let input = ObjectOutput {
             output_id: OutputId(Hash::from_bytes([31; 32])),
@@ -961,8 +964,8 @@ mod tests {
             },
         };
 
-        let sig = owner_key.sign(&tx.signing_preimage());
-        tx.witness.signatures = vec![TxSignature::secp256k1(sig)];
+        let (sig, _, _) = sign_compute_tx_with_ed25519(&tx, 7);
+        tx.witness.signatures = vec![sig];
         tx.tx_id = TxId(Hash::from_bytes([99; 32]));
 
         let validator = BasicTxValidator {
@@ -981,8 +984,9 @@ mod tests {
     #[test]
     fn validate_accepts_transfer_when_owner_signature_and_tx_id_match() {
         let store = InMemoryObjectStore::new();
-        let owner_key = PrivateKey::from_bytes([8u8; 32]).expect("valid private key");
-        let owner_addr = Address::from_public_key(&owner_key.public_key());
+        let owner_addr = address_from_ed25519_public_key(
+            &test_ed25519_signing_key(8).verifying_key().to_bytes(),
+        );
 
         let input = ObjectOutput {
             output_id: OutputId(Hash::from_bytes([51; 32])),
@@ -1052,8 +1056,8 @@ mod tests {
             },
         };
 
-        let sig = owner_key.sign(&tx.signing_preimage());
-        tx.witness.signatures = vec![TxSignature::secp256k1(sig)];
+        let (sig, _, _) = sign_compute_tx_with_ed25519(&tx, 8);
+        tx.witness.signatures = vec![sig];
         tx.assign_expected_tx_id();
 
         let validator = BasicTxValidator {
@@ -1207,9 +1211,7 @@ mod tests {
             chain_id: Some(10086),
             network_id: Some(1),
             witness: TxWitness {
-                signatures: vec![TxSignature::secp256k1(crate::crypto::Signature::new(
-                    [1; 32], [2; 32], 27,
-                ))],
+                signatures: vec![test_ed25519_signature()],
                 threshold: Some(1),
             },
         }
@@ -1274,9 +1276,7 @@ mod tests {
             chain_id: None,
             network_id: None,
             witness: TxWitness {
-                signatures: vec![TxSignature::secp256k1(crate::crypto::Signature::new(
-                    [1; 32], [2; 32], 27,
-                ))],
+                signatures: vec![],
                 threshold: Some(1),
             },
         }
@@ -1338,9 +1338,7 @@ mod tests {
             chain_id: None,
             network_id: None,
             witness: TxWitness {
-                signatures: vec![TxSignature::secp256k1(crate::crypto::Signature::new(
-                    [1; 32], [2; 32], 27,
-                ))],
+                signatures: vec![],
                 threshold: Some(1),
             },
         }
@@ -1406,9 +1404,7 @@ mod tests {
             chain_id: None,
             network_id: None,
             witness: TxWitness {
-                signatures: vec![TxSignature::secp256k1(crate::crypto::Signature::new(
-                    [1; 32], [2; 32], 27,
-                ))],
+                signatures: vec![test_ed25519_signature()],
                 threshold: Some(1),
             },
         }
@@ -1477,9 +1473,7 @@ mod tests {
             chain_id: None,
             network_id: None,
             witness: TxWitness {
-                signatures: vec![TxSignature::secp256k1(crate::crypto::Signature::new(
-                    [1; 32], [2; 32], 27,
-                ))],
+                signatures: vec![],
                 threshold: Some(1),
             },
         }

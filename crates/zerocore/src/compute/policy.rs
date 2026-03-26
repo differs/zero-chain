@@ -80,7 +80,11 @@ impl AuthorizationPolicy for DefaultAuthorizationPolicy {
                         if tx.witness.signatures.is_empty() {
                             return Err(ComputeError::AuthorizationDenied);
                         }
-                        match secp_signature_matches_owner(tx, owner_addr, &tx.witness.signatures) {
+                        match ed25519_signature_matches_address_owner(
+                            tx,
+                            owner_addr,
+                            &tx.witness.signatures,
+                        ) {
                             Ok(true) => {}
                             Ok(false) => return Err(ComputeError::SignatureOwnerMismatch),
                             Err(err) => return Err(err),
@@ -114,37 +118,42 @@ impl AuthorizationPolicy for DefaultAuthorizationPolicy {
     }
 }
 
-fn secp_signature_matches_owner(
+fn ed25519_signature_matches_address_owner(
     tx: &ComputeTx,
     owner: Address,
     signatures: &[TxSignature],
 ) -> ComputeResult<bool> {
     let message = tx.signing_preimage();
-    let mut had_recover_error = false;
 
     for sig in signatures {
-        if sig.scheme != SignatureScheme::Secp256k1 {
+        if sig.scheme != SignatureScheme::Ed25519 {
             continue;
         }
-        let parsed = crate::crypto::Signature::from_bytes(&sig.bytes)
-            .map_err(|_| ComputeError::InvalidSignature)?;
-        match parsed.recover(&message) {
-            Ok(pubkey) => {
-                if Address::from_public_key(&pubkey) == owner {
-                    return Ok(true);
-                }
-            }
-            Err(_) => {
-                had_recover_error = true;
-            }
+        let Some(pk_bytes) = &sig.public_key else {
+            return Err(ComputeError::InvalidSignature);
+        };
+        if pk_bytes.len() != 32 {
+            return Err(ComputeError::InvalidSignature);
+        }
+        let derived = address_from_ed25519_public_key(pk_bytes)?;
+        if derived != owner {
+            continue;
+        }
+        let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(
+            pk_bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| ComputeError::InvalidSignature)?,
+        )
+        .map_err(|_| ComputeError::InvalidSignature)?;
+        let sig_obj =
+            Ed25519Signature::from_slice(&sig.bytes).map_err(|_| ComputeError::InvalidSignature)?;
+        if verifying_key.verify(&message, &sig_obj).is_ok() {
+            return Ok(true);
         }
     }
 
-    if had_recover_error {
-        Err(ComputeError::InvalidSignature)
-    } else {
-        Ok(false)
-    }
+    Ok(false)
 }
 
 fn ed25519_signature_matches_owner(
@@ -203,18 +212,6 @@ fn evaluate_lock_script(lock: &Script, tx: &ComputeTx) -> ComputeResult<()> {
                 Ok(())
             }
         }
-        "REQUIRE_SECP256K1" => {
-            if tx
-                .witness
-                .signatures
-                .iter()
-                .any(|sig| sig.scheme == SignatureScheme::Secp256k1)
-            {
-                Ok(())
-            } else {
-                Err(ComputeError::AuthorizationDenied)
-            }
-        }
         "REQUIRE_ED25519" => {
             if tx
                 .witness
@@ -242,6 +239,14 @@ fn evaluate_lock_script(lock: &Script, tx: &ComputeTx) -> ComputeResult<()> {
             "unsupported lock expression: {expr}"
         ))),
     }
+}
+
+fn address_from_ed25519_public_key(public_key: &[u8]) -> ComputeResult<Address> {
+    if public_key.len() != 32 {
+        return Err(ComputeError::InvalidSignature);
+    }
+    let hash = crate::crypto::keccak256(public_key);
+    Address::from_slice(&hash[12..]).map_err(|_| ComputeError::InvalidSignature)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

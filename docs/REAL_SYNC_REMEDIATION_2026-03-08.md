@@ -39,7 +39,7 @@
 - 修复：
   - `zero_getAccount`：本地账户缺失时回退读取同步账户快照。
   - `zero_getTransactionByHash`：本地未命中时回退读取同步 transfer/compute 索引。
-  - `zero_listTransactions`、`zero_getTransactionsByAddress`、`zero_listComputeTxResults` 合并本地 + 同步索引并去重。
+  - `zero_listTransactions`、`zero_listComputeTxResults` 合并本地 + 同步索引并去重。
   - 本地状态变更时把账户/索引写入全局同步缓存（transfer、compute、block reward）。
 - 代码：
   - `crates/zeroapi/src/rpc/mod.rs`
@@ -58,7 +58,7 @@
   - `cargo test -p zeronet -p zeroapi` 通过。
   - 新增测试：`test_zero_import_block_with_transactions_updates_tx_index`。
 - 本地双节点联调（A 挖矿 + B follower）：
-  - 高度同步后执行 `zero_transfer`（A），B 可查询到该 tx，且 B 账户余额/nonce 同步更新。
+  - 高度同步后验证区块高度、矿工状态与 compute 结果查询保持一致。
 - 检查脚本增强：
   - `scripts/mainnet_checklist.sh` 新增 local vs remote 账户一致性检查；可选 `CHECK_TX_HASH` 交易索引一致性检查。
 

@@ -200,7 +200,7 @@ impl AccountManager for InMemoryAccountManager {
     ) -> Result<Account, AccountError> {
         // Derive address from account type
         let address = match &account_type {
-            AccountType::ExternalOwned { public_key, .. } => Address::from_public_key(public_key),
+            AccountType::User { public_key } => Address::from_public_key(public_key),
             _ => {
                 // For contract accounts, address would be computed differently
                 Address::from_bytes([0u8; 20])
@@ -406,10 +406,7 @@ mod tests {
 
         // Create account
         let pk = PrivateKey::random().public_key();
-        let account_type = AccountType::ExternalOwned {
-            public_key: pk,
-            signature_scheme: super::super::SignatureScheme::EcdsaSecp256k1,
-        };
+        let account_type = AccountType::User { public_key: pk };
 
         let account = manager
             .create_account(account_type, AccountConfig::default())
@@ -447,10 +444,7 @@ mod tests {
         let manager = InMemoryAccountManager::new();
 
         let pk = PrivateKey::random().public_key();
-        let account_type = AccountType::ExternalOwned {
-            public_key: pk,
-            signature_scheme: super::super::SignatureScheme::EcdsaSecp256k1,
-        };
+        let account_type = AccountType::User { public_key: pk };
 
         let account = manager
             .create_account(account_type, AccountConfig::default())

@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::crypto::{keccak256, Hash, Signature};
+use crate::crypto::{keccak256, Hash};
 
 use super::{
     object::{ObjectKind, Ownership, ResourceMap, ResourceValue, Script},
@@ -93,9 +93,7 @@ pub struct TxWitness {
 /// Signature scheme used by compute witness.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SignatureScheme {
-    /// secp256k1 ECDSA signature.
-    Secp256k1,
-    /// Native ed25519 signature.
+    /// ed25519 signature.
     Ed25519,
 }
 
@@ -104,25 +102,13 @@ pub enum SignatureScheme {
 pub struct TxSignature {
     /// Signature scheme.
     pub scheme: SignatureScheme,
-    /// Raw signature bytes (65 for secp256k1, 64 for ed25519).
+    /// Raw signature bytes (64 for ed25519).
     pub bytes: Vec<u8>,
-    /// Signer public key bytes when required by scheme.
-    ///
-    /// For secp256k1 this may be omitted because pubkey can be recovered from
-    /// recoverable signature. For ed25519 this must be present (32 bytes).
+    /// Signer public key bytes (required, 32 bytes).
     pub public_key: Option<Vec<u8>>,
 }
 
 impl TxSignature {
-    /// Builds a secp256k1 witness signature from core signature type.
-    pub fn secp256k1(signature: Signature) -> Self {
-        Self {
-            scheme: SignatureScheme::Secp256k1,
-            bytes: signature.as_bytes().to_vec(),
-            public_key: None,
-        }
-    }
-
     /// Builds an ed25519 witness signature entry.
     pub fn ed25519(signature: [u8; 64], public_key: [u8; 32]) -> Self {
         Self {
