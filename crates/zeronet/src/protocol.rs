@@ -61,16 +61,14 @@ pub struct SyncStateSnapshot {
 pub enum ProtocolMessage {
     /// Disconnect from peer
     Disconnect(String),
-    /// New transaction announcement
-    NewTransaction(Hash),
+    /// New compute transaction announcement
+    NewComputeTx(Hash),
     /// New block announcement
     NewBlock(Box<Block>),
     /// New block hash announcement
     NewBlockHash(Hash),
     /// Announce current local head height.
     AnnounceHead(u64),
-    /// Request transactions
-    GetTransactions(Vec<Hash>),
     /// Request block
     GetBlock(Hash),
     /// Request headers in `[start, start + limit)`.

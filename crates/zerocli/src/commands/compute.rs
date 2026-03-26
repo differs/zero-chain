@@ -1,18 +1,14 @@
-//! Transaction command implementation.
+//! Compute command implementation.
 
 use crate::commands::rpc::rpc_call;
-use crate::{Result, TransactionAction};
+use crate::{ComputeAction, Result};
 use anyhow::Context;
 use serde_json::json;
 use std::fs;
 
-pub async fn handle_transaction(
-    action: TransactionAction,
-    _data_dir: &str,
-    rpc_url: &str,
-) -> Result<()> {
+pub async fn handle_compute(action: ComputeAction, _data_dir: &str, rpc_url: &str) -> Result<()> {
     match action {
-        TransactionAction::Get { tx_id } => {
+        ComputeAction::Get { tx_id } => {
             let result = rpc_call::<serde_json::Value>(
                 rpc_url,
                 "zero_getComputeTxResult",
@@ -26,7 +22,7 @@ pub async fn handle_transaction(
                 serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string())
             );
         }
-        TransactionAction::Send {
+        ComputeAction::Send {
             tx_file,
             account_name,
             passphrase,
@@ -37,7 +33,7 @@ pub async fn handle_transaction(
                 .with_context(|| format!("failed to parse tx json from `{}`", tx_file))?;
 
             if !tx_value.is_object() {
-                anyhow::bail!("transaction payload must be a JSON object");
+                anyhow::bail!("compute payload must be a JSON object");
             }
 
             let result = rpc_call::<serde_json::Value>(

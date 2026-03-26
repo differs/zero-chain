@@ -67,10 +67,10 @@ zerochain wallet unlock --name ed25519-1 --passphrase "StrongPassphrase123!" --t
 zerochain wallet sign --name ed25519-1 --message "hello"
 
 # Submit compute transaction from JSON file
-zerochain transaction send --tx-file ./tx.json --account-name ed25519-1 --passphrase "StrongPassphrase123!"
+zerochain compute send --tx-file ./tx.json --account-name ed25519-1 --passphrase "StrongPassphrase123!"
 
 # Query compute transaction result
-zerochain transaction get --tx-id 0x...
+zerochain compute get --tx-id 0x...
 ```
 
 ## RPC Example

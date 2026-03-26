@@ -159,10 +159,10 @@ enum Commands {
         action: AccountAction,
     },
 
-    /// Transaction commands
-    Transaction {
+    /// Compute commands
+    Compute {
         #[command(subcommand)]
-        action: TransactionAction,
+        action: ComputeAction,
     },
 
     /// Block commands
@@ -281,10 +281,10 @@ pub(crate) enum AccountAction {
 }
 
 #[derive(Subcommand, Debug)]
-pub(crate) enum TransactionAction {
-    /// Send transaction
+pub(crate) enum ComputeAction {
+    /// Send compute transaction
     Send {
-        /// Native compute transaction JSON file path
+        /// Compute transaction JSON file path
         #[arg(long)]
         tx_file: String,
         /// Wallet account name used for local signing
@@ -482,8 +482,8 @@ async fn main() -> Result<()> {
         Some(Commands::Account { action }) => {
             commands::account::handle_account(action, &shared_data_dir, &rpc_url).await?;
         }
-        Some(Commands::Transaction { action }) => {
-            commands::transaction::handle_transaction(action, &shared_data_dir, &rpc_url).await?;
+        Some(Commands::Compute { action }) => {
+            commands::compute::handle_compute(action, &shared_data_dir, &rpc_url).await?;
         }
         Some(Commands::Block { action }) => {
             commands::block::handle_block(format!("{:?}", action)).await?;

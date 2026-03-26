@@ -488,9 +488,9 @@ impl NetworkService {
         Ok(())
     }
 
-    /// Broadcast transaction to all peers
-    pub fn broadcast_transaction(&self, tx_hash: Hash) {
-        let message = ProtocolMessage::NewTransaction(tx_hash);
+    /// Broadcast compute transaction hash to all peers
+    pub fn broadcast_compute_tx(&self, tx_hash: Hash) {
+        let message = ProtocolMessage::NewComputeTx(tx_hash);
         self.broadcast_with_backpressure(message);
     }
 
@@ -953,7 +953,7 @@ async fn monitor_peer_socket(
                     Ok(ControlFrame::Pong) => {
                         let _ = peer_manager.touch_peer(&peer_id);
                     }
-                    Ok(ControlFrame::Tx(tx_hash)) => {
+                    Ok(ControlFrame::ComputeTx(tx_hash)) => {
                         let now = current_timestamp();
                         if !allow_rate_window(&mut inbound_window, max_gossip_per_peer_per_minute, now) {
                             tracing::warn!("peer {} exceeded gossip rate limit", peer_id);
@@ -962,7 +962,10 @@ async fn monitor_peer_socket(
                         }
                         let _ = peer_manager.touch_peer(&peer_id);
                         if mark_seen_hash(&SEEN_TX_HASHES, hash_to_hex(&tx_hash), now) {
-                            peer_manager.broadcast_except(&peer_id, ProtocolMessage::NewTransaction(tx_hash));
+                            peer_manager.broadcast_except(
+                                &peer_id,
+                                ProtocolMessage::NewComputeTx(tx_hash),
+                            );
                         }
                     }
                     Ok(ControlFrame::BlockHash(block_hash)) => {
@@ -1063,7 +1066,7 @@ async fn monitor_peer_socket(
 enum ControlFrame {
     Ping,
     Pong,
-    Tx(Hash),
+    ComputeTx(Hash),
     BlockHash(Hash),
     Head(u64),
     SyncGetHeaders { start: u64, limit: u64 },
@@ -1111,13 +1114,13 @@ async fn read_control_frame(stream: &mut TcpStream) -> std::io::Result<ControlFr
     if normalized == "ZERO/PONG" {
         return Ok(ControlFrame::Pong);
     }
-    if let Some(raw) = normalized.strip_prefix("ZERO/TX ") {
+    if let Some(raw) = normalized.strip_prefix("ZERO/COMPUTE_TX ") {
         if let Some(hash) = parse_hash(raw.trim()) {
-            return Ok(ControlFrame::Tx(hash));
+            return Ok(ControlFrame::ComputeTx(hash));
         }
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            "invalid tx hash frame",
+            "invalid compute tx hash frame",
         ));
     }
     if let Some(raw) = normalized.strip_prefix("ZERO/GET_HEADERS ") {
@@ -1224,8 +1227,8 @@ async fn write_protocol_message(
         ProtocolMessage::Disconnect(reason) => {
             Some(format!("ZERO/DISCONNECT {}\n", sanitize_line(&reason)))
         }
-        ProtocolMessage::NewTransaction(tx_hash) => {
-            Some(format!("ZERO/TX {}\n", hash_to_hex(&tx_hash)))
+        ProtocolMessage::NewComputeTx(tx_hash) => {
+            Some(format!("ZERO/COMPUTE_TX {}\n", hash_to_hex(&tx_hash)))
         }
         ProtocolMessage::NewBlock(block) => {
             Some(format!("ZERO/BLOCK {}\n", hash_to_hex(&block.header.hash)))
@@ -1236,10 +1239,6 @@ async fn write_protocol_message(
         ProtocolMessage::AnnounceHead(height) => Some(format!("ZERO/HEAD {}\n", height)),
         ProtocolMessage::GetBlock(block_hash) => {
             Some(format!("ZERO/GETBLOCK {}\n", hash_to_hex(&block_hash)))
-        }
-        ProtocolMessage::GetTransactions(hashes) => {
-            let joined = hashes.iter().map(hash_to_hex).collect::<Vec<_>>().join(",");
-            Some(format!("ZERO/GETTX {}\n", joined))
         }
         ProtocolMessage::SyncGetHeaders { start, limit } => {
             Some(format!("ZERO/GET_HEADERS {} {}\n", start, limit))

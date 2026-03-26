@@ -39,12 +39,12 @@ cargo build --release
 ## 提交 Compute 交易
 
 ```bash
-./target/release/zerochain transaction send \
+./target/release/zerochain compute send \
   --tx-file ./tx.json \
   --account-name ed25519-1 \
   --passphrase "StrongPassphrase123!"
 
-./target/release/zerochain transaction get --tx-id 0x...
+./target/release/zerochain compute get --tx-id 0x...
 ```
 
 ## RPC 查询
