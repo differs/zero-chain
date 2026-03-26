@@ -13,7 +13,7 @@ fn create_signed_transactions(count: usize) -> Vec<SignedTransaction> {
     let mut txs = Vec::new();
     for i in 0..count {
         let private_key = PrivateKey::random();
-        let tx = UnsignedTransaction::new_legacy(
+        let tx = UnsignedTransaction::new_transfer(
             i as u64,
             U256::from(1_000_000_000),
             U256::from(21000),

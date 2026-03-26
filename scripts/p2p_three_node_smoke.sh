@@ -75,7 +75,7 @@ wait_rpc_ready() {
   local timeout_secs="${2:-60}"
   local i=0
   while (( i < timeout_secs )); do
-    if rpc_call "${rpc_port}" "web3_clientVersion" "[]" >/dev/null 2>&1; then
+    if rpc_call "${rpc_port}" "zero_clientVersion" "[]" >/dev/null 2>&1; then
       return 0
     fi
     i=$((i + 1))

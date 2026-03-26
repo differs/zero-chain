@@ -1,9 +1,9 @@
 //! Account management module
 //!
-//! ZeroChain uses a hybrid account model combining:
-//! - Balance-based model with native account semantics
-//! - UTXO model (for privacy and parallel execution)
-//! - Account abstraction (smart contract wallets)
+//! ZeroChain uses an account model combining:
+//! - Balance-based accounts
+//! - UTXO data structures for parallel execution
+//! - Multi-party account controls
 
 #[allow(clippy::module_inception)]
 mod account;

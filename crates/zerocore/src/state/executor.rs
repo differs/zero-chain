@@ -202,60 +202,18 @@ impl StateExecutor {
 
     /// Execute transaction inner logic
     fn execute_tx_inner(&self, tx: &SignedTransaction, block: &Block) -> Result<ExecutionResult> {
-        // Check if contract creation
         if tx.to().is_none() {
-            self.execute_create(tx, block)
-        } else {
-            self.execute_call(tx, block)
+            return Err(ExecutionError::InvalidTransaction(
+                "contract deployment is not supported; submit a compute transaction instead"
+                    .into(),
+            ));
         }
+
+        self.execute_call(tx, block)
     }
 
-    /// Execute contract creation
-    fn execute_create(&self, tx: &SignedTransaction, block: &Block) -> Result<ExecutionResult> {
-        // Calculate contract address
-        let nonce = self.state_db.get_nonce(&tx.sender());
-        let contract_address = self.calculate_contract_address(tx.sender(), nonce)?;
-
-        // Create contract account
-        let contract_account = Account {
-            address: contract_address,
-            account_type: AccountType::Contract {
-                creator: tx.sender(),
-                contract_version: 1,
-                upgradeable: false,
-                admin: None,
-            },
-            balance: tx.tx.value,
-            nonce: 0,
-            storage_root: Hash::zero(),
-            code_hash: Hash::zero(),
-            config: Default::default(),
-            state: crate::account::AccountState::Active,
-            created_at: block.header.timestamp,
-            updated_at: block.header.timestamp,
-        };
-
-        self.state_db
-            .insert_account(contract_address, contract_account);
-
-        // Transfer value
-        self.transfer_value(tx.sender(), contract_address, tx.tx.value)?;
-
-        // Execute init code
-        // Runtime initialization is intentionally simplified in native-only mode.
-
-        Ok(ExecutionResult {
-            success: true,
-            output: tx.tx.input.clone(),
-            gas_used: 21000,
-            logs: Vec::new(),
-            created_address: Some(contract_address),
-            error: None,
-        })
-    }
-
-    /// Execute contract call
-    fn execute_call(&self, tx: &SignedTransaction, block: &Block) -> Result<ExecutionResult> {
+    /// Execute transfer-style transaction
+    fn execute_call(&self, tx: &SignedTransaction, _block: &Block) -> Result<ExecutionResult> {
         let to = tx
             .to()
             .ok_or_else(|| ExecutionError::InvalidTransaction("missing recipient for call".into()))?;
@@ -280,16 +238,9 @@ impl StateExecutor {
             });
         }
 
-        // Runtime call execution is intentionally simplified in native-only mode.
-
-        Ok(ExecutionResult {
-            success: true,
-            output: Vec::new(),
-            gas_used: 50000,
-            logs: Vec::new(),
-            created_address: None,
-            error: None,
-        })
+        Err(ExecutionError::InvalidTransaction(
+            "contract execution is not supported; submit a compute transaction instead".into(),
+        ))
     }
 
     /// Transfer value between accounts
@@ -353,21 +304,6 @@ impl StateExecutor {
         }
 
         Ok(())
-    }
-
-    /// Calculate contract address
-    fn calculate_contract_address(&self, sender: Address, nonce: u64) -> Result<Address> {
-        use rlp::RlpStream;
-
-        let mut stream = RlpStream::new_list(2);
-        stream.append(&sender.as_bytes());
-        stream.append(&nonce);
-
-        let encoded = stream.out();
-        let hash = keccak256(&encoded);
-
-        Address::from_slice(&hash[12..])
-            .map_err(|e| ExecutionError::State(format!("contract address derivation failed: {e}")))
     }
 }
 

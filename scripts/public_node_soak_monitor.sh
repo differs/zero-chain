@@ -618,7 +618,7 @@ run_monitor() {
             local_rpc_errors=$((local_rpc_errors + 1))
         fi
 
-        if rpc_call_local_with_retries "${local_rpc_url}" "web3_clientVersion" "[]" "${rpc_timeout_secs}" "${rpc_retries}" >/dev/null 2>&1; then
+        if rpc_call_local_with_retries "${local_rpc_url}" "zero_clientVersion" "[]" "${rpc_timeout_secs}" "${rpc_retries}" >/dev/null 2>&1; then
             local_client_ok=1
         fi
 
@@ -630,7 +630,7 @@ run_monitor() {
             remote_rpc_errors=$((remote_rpc_errors + 1))
         fi
 
-        if rpc_call_remote_with_retries "${ssh_key}" "${ssh_timeout_secs}" "${remote_user}" "${remote_host}" "${remote_rpc_port}" "web3_clientVersion" "[]" "${rpc_timeout_secs}" "${rpc_retries}" >/dev/null 2>&1; then
+        if rpc_call_remote_with_retries "${ssh_key}" "${ssh_timeout_secs}" "${remote_user}" "${remote_host}" "${remote_rpc_port}" "zero_clientVersion" "[]" "${rpc_timeout_secs}" "${rpc_retries}" >/dev/null 2>&1; then
             remote_client_ok=1
         else
             # this is optional health data; do not count as hard rpc error

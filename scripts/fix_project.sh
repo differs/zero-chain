@@ -470,16 +470,14 @@ cat > docs/API.md << 'EOF'
 - HTTP: `http://localhost:8545`
 - WebSocket: `ws://localhost:8546`
 
-## 标准网络方法与原生方法
+## ZeroChain 信息方法与网络方法
 
-### web3_*
-
-#### web3_clientVersion
+### zero_clientVersion
 
 ```bash
 curl -X POST http://localhost:8545 \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"web3_clientVersion","id":1}'
+  -d '{"jsonrpc":"2.0","method":"zero_clientVersion","id":1}'
 ```
 
 响应:
@@ -491,14 +489,14 @@ curl -X POST http://localhost:8545 \
 }
 ```
 
-#### web3_sha3
+### zero_keccak256
 
 ```bash
 curl -X POST http://localhost:8545 \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc":"2.0",
-    "method":"web3_sha3",
+    "method":"zero_keccak256",
     "params":["0x68656c6c6f20776f726c64"],
     "id":1
   }'

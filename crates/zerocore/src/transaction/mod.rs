@@ -42,29 +42,11 @@ pub enum TransactionError {
 /// Transaction type
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TransactionType {
-    /// Legacy transaction
-    Legacy,
-    /// EIP-2930 (with access list)
-    AccessList,
-    /// EIP-1559 (with priority fee)
-    Eip1559,
+    /// Balance transfer transaction
+    Transfer,
     /// UTXO transaction
     Utxo,
-    /// Contract deployment
-    ContractCreation,
 }
-
-/// Access list entry
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct AccessListItem {
-    /// Address
-    pub address: Address,
-    /// Storage keys
-    pub storage_keys: Vec<Hash>,
-}
-
-/// Transaction access list
-pub type AccessList = Vec<AccessListItem>;
 
 /// Unsigned transaction
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -73,29 +55,23 @@ pub struct UnsignedTransaction {
     pub tx_type: TransactionType,
     /// Nonce
     pub nonce: u64,
-    /// Gas price (legacy and EIP-2930)
-    pub gas_price: Option<U256>,
-    /// Max priority fee per gas (EIP-1559)
-    pub max_priority_fee_per_gas: Option<U256>,
-    /// Max fee per gas (EIP-1559)
-    pub max_fee_per_gas: Option<U256>,
+    /// Execution fee rate
+    pub gas_price: U256,
     /// Gas limit
     pub gas_limit: U256,
-    /// Recipient address (None for contract creation)
+    /// Recipient address
     pub to: Option<Address>,
-    /// Value (in wei)
+    /// Value
     pub value: U256,
     /// Input data
     pub input: Vec<u8>,
-    /// Access list (EIP-2930 and EIP-1559)
-    pub access_list: AccessList,
     /// Chain ID
     pub chain_id: u64,
 }
 
 impl UnsignedTransaction {
-    /// Create a new legacy transaction
-    pub fn new_legacy(
+    /// Create a new transfer transaction
+    pub fn new_transfer(
         nonce: u64,
         gas_price: U256,
         gas_limit: U256,
@@ -105,95 +81,20 @@ impl UnsignedTransaction {
         chain_id: u64,
     ) -> Self {
         Self {
-            tx_type: TransactionType::Legacy,
+            tx_type: TransactionType::Transfer,
             nonce,
-            gas_price: Some(gas_price),
-            max_priority_fee_per_gas: None,
-            max_fee_per_gas: None,
+            gas_price,
             gas_limit,
             to,
             value,
             input,
-            access_list: Vec::new(),
-            chain_id,
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    /// Create a new EIP-1559 transaction
-    pub fn new_eip1559(
-        nonce: u64,
-        max_priority_fee_per_gas: U256,
-        max_fee_per_gas: U256,
-        gas_limit: U256,
-        to: Option<Address>,
-        value: U256,
-        input: Vec<u8>,
-        chain_id: u64,
-    ) -> Self {
-        Self {
-            tx_type: TransactionType::Eip1559,
-            nonce,
-            gas_price: None,
-            max_priority_fee_per_gas: Some(max_priority_fee_per_gas),
-            max_fee_per_gas: Some(max_fee_per_gas),
-            gas_limit,
-            to,
-            value,
-            input,
-            access_list: Vec::new(),
-            chain_id,
-        }
-    }
-
-    /// Create contract creation transaction
-    pub fn new_contract_creation(
-        nonce: u64,
-        gas_price: U256,
-        gas_limit: U256,
-        value: U256,
-        init_code: Vec<u8>,
-        chain_id: u64,
-    ) -> Self {
-        Self {
-            tx_type: TransactionType::ContractCreation,
-            nonce,
-            gas_price: Some(gas_price),
-            max_priority_fee_per_gas: None,
-            max_fee_per_gas: None,
-            gas_limit,
-            to: None,
-            value,
-            input: init_code,
-            access_list: Vec::new(),
             chain_id,
         }
     }
 
     /// Get effective gas price
-    pub fn effective_gas_price(&self, base_fee: Option<U256>) -> U256 {
-        match self.tx_type {
-            TransactionType::Legacy | TransactionType::AccessList => {
-                self.gas_price.unwrap_or_default()
-            }
-            TransactionType::Eip1559 => {
-                if let Some(base_fee) = base_fee {
-                    let priority_fee = self.max_priority_fee_per_gas.unwrap_or_default();
-                    let max_fee = self.max_fee_per_gas.unwrap_or_default();
-
-                    // effective_price = min(base_fee + priority_fee, max_fee)
-                    let capped_fee = base_fee + priority_fee;
-                    if capped_fee < max_fee {
-                        capped_fee
-                    } else {
-                        max_fee
-                    }
-                } else {
-                    self.max_fee_per_gas.unwrap_or_default()
-                }
-            }
-            _ => U256::zero(),
-        }
+    pub fn effective_gas_price(&self, _base_fee: Option<U256>) -> U256 {
+        self.gas_price
     }
 
     /// Calculate transaction hash for signing
@@ -223,9 +124,7 @@ impl UnsignedTransaction {
         // Simplified RLP encoding for demonstration
         let mut data = Vec::new();
         data.extend_from_slice(&self.nonce.to_be_bytes());
-        if let Some(gas_price) = self.gas_price {
-            data.extend_from_slice(&gas_price.to_big_endian());
-        }
+        data.extend_from_slice(&self.gas_price.to_big_endian());
         data.extend_from_slice(&self.gas_limit.to_big_endian());
         if let Some(to) = self.to {
             data.extend_from_slice(to.as_bytes());
@@ -278,7 +177,7 @@ impl SignedTransaction {
 
     /// Get gas price
     pub fn gas_price(&self) -> U256 {
-        self.tx.gas_price.unwrap_or_default()
+        self.tx.gas_price
     }
 
     /// Get input data
@@ -423,7 +322,7 @@ mod tests {
     fn test_transaction_creation() {
         let private_key = PrivateKey::random();
 
-        let tx = UnsignedTransaction::new_legacy(
+        let tx = UnsignedTransaction::new_transfer(
             0,
             U256::from(1_000_000_000),
             U256::from(21000),
@@ -441,30 +340,5 @@ mod tests {
             Address::from_public_key(&private_key.public_key())
         );
         assert!(!signed_tx.hash.is_zero());
-    }
-
-    #[test]
-    fn test_eip1559_transaction() {
-        let private_key = PrivateKey::random();
-
-        let tx = UnsignedTransaction::new_eip1559(
-            0,
-            U256::from(100_000_000),
-            U256::from(1_000_000_000),
-            U256::from(21000),
-            Some(Address::from_bytes([1u8; 20])),
-            U256::from(1000),
-            vec![],
-            10086,
-        );
-
-        // Test effective gas price calculation
-        let base_fee = U256::from(900_000_000);
-        let effective_price = tx.effective_gas_price(Some(base_fee));
-
-        // effective_price = min(base_fee + priority_fee, max_fee)
-        // = min(900_000_000 + 100_000_000, 1_000_000_000)
-        // = 1_000_000_000
-        assert_eq!(effective_price, U256::from(1_000_000_000));
     }
 }

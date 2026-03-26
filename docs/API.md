@@ -1,4 +1,4 @@
-# ZeroChain API（Native-Only）
+# ZeroChain API
 
 ## Endpoints
 
@@ -7,8 +7,8 @@
 
 ## 方法分组
 
-- 基础：`web3_*`、`net_*`
-- 原生扩展：`zero_*`
+- 信息与网络：`zero_clientVersion`、`zero_keccak256`、`net_*`
+- ZeroChain 扩展：`zero_*`
 
 ## 常用 RPC 示例
 

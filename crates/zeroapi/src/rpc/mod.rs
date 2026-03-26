@@ -513,9 +513,9 @@ impl RpcApi {
         params: Option<Vec<serde_json::Value>>,
     ) -> Result<serde_json::Value, RpcErrorObject> {
         match method {
-            // web3_* methods
-            "web3_clientVersion" => self.web3_client_version(params),
-            "web3_sha3" => self.web3_sha3(params),
+            // ZeroChain info methods
+            "zero_clientVersion" => self.zero_client_version(params),
+            "zero_keccak256" => self.zero_keccak256(params),
 
             // net_* methods
             "net_version" => self.net_version(params),
@@ -550,16 +550,16 @@ impl RpcApi {
         }
     }
 
-    // ============ web3_* methods ============
+    // ============ ZeroChain info methods ============
 
-    fn web3_client_version(
+    fn zero_client_version(
         &self,
         _params: Option<Vec<serde_json::Value>>,
     ) -> Result<serde_json::Value, RpcErrorObject> {
         Ok(serde_json::json!("ZeroChain/v0.1.0"))
     }
 
-    fn web3_sha3(
+    fn zero_keccak256(
         &self,
         params: Option<Vec<serde_json::Value>>,
     ) -> Result<serde_json::Value, RpcErrorObject> {
@@ -3556,7 +3556,7 @@ mod tests {
 
         let key = zerocore::crypto::PrivateKey::random();
         let to = parse_address("ZER0x1111111111111111111111111111111111111111").expect("to");
-        let signed = zerocore::transaction::UnsignedTransaction::new_legacy(
+        let signed = zerocore::transaction::UnsignedTransaction::new_transfer(
             0,
             U256::from(1u64),
             U256::from(21_000u64),
@@ -4302,7 +4302,7 @@ mod tests {
             .zero_list_transactions(Some(vec![serde_json::json!({
                 "page": 1,
                 "limit": 10,
-                "kind": "native-only"
+                "kind": "legacy"
             })]))
             .expect_err("invalid kind should be rejected");
         assert_eq!(err.code, -32602);

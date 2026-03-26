@@ -82,7 +82,7 @@ scripts/public_node_soak_monitor.sh start
 
 - 每 `60s` 采样一次
 - 连续运行 `72h`
-- 同时采集本地节点（`http://127.0.0.1:29645`）与远端节点（通过 SSH 在远端访问 `127.0.0.1:28545`）的 `zero_peers`/`web3_clientVersion` 健康数据
+- 同时采集本地节点（`http://127.0.0.1:29645`）与远端节点（通过 SSH 在远端访问 `127.0.0.1:28545`）的 `zero_peers`/`zero_clientVersion` 健康数据
 - 输出 CSV 到 `artifacts/public-node-soak-monitor/<timestamp>/samples.csv`
 
 常用命令：

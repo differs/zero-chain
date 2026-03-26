@@ -1,6 +1,6 @@
 //! UTXO Compute v1.1 core module.
 //!
-//! This module is the canonical L1 execution path for native compute.
+//! This module is the canonical L1 execution path for ZeroChain compute.
 //! L1 consensus and state transitions are defined here.
 
 pub mod agent;

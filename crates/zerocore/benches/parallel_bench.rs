@@ -9,7 +9,7 @@ use zerocore::transaction::UnsignedTransaction;
 fn create_test_transactions(count: usize) -> Vec<UnsignedTransaction> {
     let mut txs = Vec::new();
     for i in 0..count {
-        let tx = UnsignedTransaction::new_legacy(
+        let tx = UnsignedTransaction::new_transfer(
             i as u64,
             U256::from(1_000_000_000),
             U256::from(21000),

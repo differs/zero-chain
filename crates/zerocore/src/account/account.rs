@@ -526,7 +526,7 @@ pub enum StateEvent {
 /// Account type enumeration
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AccountType {
-    /// External Owned Account (EOA)
+    /// Externally signed account
     ExternalOwned {
         /// Public key
         public_key: PublicKey,
@@ -546,7 +546,7 @@ pub enum AccountType {
         admin: Option<Address>,
     },
 
-    /// Account abstraction (smart contract wallet)
+    /// Policy-controlled account
     AbstractAccount {
         /// Validator contract address
         validator: Address,
@@ -718,8 +718,8 @@ impl Default for Account {
 }
 
 impl Account {
-    /// Create a new EOA account
-    pub fn new_eoa(public_key: PublicKey, address: Address) -> Self {
+    /// Create a new externally signed account
+    pub fn new_signer_account(public_key: PublicKey, address: Address) -> Self {
         let now = current_timestamp();
 
         Self {
@@ -887,7 +887,7 @@ mod tests {
         .unwrap();
         let addr = Address::from_bytes([1u8; 20]);
 
-        let account = Account::new_eoa(pk, addr);
+        let account = Account::new_signer_account(pk, addr);
 
         assert_eq!(account.address, addr);
         assert!(account.balance.is_zero());
@@ -904,7 +904,7 @@ mod tests {
         .unwrap();
         let addr = Address::from_bytes([1u8; 20]);
 
-        let mut account = Account::new_eoa(pk, addr);
+        let mut account = Account::new_signer_account(pk, addr);
 
         // Add balance
         account.update_balance(I256::from(1000)).unwrap();
@@ -925,7 +925,7 @@ mod tests {
         .unwrap();
         let addr = Address::from_bytes([1u8; 20]);
 
-        let mut account = Account::new_eoa(pk, addr);
+        let mut account = Account::new_signer_account(pk, addr);
 
         // Inactive -> Active (deposit)
         account

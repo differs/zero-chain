@@ -191,7 +191,7 @@ enum WalletAction {
         /// Optional account name
         #[arg(long)]
         name: Option<String>,
-        /// Signature scheme: ed25519 (native only)
+        /// Signature scheme: ed25519
         #[arg(long, default_value = "ed25519")]
         scheme: String,
         /// Passphrase for encrypting private key (required)
@@ -264,7 +264,7 @@ pub(crate) enum AccountAction {
         /// Optional account name
         #[arg(long)]
         name: Option<String>,
-        /// Signature scheme: ed25519 (native only)
+        /// Signature scheme: ed25519
         #[arg(long, default_value = "ed25519")]
         scheme: String,
         /// Passphrase for encrypting private key
@@ -294,7 +294,7 @@ pub(crate) enum TransactionAction {
         #[arg(long)]
         passphrase: Option<String>,
     },
-    /// Get native compute transaction result by tx id
+    /// Get compute transaction result by tx id
     Get {
         #[arg(short, long)]
         tx_id: String,

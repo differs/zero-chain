@@ -14,7 +14,7 @@ use zerocore::transaction::UnsignedTransaction;
 /// 创建 secp256k1 交易并签名
 fn create_secp256k1_tx(nonce: u64) -> (UnsignedTransaction, PrivateKey) {
     let private_key = PrivateKey::random();
-    let tx = UnsignedTransaction::new_legacy(
+    let tx = UnsignedTransaction::new_transfer(
         nonce,
         U256::from(1_000_000_000),
         U256::from(21000),

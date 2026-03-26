@@ -5,7 +5,7 @@ A blockchain focused on native UTXO Compute execution and PoW security.
 ## Features
 
 - Native UTXO Compute canonical path
-- ed25519 native account and signing flow
+- ed25519 account and signing flow
 - PoW consensus and P2P networking
 - JSON-RPC + WebSocket service surface
 - CLI for node, wallet, account, transaction, and block operations
@@ -50,26 +50,26 @@ cargo test
 
 ```bash
 # Create native wallet account
-zerochain wallet new --name native-1 --scheme ed25519 --passphrase "StrongPassphrase123!"
+zerochain wallet new --name ed25519-1 --scheme ed25519 --passphrase "StrongPassphrase123!"
 
 # List wallet accounts
 zerochain wallet list
 
 # Account alias command (delegates to wallet)
-zerochain account new --name native-2 --scheme ed25519 --passphrase "StrongPassphrase123!"
+zerochain account new --name ed25519-2 --scheme ed25519 --passphrase "StrongPassphrase123!"
 zerochain account list
 
 # Sign message
-zerochain wallet sign --name native-1 --message "hello" --passphrase "StrongPassphrase123!"
+zerochain wallet sign --name ed25519-1 --message "hello" --passphrase "StrongPassphrase123!"
 
 # Unlock then sign without passphrase
-zerochain wallet unlock --name native-1 --passphrase "StrongPassphrase123!" --ttl-secs 600
-zerochain wallet sign --name native-1 --message "hello"
+zerochain wallet unlock --name ed25519-1 --passphrase "StrongPassphrase123!" --ttl-secs 600
+zerochain wallet sign --name ed25519-1 --message "hello"
 
-# Submit native compute transaction from JSON file
-zerochain transaction send --tx-file ./tx.json --account-name native-1 --passphrase "StrongPassphrase123!"
+# Submit compute transaction from JSON file
+zerochain transaction send --tx-file ./tx.json --account-name ed25519-1 --passphrase "StrongPassphrase123!"
 
-# Query native compute transaction result
+# Query compute transaction result
 zerochain transaction get --tx-id 0x...
 ```
 

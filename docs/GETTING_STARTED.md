@@ -29,19 +29,19 @@ cargo build --release
 
 ```bash
 ./target/release/zerochain account new \
-  --name native-1 \
+  --name ed25519-1 \
   --scheme ed25519 \
   --passphrase "StrongPassphrase123!"
 
 ./target/release/zerochain account list
 ```
 
-## 提交原生交易
+## 提交 Compute 交易
 
 ```bash
 ./target/release/zerochain transaction send \
   --tx-file ./tx.json \
-  --account-name native-1 \
+  --account-name ed25519-1 \
   --passphrase "StrongPassphrase123!"
 
 ./target/release/zerochain transaction get --tx-id 0x...

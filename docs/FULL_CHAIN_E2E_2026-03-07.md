@@ -1,4 +1,4 @@
-# Full-Chain E2E（Native-Only）
+# Full-Chain E2E
 
 ## 目标
 

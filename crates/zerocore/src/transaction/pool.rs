@@ -581,7 +581,7 @@ mod tests {
 
         // Create test transaction
         let private_key = PrivateKey::random();
-        let tx = UnsignedTransaction::new_legacy(
+        let tx = UnsignedTransaction::new_transfer(
             0,
             U256::from(1_000_000_000),
             U256::from(21000),
@@ -615,7 +615,7 @@ mod tests {
         // Add multiple transactions
         for i in 0..5 {
             let private_key = PrivateKey::random();
-            let tx = UnsignedTransaction::new_legacy(
+            let tx = UnsignedTransaction::new_transfer(
                 0,
                 U256::from(1_000_000_000 + i * 100_000_000),
                 U256::from(21000),
@@ -642,7 +642,7 @@ mod tests {
 
         // Add transaction
         let private_key = PrivateKey::random();
-        let tx = UnsignedTransaction::new_legacy(
+        let tx = UnsignedTransaction::new_transfer(
             0,
             U256::from(1_000_000_000),
             U256::from(21000),

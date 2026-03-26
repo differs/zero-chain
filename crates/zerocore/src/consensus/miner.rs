@@ -324,7 +324,7 @@ impl MiningEngine {
         Ok(Block::new(header, transactions))
     }
 
-    /// Calculate base fee (EIP-1559 style)
+    /// Calculate base fee adjustment
     fn calculate_base_fee(&self, parent: &BlockHeader) -> U256 {
         // Simplified base fee calculation
         let base_fee = parent.base_fee_per_gas;
