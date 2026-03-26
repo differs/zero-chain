@@ -146,7 +146,7 @@ pub struct RpcConfig {
     pub compute_backend: ComputeBackend,
     /// Database path for file-based backends (rocksdb/redb)
     pub compute_db_path: String,
-    /// Chain identifier used by native transaction context.
+    /// Chain identifier used by compute context.
     pub chain_id: u64,
     /// Network id returned by net_version.
     pub network_id: u64,

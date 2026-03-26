@@ -2,7 +2,7 @@
 //!
 //! Provides:
 //! - Peer discovery and management
-//! - Block and transaction propagation
+//! - Block and compute operation propagation
 //! - Chain synchronization
 //! - RLPx protocol implementation
 

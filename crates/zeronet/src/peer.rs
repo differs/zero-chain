@@ -96,7 +96,7 @@ pub struct Peer {
     pub status: PeerStatus,
     /// Send channel
     tx: mpsc::Sender<ProtocolMessage>,
-    /// Known transactions
+    /// Known compute operations
     known_transactions: RwLock<HashSet<Hash>>,
 }
 
@@ -120,12 +120,12 @@ impl Peer {
         Ok(())
     }
 
-    /// Check if peer knows transaction
+    /// Check if peer knows compute operation
     pub fn knows_transaction(&self, tx_hash: &Hash) -> bool {
         self.known_transactions.read().contains(tx_hash)
     }
 
-    /// Mark transaction as known
+    /// Mark compute operation as known
     pub fn mark_transaction_known(&self, tx_hash: Hash) {
         let mut known = self.known_transactions.write();
 

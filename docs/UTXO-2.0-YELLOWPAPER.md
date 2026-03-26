@@ -293,7 +293,7 @@ enum Schedule {
 - `get_current_height() -> u64`
 - `get_block_hash(height: u64) -> Hash`
 - `get_utxo(id: Hash) -> Option<Utxo>`（需权限）
-- `create_transaction(tx: Transaction) -> bool`（生成内部交易，但需满足权限和资源约束）
+- `create_operation(tx: ComputeTx) -> bool`（生成内部操作，但需满足权限和资源约束）
 - `log(message: &str)`
 
 执行时限、内存和Gas由节点强制执行。
@@ -311,7 +311,7 @@ enum Schedule {
 | 列族名 | 键 | 值 | 说明 |
 |--------|----|----|------|
 | `utxo` | UTXO ID | 序列化Utxo | 主UTXO集 |
-| `tx` | 交易ID | 序列化Transaction | 已确认交易 |
+| `tx` | 操作ID | 序列化ComputeTx | 已确认操作 |
 | `block` | 区块高度 | 序列化Block | 区块数据 |
 | `utxo_by_domain` | (domain, utxo_id) | 空 | 按域遍历UTXO |
 | `agent_schedule` | (next_block, agent_id) | 空 | 时间索引 |

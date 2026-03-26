@@ -88,7 +88,7 @@ curl -X POST http://127.0.0.1:8545 \
   -d '{"jsonrpc":"2.0","method":"zero_listComputeTxResults","params":[{"page":1,"limit":20}],"id":1}'
 ```
 
-### 11) 按哈希查询交易（新增）
+### 11) 按哈希查询操作（新增）
 
 ```bash
 curl -X POST http://127.0.0.1:8545 \
@@ -96,7 +96,7 @@ curl -X POST http://127.0.0.1:8545 \
   -d '{"jsonrpc":"2.0","method":"zero_getTransactionByHash","params":["0x..."],"id":1}'
 ```
 
-### 12) 最近交易列表（新增，compute-only）
+### 12) 最近操作列表（新增，compute-only）
 
 ```bash
 curl -X POST http://127.0.0.1:8545 \
@@ -104,7 +104,7 @@ curl -X POST http://127.0.0.1:8545 \
   -d '{"jsonrpc":"2.0","method":"zero_listTransactions","params":[{"page":1,"limit":20,"kind":"all"}],"id":1}'
 ```
 
-### 13) 按地址查询交易列表（新增）
+### 13) 按地址查询操作列表（新增）
 
 ```bash
 curl -X POST http://127.0.0.1:8545 \
@@ -112,7 +112,7 @@ curl -X POST http://127.0.0.1:8545 \
   -d '{"jsonrpc":"2.0","method":"zero_getTransactionsByAddress","params":[{"address":"ZER0x...","page":1,"limit":20}],"id":1}'
 ```
 
-当前节点会返回 `unsupported: true`，因为旧 transfer 索引已移除，地址级交易历史尚未在 compute-only 路径下重建。
+当前节点会返回 `unsupported: true`，因为旧 transfer 索引已移除，地址级操作历史尚未在 compute-only 路径下重建。
 
 ## WebSocket 订阅
 

@@ -33,7 +33,7 @@ struct Cli {
     #[arg(long, default_value = "local")]
     network: String,
 
-    /// JSON-RPC URL used by account/transaction query commands
+    /// JSON-RPC URL used by account/compute query commands
     #[arg(long)]
     rpc_url: Option<String>,
 
