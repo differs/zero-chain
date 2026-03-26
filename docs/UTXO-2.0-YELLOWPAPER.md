@@ -151,20 +151,20 @@ struct Input {
 }
 ```
 
-### 3.6 交易 (Transaction)
+### 3.6 Compute 操作 (ComputeTx)
 
 ```rust
-struct Transaction {
+struct ComputeTx {
     inputs: Vec<Input>,
     outputs: Vec<Utxo>,
     fee: u64,                    // 支付给矿工的主币手续费
     nonce: Option<u64>,           // 防重放随机数（可选）
     metadata: Vec<(String, Vec<u8>)>, // 元数据（如跨域证明）
-    domain: DomainId,              // 交易所在域（输入UTXO必须属于该域，跨域交易特殊处理）
+    domain: DomainId,              // 操作所在域（输入UTXO必须属于该域，跨域操作特殊处理）
 }
 ```
 
-交易的唯一标识`txid`由整个交易的序列化哈希计算得出。
+Compute 操作的唯一标识`txid`由整个操作的序列化哈希计算得出。
 
 ### 3.7 区块头 (BlockHeader)
 
@@ -185,7 +185,7 @@ struct BlockHeader {
 ```rust
 struct Block {
     header: BlockHeader,
-    txs: Vec<Transaction>,         // 交易列表
+    ops: Vec<ComputeTx>,           // Compute 操作列表
 }
 ```
 
@@ -195,9 +195,9 @@ struct Block {
 
 ### 4.1 基本验证
 
-节点收到交易后，执行以下检查：
+节点收到 Compute 操作后，执行以下检查：
 1. **输入存在性**：所有`prev_out`引用的UTXO必须存在于当前UTXO集中，且未被花费。
-2. **域一致性**：所有输入的`domain`必须等于交易的`domain`（除非是跨域交易，见第8节）。
+2. **域一致性**：所有输入的`domain`必须等于操作的`domain`（除非是跨域操作，见第8节）。
 3. **解锁验证**：对每个输入，执行`unlock`脚本与对应UTXO的`lock`脚本。解锁成功条件：
    - 若`lock.vm`为0（Bitcoin Script），则按照比特币脚本规则验证栈执行结果是否为真。
    - 若`lock.vm`为1（WASM），则调用WASM运行时，传入`unlock`脚本和见证数据，返回布尔值。
@@ -213,7 +213,7 @@ struct Block {
    - `created_at`必须设为当前区块高度。
    - `ttl`不能小于当前高度。
    - `resources`中不能包含重复的资产ID。
-7. **原子性**：所有步骤必须全部成功，否则整个交易无效，状态回滚。
+7. **原子性**：所有步骤必须全部成功，否则整个操作无效，状态回滚。
 
 ### 4.2 特殊操作
 

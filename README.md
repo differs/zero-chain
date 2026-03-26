@@ -8,7 +8,7 @@ A blockchain focused on native UTXO Compute execution and PoW security.
 - ed25519 account and signing flow
 - PoW consensus and P2P networking
 - JSON-RPC + WebSocket service surface
-- CLI for node, wallet, account, transaction, and block operations
+- CLI for node, wallet, account, compute, and block operations
 
 ## Quick Start
 

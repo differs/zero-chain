@@ -14,14 +14,14 @@ pub struct UtxoReference {
     /// Amount
     pub amount: U256,
     /// Lock script
-    pub lock_script: LockScript,
+    pub lock_rule: UtxoLock,
     /// Is spent
     pub spent: bool,
 }
 
-/// Lock script types
+/// UTXO lock rule types
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum LockScript {
+pub enum UtxoLock {
     /// Pay to Public Key Hash (P2PKH)
     P2PKH {
         /// Public key hash
@@ -51,19 +51,19 @@ pub enum LockScript {
     },
 }
 
-impl LockScript {
+impl UtxoLock {
     /// Check if lock is satisfied
-    pub fn verify(&self, unlock_script: &UnlockScript, signature_data: &[u8]) -> bool {
-        match (self, unlock_script) {
-            (LockScript::P2PKH { pubkey_hash }, UnlockScript::P2PKH { pubkey, signature }) => {
+    pub fn verify(&self, witness: &UtxoWitness, signature_data: &[u8]) -> bool {
+        match (self, witness) {
+            (UtxoLock::P2PKH { pubkey_hash }, UtxoWitness::P2PKH { pubkey, signature }) => {
                 // Verify signature against public key
                 // This would use the crypto module
                 true // Simplified
             }
-            (LockScript::TimeLock { unlock_time }, UnlockScript::TimeLock { current_time }) => {
+            (UtxoLock::TimeLock { unlock_time }, UtxoWitness::TimeLock { current_time }) => {
                 current_time >= unlock_time
             }
-            (LockScript::MultiSigLock { threshold, .. }, UnlockScript::MultiSig { signatures }) => {
+            (UtxoLock::MultiSigLock { threshold, .. }, UtxoWitness::MultiSig { signatures }) => {
                 signatures.len() >= *threshold as usize
             }
             _ => false,
@@ -71,9 +71,9 @@ impl LockScript {
     }
 }
 
-/// Unlock script types
+/// Witness data used to satisfy a UTXO lock
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum UnlockScript {
+pub enum UtxoWitness {
     /// P2PKH unlock
     P2PKH {
         /// Public key
@@ -104,7 +104,7 @@ pub struct UtxoOutput {
     /// Amount
     pub amount: U256,
     /// Lock script
-    pub lock_script: LockScript,
+    pub lock_rule: UtxoLock,
     /// Is spent
     pub spent: bool,
     /// Spent by transaction hash
@@ -115,10 +115,10 @@ pub struct UtxoOutput {
 
 impl UtxoOutput {
     /// Create a new UTXO output
-    pub fn new(amount: U256, lock_script: LockScript) -> Self {
+    pub fn new(amount: U256, lock_rule: UtxoLock) -> Self {
         Self {
             amount,
-            lock_script,
+            lock_rule,
             spent: false,
             spent_by: None,
             created_at: current_timestamp(),
@@ -132,18 +132,18 @@ impl UtxoOutput {
     }
 }
 
-/// UTXO input for transaction
+/// UTXO input reference plus witness data
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UtxoInput {
     /// Reference to UTXO
     pub reference: UtxoReference,
-    /// Unlock script
-    pub unlock_script: UnlockScript,
+    /// Witness data
+    pub witness: UtxoWitness,
 }
 
-/// UTXO transaction
+/// UTXO operation bundle
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct UtxoTransaction {
+pub struct UtxoOperation {
     /// Inputs
     pub inputs: Vec<UtxoInput>,
     /// Outputs
@@ -152,7 +152,7 @@ pub struct UtxoTransaction {
     pub lock_time: u64,
 }
 
-impl UtxoTransaction {
+impl UtxoOperation {
     /// Calculate total input amount
     pub fn input_amount(&self) -> U256 {
         self.inputs
@@ -212,10 +212,10 @@ pub enum UtxoError {
     NotFound,
     #[error("UTXO already spent")]
     AlreadySpent,
-    #[error("Invalid lock script")]
-    InvalidLockScript,
-    #[error("Invalid unlock script")]
-    InvalidUnlockScript,
+    #[error("Invalid lock rule")]
+    InvalidLockRule,
+    #[error("Invalid witness")]
+    InvalidWitness,
     #[error("Signature verification failed")]
     SignatureVerificationFailed,
 }
@@ -239,12 +239,12 @@ mod tests {
                 tx_hash: Hash::from_bytes([1u8; 32]),
                 output_index: 0,
                 amount: U256::from(1000),
-                lock_script: LockScript::P2PKH {
+                lock_rule: UtxoLock::P2PKH {
                     pubkey_hash: Address::from_bytes([2u8; 20]),
                 },
                 spent: false,
             },
-            unlock_script: UnlockScript::P2PKH {
+            witness: UtxoWitness::P2PKH {
                 pubkey: Hash::from_bytes([3u8; 32]),
                 signature: Ed25519Signature::new([0u8; 32], [0u8; 32], 0),
             },
@@ -252,12 +252,12 @@ mod tests {
 
         let output = UtxoOutput::new(
             U256::from(900),
-            LockScript::P2PKH {
+            UtxoLock::P2PKH {
                 pubkey_hash: Address::from_bytes([4u8; 20]),
             },
         );
 
-        let tx = UtxoTransaction {
+        let tx = UtxoOperation {
             inputs: vec![input],
             outputs: vec![output],
             lock_time: 0,

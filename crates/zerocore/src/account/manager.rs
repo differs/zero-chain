@@ -1,7 +1,7 @@
 //! Account manager trait and implementation
 
 use super::{Account, AccountConfig, AccountError, AccountType, I256, U256};
-use crate::account::utxo::{LockScript, UtxoOutput, UtxoReference};
+use crate::account::utxo::{UtxoLock, UtxoOutput, UtxoReference};
 use crate::crypto::{Address, Ed25519Signature, Hash};
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -43,7 +43,7 @@ pub trait AccountManager: Send + Sync {
         &self,
         address: &Address,
         amount: U256,
-        lock_script: LockScript,
+        lock_rule: UtxoLock,
     ) -> Result<UtxoReference, AccountError>;
 
     /// Verify transaction signature
@@ -256,18 +256,18 @@ impl AccountManager for InMemoryAccountManager {
         &self,
         _address: &Address,
         amount: U256,
-        lock_script: LockScript,
+        lock_rule: UtxoLock,
     ) -> Result<UtxoReference, AccountError> {
         let tx_hash = Hash::from_bytes([1u8; 32]); // Would be computed from transaction
 
-        let utxo = UtxoOutput::new(amount, lock_script.clone());
+        let utxo = UtxoOutput::new(amount, lock_rule.clone());
         self.utxos.insert(tx_hash, utxo);
 
         Ok(UtxoReference {
             tx_hash,
             output_index: 0,
             amount,
-            lock_script,
+            lock_rule,
             spent: false,
         })
     }
