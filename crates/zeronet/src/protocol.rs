@@ -3,18 +3,6 @@
 use serde::{Deserialize, Serialize};
 use zerocore::{account::Account, block::Block, crypto::Address, crypto::Hash};
 
-/// Transfer transaction record synchronized across peers.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SyncTransferTxRecord {
-    pub tx_hash: Hash,
-    pub from: Address,
-    pub to: Address,
-    pub value_hex: String,
-    pub from_nonce: u64,
-    pub timestamp: u64,
-    pub block_number: u64,
-}
-
 /// Compute transaction result record synchronized across peers.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct SyncComputeTxRecord {
@@ -50,7 +38,6 @@ pub struct SyncStateSnapshot {
     pub state_root: Hash,
     pub account_count: u64,
     pub accounts: Vec<Account>,
-    pub transfer_txs: Vec<SyncTransferTxRecord>,
     pub compute_txs: Vec<SyncComputeTxRecord>,
     /// Snapshot proof bytes used to bind snapshot with block hash.
     pub state_proof: Vec<u8>,

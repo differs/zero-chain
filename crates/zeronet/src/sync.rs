@@ -3,9 +3,9 @@
 use crate::protocol::{ProtocolMessage, SyncBlockBody, SyncHeader, SyncStateSnapshot};
 use crate::{
     global_block_by_number, global_latest_block, global_replace_accounts,
-    global_replace_compute_txs, global_replace_transfer_txs, global_store_block,
-    global_synced_accounts, global_synced_compute_txs, global_synced_height,
-    global_synced_transfer_txs, set_global_synced_height, NetworkError, Result,
+    global_replace_compute_txs, global_store_block, global_synced_accounts,
+    global_synced_compute_txs, global_synced_height, set_global_synced_height, NetworkError,
+    Result,
 };
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -158,7 +158,6 @@ impl SyncManager {
         let block = global_block_by_number(block_number)?;
         let block_hash = block.header.hash;
         let accounts = global_synced_accounts();
-        let transfer_txs = global_synced_transfer_txs();
         let compute_txs = global_synced_compute_txs();
         let state_root = derive_state_root(&accounts);
         let account_count = accounts.len() as u64;
@@ -167,7 +166,6 @@ impl SyncManager {
             state_root,
             account_count,
             accounts,
-            transfer_txs,
             compute_txs,
             state_proof: Vec::new(),
         };
@@ -267,7 +265,6 @@ impl SyncManager {
                                     let local_header = sync_header_from_block(&local_block);
                                     if state_proof_verifier.verify(&local_header, &snapshot) {
                                         global_replace_accounts(snapshot.accounts.clone());
-                                        global_replace_transfer_txs(snapshot.transfer_txs.clone());
                                         global_replace_compute_txs(snapshot.compute_txs.clone());
                                     }
                                 }
@@ -441,7 +438,6 @@ impl SyncManager {
                 }
 
                 global_replace_accounts(snapshot.accounts.clone());
-                global_replace_transfer_txs(snapshot.transfer_txs.clone());
                 global_replace_compute_txs(snapshot.compute_txs.clone());
 
                 for header in &headers {
@@ -704,10 +700,6 @@ pub(crate) fn derive_state_proof(block_hash: &Hash, snapshot: &SyncStateSnapshot
     data.extend_from_slice(&snapshot.block_number.to_be_bytes());
     data.extend_from_slice(snapshot.state_root.as_bytes());
     data.extend_from_slice(&(snapshot.account_count).to_be_bytes());
-    data.extend_from_slice(&(snapshot.transfer_txs.len() as u64).to_be_bytes());
-    for record in &snapshot.transfer_txs {
-        data.extend_from_slice(record.tx_hash.as_bytes());
-    }
     data.extend_from_slice(&(snapshot.compute_txs.len() as u64).to_be_bytes());
     for record in &snapshot.compute_txs {
         data.extend_from_slice(record.tx_hash.as_bytes());
@@ -793,15 +785,6 @@ mod tests {
             updated_at: 7,
             ..Account::default()
         });
-        crate::global_record_transfer_tx(crate::protocol::SyncTransferTxRecord {
-            tx_hash: Hash::from_bytes([0x22u8; 32]),
-            from: account_address,
-            to: Address::from_bytes([0x33u8; 20]),
-            value_hex: "0x1".to_string(),
-            from_nonce: 3,
-            timestamp: 8,
-            block_number: 4,
-        });
         crate::global_record_compute_tx(crate::protocol::SyncComputeTxRecord {
             tx_hash: Hash::from_bytes([0x44u8; 32]),
             result: serde_json::json!({"ok": true, "submitted_at_unix": 8}),
@@ -812,7 +795,6 @@ mod tests {
             .expect("state snapshot response");
         assert_eq!(snapshot.block_number, 4);
         assert_eq!(snapshot.account_count, 1);
-        assert_eq!(snapshot.transfer_txs.len(), 1);
         assert_eq!(snapshot.compute_txs.len(), 1);
         assert_eq!(snapshot.state_root, derive_state_root(&snapshot.accounts));
         assert_eq!(
@@ -872,7 +854,6 @@ mod tests {
                             state_root: derive_state_root(&[]),
                             account_count: 0,
                             accounts: Vec::new(),
-                            transfer_txs: Vec::new(),
                             compute_txs: Vec::new(),
                             state_proof: Vec::new(),
                         };

@@ -19,7 +19,7 @@ pub use discovery::{Discovery, NodeRecord};
 pub use peer::{Peer, PeerInfo, PeerManager, PeerStatus};
 pub use protocol::{
     BlockMessage, Protocol, ProtocolMessage, SyncBlockBody, SyncComputeTxRecord, SyncHeader,
-    SyncStateSnapshot, SyncTransferTxRecord,
+    SyncStateSnapshot,
 };
 pub use sync::{SyncManager, SyncState};
 
@@ -47,10 +47,6 @@ static GLOBAL_BLOCKS: Lazy<RwLock<BTreeMap<u64, zerocore::block::Block>>> =
     Lazy::new(|| RwLock::new(BTreeMap::new()));
 static GLOBAL_SYNC_ACCOUNTS: Lazy<RwLock<HashMap<zerocore::crypto::Address, Account>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
-static GLOBAL_SYNC_TRANSFER_TXS: Lazy<RwLock<HashMap<Hash, SyncTransferTxRecord>>> =
-    Lazy::new(|| RwLock::new(HashMap::new()));
-static GLOBAL_SYNC_TRANSFER_ORDER: Lazy<RwLock<VecDeque<Hash>>> =
-    Lazy::new(|| RwLock::new(VecDeque::new()));
 static GLOBAL_SYNC_COMPUTE_TXS: Lazy<RwLock<HashMap<Hash, SyncComputeTxRecord>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
 static GLOBAL_SYNC_COMPUTE_ORDER: Lazy<RwLock<VecDeque<Hash>>> =
@@ -145,8 +141,6 @@ pub fn global_block_number_for_hash(target: &Hash) -> Option<u64> {
 pub fn global_reset_sync_cache() {
     GLOBAL_BLOCKS.write().clear();
     GLOBAL_SYNC_ACCOUNTS.write().clear();
-    GLOBAL_SYNC_TRANSFER_TXS.write().clear();
-    GLOBAL_SYNC_TRANSFER_ORDER.write().clear();
     GLOBAL_SYNC_COMPUTE_TXS.write().clear();
     GLOBAL_SYNC_COMPUTE_ORDER.write().clear();
     set_global_synced_height(0);
@@ -176,49 +170,6 @@ pub fn global_synced_account(address: &zerocore::crypto::Address) -> Option<Acco
 /// Export synchronized account snapshot.
 pub fn global_synced_accounts() -> Vec<Account> {
     GLOBAL_SYNC_ACCOUNTS.read().values().cloned().collect()
-}
-
-/// Record or update a synchronized transfer transaction record.
-pub fn global_record_transfer_tx(record: SyncTransferTxRecord) {
-    let tx_hash = record.tx_hash;
-    let mut map = GLOBAL_SYNC_TRANSFER_TXS.write();
-    let mut order = GLOBAL_SYNC_TRANSFER_ORDER.write();
-    map.insert(tx_hash, record);
-    order.retain(|h| h != &tx_hash);
-    order.push_back(tx_hash);
-    while order.len() > MAX_GLOBAL_SYNC_TX_INDEX {
-        if let Some(stale) = order.pop_front() {
-            map.remove(&stale);
-        }
-    }
-}
-
-/// Replace synchronized transfer tx index.
-pub fn global_replace_transfer_txs(records: Vec<SyncTransferTxRecord>) {
-    let mut map = GLOBAL_SYNC_TRANSFER_TXS.write();
-    let mut order = GLOBAL_SYNC_TRANSFER_ORDER.write();
-    map.clear();
-    order.clear();
-    for record in records {
-        let tx_hash = record.tx_hash;
-        map.insert(tx_hash, record);
-        order.push_back(tx_hash);
-    }
-}
-
-/// Read a synchronized transfer transaction record.
-pub fn global_synced_transfer_tx(hash: &Hash) -> Option<SyncTransferTxRecord> {
-    GLOBAL_SYNC_TRANSFER_TXS.read().get(hash).cloned()
-}
-
-/// Export synchronized transfer transaction records (oldest -> newest).
-pub fn global_synced_transfer_txs() -> Vec<SyncTransferTxRecord> {
-    let map = GLOBAL_SYNC_TRANSFER_TXS.read();
-    GLOBAL_SYNC_TRANSFER_ORDER
-        .read()
-        .iter()
-        .filter_map(|h| map.get(h).cloned())
-        .collect()
 }
 
 /// Record or update a synchronized compute tx result record.
