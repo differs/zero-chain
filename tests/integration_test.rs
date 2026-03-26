@@ -1,6 +1,6 @@
 //! ZeroChain Integration Tests
 
-use zerocore::crypto::{PrivateKey, Address, Hash};
+use zerocore::crypto::{Address, Ed25519PrivateKey, Hash};
 use zerocore::account::{Account, AccountType, U256, InMemoryAccountManager, AccountManager};
 use zerocore::block::{Block, create_genesis_block};
 use zerocore::consensus::{PowConsensus, PowAlgorithm, MiningEngine, MiningConfig};
@@ -53,10 +53,10 @@ impl TestFixture {
 /// Test: Sign and verify transaction envelope
 #[tokio::test]
 async fn test_transaction_execution() {
-    let sender_key = PrivateKey::random();
+    let sender_key = Ed25519PrivateKey::random();
     let sender_addr = Address::from_public_key(&sender_key.public_key());
     
-    let recipient_key = PrivateKey::random();
+    let recipient_key = Ed25519PrivateKey::random();
     let recipient_addr = Address::from_public_key(&recipient_key.public_key());
 
     let signing_payload = [
@@ -107,7 +107,7 @@ async fn test_state_transitions() {
     let executor = StateExecutor::new(fixture.state_db.clone(), 10086);
     
     // Create test account
-    let key = PrivateKey::random();
+    let key = Ed25519PrivateKey::random();
     let addr = Address::from_public_key(&key.public_key());
     
     let mut account = Account::new_user_account(key.public_key(), addr);
@@ -219,7 +219,7 @@ async fn test_account_management() {
     let manager = InMemoryAccountManager::new();
     
     // Create account
-    let key = PrivateKey::random();
+    let key = Ed25519PrivateKey::random();
     let account_type = AccountType::User {
         public_key: key.public_key(),
     };
@@ -279,7 +279,7 @@ async fn test_sync_manager() {
 /// Test: User account construction
 #[tokio::test]
 async fn test_transaction_pool() {
-    let key = PrivateKey::random();
+    let key = Ed25519PrivateKey::random();
     let address = Address::from_public_key(&key.public_key());
     let account = Account::new_user_account(key.public_key(), address);
 
@@ -296,7 +296,7 @@ fn bench_transaction_creation() {
     let start = std::time::Instant::now();
     
     for _ in 0..1000 {
-        let key = PrivateKey::random();
+        let key = Ed25519PrivateKey::random();
         let payload = b"zerochain-signature-smoke";
         let signature = key.sign(payload);
         assert!(signature.verify(payload, &key.public_key()).unwrap());

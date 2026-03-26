@@ -75,8 +75,8 @@ UTXO Compute支持多域架构：
 
 ```rust
 type Hash = [u8; 32];          // Blake3哈希
-type PublicKey = [u8; 32];     // Ed25519公钥
-type Signature = [u8; 64];     // Ed25519签名
+type Ed25519PublicKey = [u8; 32];   // Ed25519公钥
+type Ed25519Signature = [u8; 64];   // Ed25519签名
 type AssetId = Hash;           // 资产标识符
 type DomainId = u32;           // 域标识符，0为主链
 ```

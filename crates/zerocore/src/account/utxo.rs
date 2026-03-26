@@ -1,7 +1,7 @@
 //! UTXO (Unspent Transaction Output) module for hybrid account model
 
 use crate::account::U256;
-use crate::crypto::{Address, Hash, Signature};
+use crate::crypto::{Address, Ed25519Signature, Hash};
 use serde::{Deserialize, Serialize};
 
 /// UTXO reference
@@ -79,7 +79,7 @@ pub enum UnlockScript {
         /// Public key
         pubkey: Hash,
         /// Signature
-        signature: Signature,
+        signature: Ed25519Signature,
     },
     /// Time lock unlock
     TimeLock {
@@ -89,7 +89,7 @@ pub enum UnlockScript {
     /// Multi-sig unlock
     MultiSig {
         /// Signatures
-        signatures: Vec<Signature>,
+        signatures: Vec<Ed25519Signature>,
     },
     /// Custom script
     CustomScript {
@@ -246,7 +246,7 @@ mod tests {
             },
             unlock_script: UnlockScript::P2PKH {
                 pubkey: Hash::from_bytes([3u8; 32]),
-                signature: Signature::new([0u8; 32], [0u8; 32], 0),
+                signature: Ed25519Signature::new([0u8; 32], [0u8; 32], 0),
             },
         };
 

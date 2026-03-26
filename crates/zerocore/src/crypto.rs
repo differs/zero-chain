@@ -7,7 +7,7 @@
 //! - Address derivation
 
 use ed25519_dalek::{
-    Signature as Ed25519Signature, Signer as _, SigningKey, Verifier as _, VerifyingKey,
+    Signature as DalekEd25519Signature, Signer as _, SigningKey, Verifier as _, VerifyingKey,
 };
 use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
@@ -180,7 +180,7 @@ impl Address {
     }
 
     /// Create address from public key
-    pub fn from_public_key(pubkey: &PublicKey) -> Self {
+    pub fn from_public_key(pubkey: &Ed25519PublicKey) -> Self {
         let hash = keccak256(&pubkey.0);
         let mut address = [0u8; 20];
         address.copy_from_slice(&hash[12..]);
@@ -212,9 +212,9 @@ impl fmt::Display for Address {
 
 /// 256-bit public key (ed25519)
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PublicKey([u8; 32]);
+pub struct Ed25519PublicKey([u8; 32]);
 
-impl PublicKey {
+impl Ed25519PublicKey {
     /// Create from bytes
     pub fn from_bytes(bytes: [u8; 32]) -> Result<Self, CryptoError> {
         Ok(Self(bytes))
@@ -235,32 +235,32 @@ impl PublicKey {
     }
 }
 
-impl fmt::Debug for PublicKey {
+impl fmt::Debug for Ed25519PublicKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "PublicKey({})", &self.to_hex()[..16])
+        write!(f, "Ed25519PublicKey({})", &self.to_hex()[..16])
     }
 }
 
 /// 256-bit private key (ed25519 seed)
-pub struct PrivateKey {
+pub struct Ed25519PrivateKey {
     bytes: [u8; 32],
 }
 
-impl Clone for PrivateKey {
+impl Clone for Ed25519PrivateKey {
     fn clone(&self) -> Self {
         Self { bytes: self.bytes }
     }
 }
 
-impl PartialEq for PrivateKey {
+impl PartialEq for Ed25519PrivateKey {
     fn eq(&self, other: &Self) -> bool {
         self.bytes == other.bytes
     }
 }
 
-impl Eq for PrivateKey {}
+impl Eq for Ed25519PrivateKey {}
 
-impl PrivateKey {
+impl Ed25519PrivateKey {
     /// Generate a new random private key
     pub fn random() -> Self {
         let mut bytes = [0u8; 32];
@@ -279,16 +279,16 @@ impl PrivateKey {
     }
 
     /// Get the corresponding public key
-    pub fn public_key(&self) -> PublicKey {
+    pub fn public_key(&self) -> Ed25519PublicKey {
         let signing_key = SigningKey::from_bytes(&self.bytes);
-        PublicKey(signing_key.verifying_key().to_bytes())
+        Ed25519PublicKey(signing_key.verifying_key().to_bytes())
     }
 
     /// Sign a message
-    pub fn sign(&self, message: &[u8]) -> Signature {
+    pub fn sign(&self, message: &[u8]) -> Ed25519Signature {
         let signing_key = SigningKey::from_bytes(&self.bytes);
         let signature = signing_key.sign(message).to_bytes();
-        Signature { bytes: signature }
+        Ed25519Signature { bytes: signature }
     }
 
     /// Convert to hex string
@@ -297,13 +297,13 @@ impl PrivateKey {
     }
 }
 
-impl fmt::Debug for PrivateKey {
+impl fmt::Debug for Ed25519PrivateKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "PrivateKey(***)")
+        write!(f, "Ed25519PrivateKey(***)")
     }
 }
 
-impl Drop for PrivateKey {
+impl Drop for Ed25519PrivateKey {
     fn drop(&mut self) {
         self.bytes.iter_mut().for_each(|b| *b = 0);
     }
@@ -311,11 +311,11 @@ impl Drop for PrivateKey {
 
 /// ed25519 signature
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub struct Signature {
+pub struct Ed25519Signature {
     bytes: [u8; 64],
 }
 
-impl serde::Serialize for Signature {
+impl serde::Serialize for Ed25519Signature {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
@@ -329,7 +329,7 @@ impl serde::Serialize for Signature {
     }
 }
 
-impl<'de> serde::Deserialize<'de> for Signature {
+impl<'de> serde::Deserialize<'de> for Ed25519Signature {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
@@ -337,13 +337,13 @@ impl<'de> serde::Deserialize<'de> for Signature {
         struct SignatureVisitor;
 
         impl<'de> serde::de::Visitor<'de> for SignatureVisitor {
-            type Value = Signature;
+            type Value = Ed25519Signature;
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 formatter.write_str("a 64-byte signature")
             }
 
-            fn visit_seq<A>(self, mut seq: A) -> Result<Signature, A::Error>
+            fn visit_seq<A>(self, mut seq: A) -> Result<Ed25519Signature, A::Error>
             where
                 A: serde::de::SeqAccess<'de>,
             {
@@ -353,7 +353,7 @@ impl<'de> serde::Deserialize<'de> for Signature {
                         .next_element()?
                         .ok_or_else(|| serde::de::Error::invalid_length(i, &self))?;
                 }
-                Ok(Signature { bytes })
+                Ok(Ed25519Signature { bytes })
             }
         }
 
@@ -361,7 +361,7 @@ impl<'de> serde::Deserialize<'de> for Signature {
     }
 }
 
-impl Signature {
+impl Ed25519Signature {
     /// Create a new signature
     pub fn new(r: [u8; 32], s: [u8; 32], _v: u8) -> Self {
         let mut bytes = [0u8; 64];
@@ -405,11 +405,15 @@ impl Signature {
     }
 
     /// Verify a signature
-    pub fn verify(&self, message: &[u8], public_key: &PublicKey) -> Result<bool, CryptoError> {
+    pub fn verify(
+        &self,
+        message: &[u8],
+        public_key: &Ed25519PublicKey,
+    ) -> Result<bool, CryptoError> {
         let verifying_key =
             VerifyingKey::from_bytes(&public_key.0).map_err(|_| CryptoError::InvalidPublicKey)?;
-        let signature =
-            Ed25519Signature::from_slice(&self.bytes).map_err(|_| CryptoError::InvalidSignature)?;
+        let signature = DalekEd25519Signature::from_slice(&self.bytes)
+            .map_err(|_| CryptoError::InvalidSignature)?;
         verifying_key
             .verify(message, &signature)
             .map(|_| true)
@@ -417,7 +421,7 @@ impl Signature {
     }
 
     /// Recovering ed25519 public keys from signatures is unsupported.
-    pub fn recover(&self, message: &[u8]) -> Result<PublicKey, CryptoError> {
+    pub fn recover(&self, message: &[u8]) -> Result<Ed25519PublicKey, CryptoError> {
         let _ = message;
         Err(CryptoError::KeyDerivationFailed)
     }
@@ -428,9 +432,9 @@ impl Signature {
     }
 }
 
-impl fmt::Debug for Signature {
+impl fmt::Debug for Ed25519Signature {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Signature({})", &self.to_hex()[..16])
+        write!(f, "Ed25519Signature({})", &self.to_hex()[..16])
     }
 }
 
@@ -489,7 +493,7 @@ mod tests {
 
     #[test]
     fn test_signature_roundtrip() {
-        let private_key = PrivateKey::random();
+        let private_key = Ed25519PrivateKey::random();
         let public_key = private_key.public_key();
 
         let message = b"test message";
@@ -505,7 +509,7 @@ mod tests {
 
     #[test]
     fn test_address_from_public_key() {
-        let private_key = PrivateKey::random();
+        let private_key = Ed25519PrivateKey::random();
         let public_key = private_key.public_key();
         let address = Address::from_public_key(&public_key);
 

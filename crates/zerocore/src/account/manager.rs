@@ -2,7 +2,7 @@
 
 use super::{Account, AccountConfig, AccountError, AccountType, I256, U256};
 use crate::account::utxo::{LockScript, UtxoOutput, UtxoReference};
-use crate::crypto::{Address, Hash, Signature};
+use crate::crypto::{Address, Ed25519Signature, Hash};
 use async_trait::async_trait;
 use dashmap::DashMap;
 use parking_lot::RwLock;
@@ -35,7 +35,7 @@ pub trait AccountManager: Send + Sync {
         &self,
         address: &Address,
         utxo_ref: &UtxoReference,
-        signature: Signature,
+        signature: Ed25519Signature,
     ) -> Result<(), AccountError>;
 
     /// Create UTXO
@@ -51,7 +51,7 @@ pub trait AccountManager: Send + Sync {
         &self,
         account: &Account,
         tx_hash: Hash,
-        signature: Signature,
+        signature: Ed25519Signature,
     ) -> Result<bool, AccountError>;
 
     /// Get account nonce
@@ -242,7 +242,7 @@ impl AccountManager for InMemoryAccountManager {
         &self,
         _address: &Address,
         utxo_ref: &UtxoReference,
-        _signature: Signature,
+        _signature: Ed25519Signature,
     ) -> Result<(), AccountError> {
         // Mark UTXO as spent
         if let Some(mut utxo) = self.utxos.get_mut(&utxo_ref.tx_hash) {
@@ -276,7 +276,7 @@ impl AccountManager for InMemoryAccountManager {
         &self,
         account: &Account,
         tx_hash: Hash,
-        signature: Signature,
+        signature: Ed25519Signature,
     ) -> Result<bool, AccountError> {
         account.verify_signature(tx_hash, signature)
     }
@@ -398,14 +398,14 @@ fn current_timestamp() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto::PrivateKey;
+    use crate::crypto::Ed25519PrivateKey;
 
     #[tokio::test]
     async fn test_account_manager() {
         let manager = InMemoryAccountManager::new();
 
         // Create account
-        let pk = PrivateKey::random().public_key();
+        let pk = Ed25519PrivateKey::random().public_key();
         let account_type = AccountType::User { public_key: pk };
 
         let account = manager
@@ -443,7 +443,7 @@ mod tests {
     async fn test_nonce_increment() {
         let manager = InMemoryAccountManager::new();
 
-        let pk = PrivateKey::random().public_key();
+        let pk = Ed25519PrivateKey::random().public_key();
         let account_type = AccountType::User { public_key: pk };
 
         let account = manager

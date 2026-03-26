@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::crypto::{keccak256, Address, Signature};
+use crate::crypto::{keccak256, Address, Ed25519Signature};
 use parking_lot::RwLock;
 
 use super::{

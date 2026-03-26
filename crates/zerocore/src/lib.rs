@@ -28,7 +28,7 @@ pub use account::{Account, AccountManager, AccountType};
 pub use block::{Block, BlockHeader};
 pub use compute::{ComputeTx, ObjectId, ObjectOutput, OutputId, TxId};
 pub use consensus::{Consensus, PowAlgorithm};
-pub use crypto::{Address, Hash, PrivateKey, PublicKey, Signature};
+pub use crypto::{Address, Ed25519PrivateKey, Ed25519PublicKey, Ed25519Signature, Hash};
 pub use state::StateDb;
 
 /// ZeroChain protocol version

@@ -1,6 +1,6 @@
 //! Account data structures
 
-use crate::crypto::{Address, Hash, PublicKey, Signature};
+use crate::crypto::{Address, Ed25519PublicKey, Ed25519Signature, Hash};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use thiserror::Error;
@@ -529,7 +529,7 @@ pub enum AccountType {
     /// User-controlled account
     User {
         /// Public key
-        public_key: PublicKey,
+        public_key: Ed25519PublicKey,
     },
 
     /// Smart contract account
@@ -686,7 +686,7 @@ impl Default for Account {
         Self {
             address: Address::zero(),
             account_type: AccountType::User {
-                public_key: PublicKey::placeholder(),
+                public_key: Ed25519PublicKey::placeholder(),
             },
             version: 1,
             balance: U256::zero(),
@@ -704,7 +704,7 @@ impl Default for Account {
 
 impl Account {
     /// Create a new externally signed account
-    pub fn new_user_account(public_key: PublicKey, address: Address) -> Self {
+    pub fn new_user_account(public_key: Ed25519PublicKey, address: Address) -> Self {
         let now = current_timestamp();
 
         Self {
@@ -762,7 +762,7 @@ impl Account {
     pub fn verify_signature(
         &self,
         tx_hash: Hash,
-        signature: Signature,
+        signature: Ed25519Signature,
     ) -> Result<bool, AccountError> {
         match &self.account_type {
             AccountType::User { public_key } => signature
@@ -861,7 +861,7 @@ mod tests {
 
     #[test]
     fn test_account_creation() {
-        let pk = PublicKey::from_bytes([0u8; 32]).unwrap();
+        let pk = Ed25519PublicKey::from_bytes([0u8; 32]).unwrap();
         let addr = Address::from_bytes([1u8; 20]);
 
         let account = Account::new_user_account(pk, addr);
@@ -873,7 +873,7 @@ mod tests {
 
     #[test]
     fn test_account_balance_update() {
-        let pk = PublicKey::from_bytes([0u8; 32]).unwrap();
+        let pk = Ed25519PublicKey::from_bytes([0u8; 32]).unwrap();
         let addr = Address::from_bytes([1u8; 20]);
 
         let mut account = Account::new_user_account(pk, addr);
@@ -889,7 +889,7 @@ mod tests {
 
     #[test]
     fn test_account_state_transition() {
-        let pk = PublicKey::from_bytes([0u8; 32]).unwrap();
+        let pk = Ed25519PublicKey::from_bytes([0u8; 32]).unwrap();
         let addr = Address::from_bytes([1u8; 20]);
 
         let mut account = Account::new_user_account(pk, addr);
