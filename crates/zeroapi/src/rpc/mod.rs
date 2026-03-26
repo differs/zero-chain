@@ -2471,8 +2471,8 @@ fn ownership_to_json(owner: &Ownership) -> serde_json::Value {
             "type": "Program",
             "address": format_zero_address(*address),
         }),
-        Ownership::NativeEd25519(public_key) => serde_json::json!({
-            "type": "NativeEd25519",
+        Ownership::Ed25519(public_key) => serde_json::json!({
+            "type": "Ed25519",
             "public_key": format!("0x{}", hex::encode(public_key)),
         }),
     }
@@ -2742,7 +2742,7 @@ fn parse_ownership(v: Option<&serde_json::Value>) -> Result<Ownership, RpcErrorO
             })?;
             Ok(Ownership::Program(parse_address(addr)?))
         }
-        "NativeEd25519" => {
+        "Ed25519" => {
             let pubkey = obj
                 .get("public_key")
                 .and_then(|x| x.as_str())
@@ -2759,7 +2759,7 @@ fn parse_ownership(v: Option<&serde_json::Value>) -> Result<Ownership, RpcErrorO
             }
             let mut arr = [0u8; 32];
             arr.copy_from_slice(&bytes);
-            Ok(Ownership::NativeEd25519(arr))
+            Ok(Ownership::Ed25519(arr))
         }
         _ => Err(RpcErrorObject::invalid_params(format!(
             "unsupported owner type: {typ}"
@@ -3328,7 +3328,7 @@ mod tests {
                 "object_id": format!("0x{}", hex::encode([0x94u8; 32])),
                 "domain_id": 0,
                 "kind": "Asset",
-                "owner": { "type": "NativeEd25519", "public_key": owner_pub_hex },
+                "owner": { "type": "Ed25519", "public_key": owner_pub_hex },
                 "predecessor": format!("0x{}", hex::encode([0x92u8; 32])),
                 "version": 2,
                 "state": "0x01",

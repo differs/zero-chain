@@ -86,7 +86,7 @@ impl AuthorizationPolicy for DefaultAuthorizationPolicy {
                             Err(err) => return Err(err),
                         }
                     }
-                    Ownership::NativeEd25519(owner_pubkey) => {
+                    Ownership::Ed25519(owner_pubkey) => {
                         if tx.witness.signatures.is_empty() {
                             return Err(ComputeError::AuthorizationDenied);
                         }

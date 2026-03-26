@@ -436,7 +436,7 @@ fn encode_ownership(out: &mut Vec<u8>, owner: &Ownership) {
         Ownership::Shared => {
             out.push(3);
         }
-        Ownership::NativeEd25519(pubkey) => {
+        Ownership::Ed25519(pubkey) => {
             out.push(4);
             out.extend_from_slice(pubkey);
         }

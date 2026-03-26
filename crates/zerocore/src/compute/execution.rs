@@ -1068,7 +1068,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_accepts_transfer_when_native_ed25519_signature_matches() {
+    fn validate_accepts_transfer_when_ed25519_signature_matches() {
         let store = InMemoryObjectStore::new();
 
         let signing_key = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
@@ -1081,7 +1081,7 @@ mod tests {
             version: Version(1),
             domain_id: DomainId(0),
             kind: ObjectKind::Asset,
-            owner: Ownership::NativeEd25519(owner_pub),
+            owner: Ownership::Ed25519(owner_pub),
             predecessor: None,
             state: vec![1],
             state_root: None,
@@ -1116,7 +1116,7 @@ mod tests {
                 object_id: input.object_id,
                 domain_id: DomainId(0),
                 kind: ObjectKind::Asset,
-                owner: Ownership::NativeEd25519(owner_pub),
+                owner: Ownership::Ed25519(owner_pub),
                 predecessor: Some(input.output_id),
                 version: Version(2),
                 state: vec![2],
