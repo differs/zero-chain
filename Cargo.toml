@@ -21,8 +21,6 @@ homepage = "https://zerocchain.io"
 sha3 = "0.10"
 sha2 = "0.10"
 ripemd = "0.1"
-secp256k1 = { version = "0.27", features = ["recovery"] }
-k256 = { version = "0.13", features = ["ecdsa", "sha256"] }
 blake3 = "1.5"
 
 # Serialization

@@ -3,7 +3,7 @@
 pub mod pool;
 
 use crate::account::{Account, AccountError, U256};
-use crate::crypto::{Address, Hash, PrivateKey, Signature};
+use crate::crypto::{Address, Hash, PrivateKey, PublicKey, Signature};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -108,11 +108,13 @@ impl UnsignedTransaction {
     pub fn sign(self, private_key: &PrivateKey) -> SignedTransaction {
         let signing_hash = self.signing_hash();
         let signature = private_key.sign(signing_hash.as_bytes());
+        let public_key = private_key.public_key();
 
         SignedTransaction {
             tx: self,
             signature,
-            sender: Address::from_public_key(&private_key.public_key()),
+            public_key,
+            sender: Address::from_public_key(&public_key),
             hash: Hash::from_bytes(crate::crypto::keccak256(
                 &[signing_hash.as_bytes(), &signature.as_bytes()].concat(),
             )),
@@ -143,7 +145,9 @@ pub struct SignedTransaction {
     pub tx: UnsignedTransaction,
     /// Signature
     pub signature: Signature,
-    /// Sender address (recovered from signature)
+    /// Signer public key
+    pub public_key: PublicKey,
+    /// Sender address derived from signer public key
     pub sender: Address,
     /// Transaction hash
     pub hash: Hash,
@@ -191,12 +195,12 @@ impl SignedTransaction {
     }
 
     /// Get signature r
-    pub fn r(&self) -> &[u8; 32] {
+    pub fn r(&self) -> [u8; 32] {
         self.signature.r()
     }
 
     /// Get signature s
-    pub fn s(&self) -> &[u8; 32] {
+    pub fn s(&self) -> [u8; 32] {
         self.signature.s()
     }
 
@@ -208,12 +212,13 @@ impl SignedTransaction {
     /// Verify transaction signature
     pub fn verify_signature(&self) -> Result<bool, TransactionError> {
         let signing_hash = self.tx.signing_hash();
-        let recovered = self
-            .signature
-            .recover(signing_hash.as_bytes())
-            .map_err(|_| TransactionError::InvalidSignature)?;
-        let recovered_addr = Address::from_public_key(&recovered);
-        Ok(recovered_addr == self.sender)
+        let signer_addr = Address::from_public_key(&self.public_key);
+        if signer_addr != self.sender {
+            return Ok(false);
+        }
+        self.signature
+            .verify(signing_hash.as_bytes(), &self.public_key)
+            .map_err(|_| TransactionError::InvalidSignature)
     }
 
     /// Validate transaction

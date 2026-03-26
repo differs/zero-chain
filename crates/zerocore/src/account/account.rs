@@ -861,12 +861,7 @@ mod tests {
 
     #[test]
     fn test_account_creation() {
-        let pk = PublicKey::from_bytes({
-            let mut bytes = [0u8; 65];
-            bytes[0] = 0x04;
-            bytes
-        })
-        .unwrap();
+        let pk = PublicKey::from_bytes([0u8; 32]).unwrap();
         let addr = Address::from_bytes([1u8; 20]);
 
         let account = Account::new_user_account(pk, addr);
@@ -878,12 +873,7 @@ mod tests {
 
     #[test]
     fn test_account_balance_update() {
-        let pk = PublicKey::from_bytes({
-            let mut bytes = [0u8; 65];
-            bytes[0] = 0x04;
-            bytes
-        })
-        .unwrap();
+        let pk = PublicKey::from_bytes([0u8; 32]).unwrap();
         let addr = Address::from_bytes([1u8; 20]);
 
         let mut account = Account::new_user_account(pk, addr);
@@ -899,12 +889,7 @@ mod tests {
 
     #[test]
     fn test_account_state_transition() {
-        let pk = PublicKey::from_bytes({
-            let mut bytes = [0u8; 65];
-            bytes[0] = 0x04;
-            bytes
-        })
-        .unwrap();
+        let pk = PublicKey::from_bytes([0u8; 32]).unwrap();
         let addr = Address::from_bytes([1u8; 20]);
 
         let mut account = Account::new_user_account(pk, addr);

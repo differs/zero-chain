@@ -2,15 +2,14 @@
 //!
 //! This module provides:
 //! - Hash functions (Keccak256, SHA256, Blake3)
-//! - Public/Private key pairs (secp256k1)
-//! - Digital signatures (ECDSA)
+//! - Public/Private key pairs (ed25519)
+//! - Digital signatures (ed25519)
 //! - Address derivation
 
-use rand::{rngs::OsRng, RngCore};
-use secp256k1::{
-    ecdsa::{RecoverableSignature, RecoveryId, Signature as SecpSignature},
-    Message as SecpMessage, PublicKey as SecpPublicKey, Secp256k1, SecretKey,
+use ed25519_dalek::{
+    Signature as Ed25519Signature, Signer as _, SigningKey, Verifier as _, VerifyingKey,
 };
+use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Keccak256};
 use std::fmt;
@@ -182,7 +181,7 @@ impl Address {
 
     /// Create address from public key
     pub fn from_public_key(pubkey: &PublicKey) -> Self {
-        let hash = keccak256(&pubkey.0[1..]);
+        let hash = keccak256(&pubkey.0);
         let mut address = [0u8; 20];
         address.copy_from_slice(&hash[12..]);
         Self(address)
@@ -211,69 +210,18 @@ impl fmt::Display for Address {
     }
 }
 
-/// 256-bit public key (secp256k1)
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct PublicKey([u8; 65]);
-
-impl serde::Serialize for PublicKey {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        use serde::ser::SerializeTuple;
-        let mut seq = serializer.serialize_tuple(65)?;
-        for byte in &self.0 {
-            seq.serialize_element(byte)?;
-        }
-        seq.end()
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for PublicKey {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        struct PublicKeyVisitor;
-
-        impl<'de> serde::de::Visitor<'de> for PublicKeyVisitor {
-            type Value = PublicKey;
-
-            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                formatter.write_str("a 65-byte public key")
-            }
-
-            fn visit_seq<A>(self, mut seq: A) -> Result<PublicKey, A::Error>
-            where
-                A: serde::de::SeqAccess<'de>,
-            {
-                let mut bytes = [0u8; 65];
-                for (i, slot) in bytes.iter_mut().enumerate() {
-                    *slot = seq
-                        .next_element()?
-                        .ok_or_else(|| serde::de::Error::invalid_length(i, &self))?;
-                }
-                PublicKey::from_bytes(bytes).map_err(serde::de::Error::custom)
-            }
-        }
-
-        deserializer.deserialize_tuple(65, PublicKeyVisitor)
-    }
-}
+/// 256-bit public key (ed25519)
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicKey([u8; 32]);
 
 impl PublicKey {
-    /// Create from bytes (uncompressed format, 65 bytes)
-    pub fn from_bytes(bytes: [u8; 65]) -> Result<Self, CryptoError> {
-        if bytes[0] != 0x04 {
-            return Err(CryptoError::InvalidPublicKey);
-        }
+    /// Create from bytes
+    pub fn from_bytes(bytes: [u8; 32]) -> Result<Self, CryptoError> {
         Ok(Self(bytes))
     }
 
     pub(crate) fn placeholder() -> Self {
-        let mut bytes = [0u8; 65];
-        bytes[0] = 0x04;
-        Self(bytes)
+        Self([0u8; 32])
     }
 
     /// Get the public key as bytes
@@ -293,31 +241,14 @@ impl fmt::Debug for PublicKey {
     }
 }
 
-/// 256-bit private key (secp256k1)
+/// 256-bit private key (ed25519 seed)
 pub struct PrivateKey {
     bytes: [u8; 32],
-    secret_key: SecretKey,
-}
-
-#[derive(Clone, Copy)]
-struct SecpMessageHash([u8; 32]);
-
-impl secp256k1::ThirtyTwoByteHash for SecpMessageHash {
-    fn into_32(self) -> [u8; 32] {
-        self.0
-    }
-}
-
-fn message_from_hash(hash: [u8; 32]) -> SecpMessage {
-    SecpMessage::from(SecpMessageHash(hash))
 }
 
 impl Clone for PrivateKey {
     fn clone(&self) -> Self {
-        Self {
-            bytes: self.bytes,
-            secret_key: self.secret_key,
-        }
+        Self { bytes: self.bytes }
     }
 }
 
@@ -332,20 +263,14 @@ impl Eq for PrivateKey {}
 impl PrivateKey {
     /// Generate a new random private key
     pub fn random() -> Self {
-        loop {
-            let mut bytes = [0u8; 32];
-            OsRng.fill_bytes(&mut bytes);
-            if let Ok(secret_key) = SecretKey::from_slice(&bytes) {
-                return Self { bytes, secret_key };
-            }
-        }
+        let mut bytes = [0u8; 32];
+        OsRng.fill_bytes(&mut bytes);
+        Self { bytes }
     }
 
     /// Create from bytes
     pub fn from_bytes(bytes: [u8; 32]) -> Result<Self, CryptoError> {
-        let secret_key =
-            SecretKey::from_slice(&bytes).map_err(|_| CryptoError::InvalidPrivateKey)?;
-        Ok(Self { bytes, secret_key })
+        Ok(Self { bytes })
     }
 
     /// Get the private key as bytes
@@ -355,27 +280,15 @@ impl PrivateKey {
 
     /// Get the corresponding public key
     pub fn public_key(&self) -> PublicKey {
-        let secp = Secp256k1::new();
-        let public_key = SecpPublicKey::from_secret_key(&secp, &self.secret_key);
-        PublicKey(public_key.serialize_uncompressed())
+        let signing_key = SigningKey::from_bytes(&self.bytes);
+        PublicKey(signing_key.verifying_key().to_bytes())
     }
 
     /// Sign a message
     pub fn sign(&self, message: &[u8]) -> Signature {
-        let hash = keccak256(message);
-        let secp = Secp256k1::new();
-        let msg = message_from_hash(hash);
-        let recoverable = secp.sign_ecdsa_recoverable(&msg, &self.secret_key);
-        let (rec_id, sig64) = recoverable.serialize_compact();
-
-        let mut r = [0u8; 32];
-        let mut s = [0u8; 32];
-        r.copy_from_slice(&sig64[0..32]);
-        s.copy_from_slice(&sig64[32..64]);
-
-        let v = 27u8 + (rec_id.to_i32() as u8);
-
-        Signature::new(r, s, v)
+        let signing_key = SigningKey::from_bytes(&self.bytes);
+        let signature = signing_key.sign(message).to_bytes();
+        Signature { bytes: signature }
     }
 
     /// Convert to hex string
@@ -396,103 +309,117 @@ impl Drop for PrivateKey {
     }
 }
 
-/// ECDSA signature
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// ed25519 signature
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Signature {
-    r: [u8; 32],
-    s: [u8; 32],
-    v: u8,
+    bytes: [u8; 64],
+}
+
+impl serde::Serialize for Signature {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeTuple;
+        let mut seq = serializer.serialize_tuple(64)?;
+        for byte in &self.bytes {
+            seq.serialize_element(byte)?;
+        }
+        seq.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Signature {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct SignatureVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for SignatureVisitor {
+            type Value = Signature;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a 64-byte signature")
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Signature, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                let mut bytes = [0u8; 64];
+                for (i, slot) in bytes.iter_mut().enumerate() {
+                    *slot = seq
+                        .next_element()?
+                        .ok_or_else(|| serde::de::Error::invalid_length(i, &self))?;
+                }
+                Ok(Signature { bytes })
+            }
+        }
+
+        deserializer.deserialize_tuple(64, SignatureVisitor)
+    }
 }
 
 impl Signature {
     /// Create a new signature
-    pub fn new(r: [u8; 32], s: [u8; 32], v: u8) -> Self {
-        Self { r, s, v }
+    pub fn new(r: [u8; 32], s: [u8; 32], _v: u8) -> Self {
+        let mut bytes = [0u8; 64];
+        bytes[..32].copy_from_slice(&r);
+        bytes[32..64].copy_from_slice(&s);
+        Self { bytes }
     }
 
     /// Create from bytes
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, CryptoError> {
-        if bytes.len() != 65 {
+        if bytes.len() != 64 && bytes.len() != 65 {
             return Err(CryptoError::InvalidSignature);
         }
-
-        let mut r = [0u8; 32];
-        let mut s = [0u8; 32];
-        r.copy_from_slice(&bytes[0..32]);
-        s.copy_from_slice(&bytes[32..64]);
-
-        Ok(Self { r, s, v: bytes[64] })
+        let mut compact = [0u8; 64];
+        compact.copy_from_slice(&bytes[..64]);
+        Ok(Self { bytes: compact })
     }
 
     /// Get the signature as bytes
-    pub fn as_bytes(&self) -> [u8; 65] {
-        let mut bytes = [0u8; 65];
-        bytes[..32].copy_from_slice(&self.r);
-        bytes[32..64].copy_from_slice(&self.s);
-        bytes[64] = self.v;
-        bytes
+    pub fn as_bytes(&self) -> [u8; 64] {
+        self.bytes
     }
 
     /// Get r component
-    pub fn r(&self) -> &[u8; 32] {
-        &self.r
+    pub fn r(&self) -> [u8; 32] {
+        self.bytes[..32]
+            .try_into()
+            .expect("signature prefix length")
     }
 
     /// Get s component
-    pub fn s(&self) -> &[u8; 32] {
-        &self.s
+    pub fn s(&self) -> [u8; 32] {
+        self.bytes[32..64]
+            .try_into()
+            .expect("signature suffix length")
     }
 
-    /// Get v (recovery id)
+    /// Get v placeholder retained for legacy callers
     pub fn v(&self) -> u8 {
-        self.v
+        0
     }
 
     /// Verify a signature
     pub fn verify(&self, message: &[u8], public_key: &PublicKey) -> Result<bool, CryptoError> {
-        let hash = keccak256(message);
-        let secp = Secp256k1::verification_only();
-
-        let pubkey =
-            SecpPublicKey::from_slice(&public_key.0).map_err(|_| CryptoError::InvalidPublicKey)?;
-
-        let mut sig64 = [0u8; 64];
-        sig64[0..32].copy_from_slice(&self.r);
-        sig64[32..64].copy_from_slice(&self.s);
+        let verifying_key =
+            VerifyingKey::from_bytes(&public_key.0).map_err(|_| CryptoError::InvalidPublicKey)?;
         let signature =
-            SecpSignature::from_compact(&sig64).map_err(|_| CryptoError::InvalidSignature)?;
-
-        let msg = message_from_hash(hash);
-        secp.verify_ecdsa(&msg, &signature, &pubkey)
+            Ed25519Signature::from_slice(&self.bytes).map_err(|_| CryptoError::InvalidSignature)?;
+        verifying_key
+            .verify(message, &signature)
             .map(|_| true)
             .map_err(|_| CryptoError::VerificationFailed)
     }
 
-    /// Recover the public key from signature and message
+    /// Recovering ed25519 public keys from signatures is unsupported.
     pub fn recover(&self, message: &[u8]) -> Result<PublicKey, CryptoError> {
-        let hash = keccak256(message);
-        let secp = Secp256k1::verification_only();
-        let msg = message_from_hash(hash);
-
-        let mut sig64 = [0u8; 64];
-        sig64[0..32].copy_from_slice(&self.r);
-        sig64[32..64].copy_from_slice(&self.s);
-
-        let candidates = [self.v, self.v.saturating_sub(27)];
-
-        for v in candidates {
-            if let Ok(rec_id) = RecoveryId::from_i32(i32::from(v)) {
-                if let Ok(rec_sig) = RecoverableSignature::from_compact(&sig64, rec_id) {
-                    if let Ok(pubkey) = secp.recover_ecdsa(&msg, &rec_sig) {
-                        let bytes = pubkey.serialize_uncompressed();
-                        return PublicKey::from_bytes(bytes)
-                            .map_err(|_| CryptoError::InvalidPublicKey);
-                    }
-                }
-            }
-        }
-
-        Err(CryptoError::InvalidSignature)
+        let _ = message;
+        Err(CryptoError::KeyDerivationFailed)
     }
 
     /// Convert to hex string
@@ -573,8 +500,7 @@ mod tests {
         assert!(result.is_ok());
         assert!(result.unwrap());
 
-        // Note: Public key recovery is disabled in this version
-        // as it requires proper recovery ID handling
+        assert!(signature.recover(message).is_err());
     }
 
     #[test]
