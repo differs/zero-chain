@@ -12,7 +12,6 @@ sha3.workspace = true
 sha2.workspace = true
 ripemd.workspace = true
 secp256k1.workspace = true
-k256.workspace = true
 blake3.workspace = true
 ed25519-dalek = "2.1"
 
@@ -68,11 +67,6 @@ path = "benches/parallel_bench.rs"
 name = "real_validation_bench"
 harness = false
 path = "benches/real_validation_bench.rs"
-
-[[bench]]
-name = "signature_comparison"
-harness = false
-path = "benches/signature_comparison.rs"
 
 [[bench]]
 name = "5sec_limit_test"

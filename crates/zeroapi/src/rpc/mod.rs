@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use tokio::sync::oneshot;
 use tower_http::cors::{Any, CorsLayer};
-use zerocore::account::{Account, AccountState, InMemoryAccountManager, U256};
+use zerocore::account::{Account, AccountState, U256};
 use zerocore::block::{create_genesis_block, Block, BlockHeader};
 use zerocore::compute::domain::DomainRegistry;
 use zerocore::compute::{
@@ -22,11 +22,11 @@ use zerocore::compute::{
 };
 use zerocore::crypto::{Address, Hash};
 use zerocore::state::StateDb;
-use zerocore::transaction::{pool::TxPoolConfig, TransactionPool};
 use zeronet::{
-    global_block_by_number, global_latest_block, global_peer_count, global_peers, global_record_account,
-    global_record_compute_tx, global_store_block, global_synced_account, global_synced_compute_tx,
-    global_synced_compute_txs, global_synced_height, set_global_synced_height, SyncComputeTxRecord,
+    global_block_by_number, global_latest_block, global_peer_count, global_peers,
+    global_record_account, global_record_compute_tx, global_store_block, global_synced_account,
+    global_synced_compute_tx, global_synced_compute_txs, global_synced_height,
+    set_global_synced_height, SyncComputeTxRecord,
 };
 use zerostore::db::{KeyValueDB, MemDatabase, RedbDatabase, RocksDb};
 use zerostore::ComputeStore;
@@ -320,7 +320,6 @@ impl std::error::Error for RpcErrorObject {}
 pub struct RpcApi {
     config: RpcConfig,
     state_db: Arc<StateDb>,
-    tx_pool: Arc<TransactionPool>,
     latest_block: RwLock<Option<Block>>,
     block_history: RwLock<BTreeMap<u64, Block>>,
     compute_store: Arc<dyn ObjectStore>,
@@ -360,7 +359,7 @@ struct SubmitWorkRequest {
 }
 
 impl RpcApi {
-    pub fn new(config: RpcConfig, state_db: Arc<StateDb>, tx_pool: Arc<TransactionPool>) -> Self {
+    pub fn new(config: RpcConfig, state_db: Arc<StateDb>) -> Self {
         let domain_registry = Arc::new(InMemoryDomainRegistry::new());
         domain_registry.upsert_domain(DomainConfig {
             domain_id: DomainId(0),
@@ -372,7 +371,6 @@ impl RpcApi {
         Self {
             config,
             state_db,
-            tx_pool,
             latest_block: RwLock::new(None),
             block_history: RwLock::new(BTreeMap::new()),
             compute_store: Arc::new(InMemoryObjectStore::new()),
@@ -392,14 +390,12 @@ impl RpcApi {
     pub fn with_compute(
         config: RpcConfig,
         state_db: Arc<StateDb>,
-        tx_pool: Arc<TransactionPool>,
         compute_store: Arc<dyn ObjectStore>,
         domain_registry: Arc<InMemoryDomainRegistry>,
     ) -> Self {
         Self {
             config,
             state_db,
-            tx_pool,
             latest_block: RwLock::new(None),
             block_history: RwLock::new(BTreeMap::new()),
             compute_store,
@@ -419,14 +415,12 @@ impl RpcApi {
     pub fn with_persistent_compute(
         config: RpcConfig,
         state_db: Arc<StateDb>,
-        tx_pool: Arc<TransactionPool>,
         compute_store: Arc<ComputeStore>,
         domain_registry: Arc<InMemoryDomainRegistry>,
     ) -> Self {
         Self {
             config,
             state_db,
-            tx_pool,
             latest_block: RwLock::new(None),
             block_history: RwLock::new(BTreeMap::new()),
             compute_store: compute_store.clone(),
@@ -1976,11 +1970,6 @@ fn is_authorized(headers: &HeaderMap, expected_token: Option<&str>) -> bool {
 fn build_default_rpc_api(config: RpcConfig) -> std::result::Result<RpcApi, crate::ApiError> {
     RPC_METRICS.init()?;
 
-    let account_manager = Arc::new(InMemoryAccountManager::new());
-    let tx_pool = Arc::new(TransactionPool::new(
-        TxPoolConfig::default(),
-        account_manager,
-    ));
     let state_db = Arc::new(StateDb::new(Hash::zero()));
 
     let persistent_db = build_compute_kv_backend(&config)?;
@@ -1997,7 +1986,6 @@ fn build_default_rpc_api(config: RpcConfig) -> std::result::Result<RpcApi, crate
     Ok(RpcApi::with_persistent_compute(
         config,
         state_db,
-        tx_pool,
         compute_store,
         domains,
     ))
@@ -2896,11 +2884,6 @@ mod tests {
     fn build_test_api_with_compute() -> LockedTestApi {
         let guard = test_guard();
         zeronet::global_reset_sync_cache();
-        let account_manager = Arc::new(InMemoryAccountManager::new());
-        let tx_pool = Arc::new(TransactionPool::new(
-            TxPoolConfig::default(),
-            account_manager,
-        ));
         let state_db = Arc::new(StateDb::new(Hash::zero()));
 
         let store = Arc::new(InMemoryObjectStore::new());
@@ -2914,7 +2897,7 @@ mod tests {
 
         let mut config = RpcConfig::default();
         config.mining_enabled = true;
-        let api = RpcApi::with_compute(config, state_db, tx_pool, store, domains);
+        let api = RpcApi::with_compute(config, state_db, store, domains);
         let mut test_head = create_genesis_block();
         test_head.header.difficulty = U256::from_u128(BASE_MINING_DIFFICULTY);
         test_head.header.hash = test_head.header.compute_hash();
@@ -2925,11 +2908,6 @@ mod tests {
     fn build_test_api_with_persistent_compute() -> LockedTestApi {
         let guard = test_guard();
         zeronet::global_reset_sync_cache();
-        let account_manager = Arc::new(InMemoryAccountManager::new());
-        let tx_pool = Arc::new(TransactionPool::new(
-            TxPoolConfig::default(),
-            account_manager,
-        ));
         let state_db = Arc::new(StateDb::new(Hash::zero()));
         let db = Arc::new(MemDatabase::new());
         let persistent_store = Arc::new(ComputeStore::new(db));
@@ -2944,8 +2922,7 @@ mod tests {
 
         let mut config = RpcConfig::default();
         config.mining_enabled = true;
-        let api =
-            RpcApi::with_persistent_compute(config, state_db, tx_pool, persistent_store, domains);
+        let api = RpcApi::with_persistent_compute(config, state_db, persistent_store, domains);
         let mut test_head = create_genesis_block();
         test_head.header.difficulty = U256::from_u128(BASE_MINING_DIFFICULTY);
         test_head.header.hash = test_head.header.compute_hash();
@@ -2957,11 +2934,6 @@ mod tests {
     fn test_mining_rpc_disabled_by_default() {
         let _guard = test_guard();
         zeronet::global_reset_sync_cache();
-        let account_manager = Arc::new(InMemoryAccountManager::new());
-        let tx_pool = Arc::new(TransactionPool::new(
-            TxPoolConfig::default(),
-            account_manager,
-        ));
         let state_db = Arc::new(StateDb::new(Hash::zero()));
         let store = Arc::new(InMemoryObjectStore::new());
         let domains = Arc::new(InMemoryDomainRegistry::new());
@@ -2972,7 +2944,7 @@ mod tests {
             public: true,
         });
 
-        let api = RpcApi::with_compute(RpcConfig::default(), state_db, tx_pool, store, domains);
+        let api = RpcApi::with_compute(RpcConfig::default(), state_db, store, domains);
         let get_work_err = api
             .zero_get_work(None)
             .expect_err("zero_getWork should be disabled by default");
@@ -3016,7 +2988,8 @@ mod tests {
     }
 
     fn attach_ed25519_signature(mut tx_json: serde_json::Value, seed: u8) -> serde_json::Value {
-        let tx = parse_compute_tx(tx_json.clone()).expect("tx json should parse after canonicalize");
+        let tx =
+            parse_compute_tx(tx_json.clone()).expect("tx json should parse after canonicalize");
         let signer = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]);
         let verify = signer.verifying_key();
         let sig = signer.sign(&tx.signing_preimage()).to_bytes();
@@ -3760,10 +3733,7 @@ mod tests {
             result.get("unsupported").and_then(|v| v.as_bool()),
             Some(true)
         );
-        assert_eq!(
-            result.get("total").and_then(|v| v.as_u64()),
-            Some(0)
-        );
+        assert_eq!(result.get("total").and_then(|v| v.as_u64()), Some(0));
         assert_eq!(
             result.get("reason").and_then(|v| v.as_str()),
             Some("address transaction history is not supported on compute-only nodes")
