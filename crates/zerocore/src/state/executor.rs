@@ -76,29 +76,13 @@ impl StateExecutor {
     /// Execute a block
     pub fn execute_block(&self, block: &Block, parent_state_root: Hash) -> Result<StateTransition> {
         tracing::info!(
-            "Executing block #{} with {} transactions",
-            block.header.number.as_u64(),
-            block.transactions.len()
+            "Executing block #{} with header-only state transition",
+            block.header.number.as_u64()
         );
 
-        let mut receipts = Vec::with_capacity(block.transactions.len());
-        let mut cumulative_gas_used = 0u64;
-        let mut logs_bloom = [0u8; 256];
-
-        // Execute each transaction
-        for (index, tx) in block.transactions.iter().enumerate() {
-            let receipt = self.execute_transaction(tx, block, index as u32, cumulative_gas_used)?;
-
-            // Update cumulative gas
-            cumulative_gas_used += receipt.gas_used.as_u64();
-
-            // Update logs bloom
-            for (i, &byte) in receipt.logs_bloom.iter().enumerate() {
-                logs_bloom[i] |= byte;
-            }
-
-            receipts.push(receipt);
-        }
+        let receipts = Vec::new();
+        let cumulative_gas_used = 0u64;
+        let logs_bloom = [0u8; 256];
 
         // Calculate new state root
         let to_root = self.state_db.state_root();

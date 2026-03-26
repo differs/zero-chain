@@ -158,11 +158,6 @@ impl Blockchain {
             .verify_pow(&block.header)
             .map_err(|e| BlockchainError::Consensus(e.to_string()))?;
 
-        // Validate transactions
-        for tx in &block.transactions {
-            // Would validate each transaction
-        }
-
         // Validate state root (would execute transactions)
         // Simplified for now
 

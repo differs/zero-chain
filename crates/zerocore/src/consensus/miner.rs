@@ -11,7 +11,6 @@ use crate::account::U256;
 use crate::block::{create_genesis_block, Block, BlockHeader};
 use crate::crypto::{keccak256, Address, Hash};
 use crate::state::StateDb;
-use crate::transaction::{SignedTransaction, TransactionPool};
 use parking_lot::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -115,8 +114,6 @@ pub struct MiningEngine {
     config: MiningConfig,
     /// Consensus
     consensus: Arc<PowConsensus>,
-    /// Transaction pool
-    tx_pool: Arc<TransactionPool>,
     /// State database
     state_db: Arc<StateDb>,
     /// Is mining
@@ -138,13 +135,11 @@ impl MiningEngine {
     pub fn new(
         config: MiningConfig,
         consensus: Arc<PowConsensus>,
-        tx_pool: Arc<TransactionPool>,
         state_db: Arc<StateDb>,
     ) -> Self {
         Self {
             config,
             consensus,
-            tx_pool,
             state_db,
             is_mining: AtomicBool::new(false),
             current_work: RwLock::new(None),
@@ -285,13 +280,6 @@ impl MiningEngine {
 
     /// Build new block template
     pub fn build_block_template(&self, parent: &BlockHeader) -> Result<Block, MiningError> {
-        // Select transactions from pool
-        let transactions = self.tx_pool.select_transactions(parent.gas_limit);
-
-        // Calculate transaction root
-        let tx_hashes: Vec<Hash> = transactions.iter().map(|tx| tx.hash()).collect();
-        let transactions_root = compute_merkle_root(&tx_hashes);
-
         // Calculate state root (simplified)
         let state_root = self.state_db.state_root();
 
@@ -307,7 +295,7 @@ impl MiningEngine {
             uncle_hashes: Vec::new(),
             coinbase: self.config.coinbase,
             state_root,
-            transactions_root,
+            transactions_root: Hash::zero(),
             receipts_root: Hash::zero(), // Would compute after execution
             number: parent.number + U256::one(),
             gas_limit: parent.gas_limit,
@@ -321,7 +309,7 @@ impl MiningEngine {
             hash: Hash::zero(), // Would compute
         };
 
-        Ok(Block::new(header, transactions))
+        Ok(Block::new(header))
     }
 
     /// Calculate base fee adjustment
@@ -459,7 +447,7 @@ impl CpuMiner {
                 header.mix_hash = pow_hash;
                 header.hash = header.compute_hash();
 
-                return Ok(Block::new(header, block.transactions));
+                return Ok(Block::new(header));
             }
 
             nonce += 1;
@@ -479,7 +467,6 @@ fn difficulty_to_target(difficulty: U256) -> U256 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::account::InMemoryAccountManager;
 
     #[test]
     fn test_merkle_root() {
@@ -498,11 +485,9 @@ mod tests {
     fn test_mining_engine() {
         let config = MiningConfig::default();
         let consensus = Arc::new(PowConsensus::new(PowAlgorithm::LightHash));
-        let manager = Arc::new(InMemoryAccountManager::new());
-        let tx_pool = Arc::new(TransactionPool::new(Default::default(), manager.clone()));
         let state_db = Arc::new(StateDb::new(Hash::zero()));
 
-        let engine = MiningEngine::new(config, consensus, tx_pool, state_db);
+        let engine = MiningEngine::new(config, consensus, state_db);
 
         assert!(!engine.is_mining());
 

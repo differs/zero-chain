@@ -1,9 +1,7 @@
 //! Protocol message definitions.
 
 use serde::{Deserialize, Serialize};
-use zerocore::{
-    account::Account, block::Block, crypto::Address, crypto::Hash, transaction::SignedTransaction,
-};
+use zerocore::{account::Account, block::Block, crypto::Address, crypto::Hash};
 
 /// Transfer transaction record synchronized across peers.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -42,7 +40,6 @@ pub struct SyncHeader {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SyncBlockBody {
     pub block_hash: Hash,
-    pub transactions: Vec<SignedTransaction>,
     pub tx_count: u32,
 }
 
@@ -88,8 +85,6 @@ pub enum ProtocolMessage {
     SyncGetStateSnapshot { block_number: u64 },
     /// Snapshot response.
     SyncStateSnapshot(SyncStateSnapshot),
-    /// Transaction response
-    Transactions(Vec<SignedTransaction>),
     /// Block response
     Block(Box<Block>),
 }
@@ -103,10 +98,4 @@ pub trait Protocol: Send + Sync {
 #[derive(Clone, Debug)]
 pub struct BlockMessage {
     pub block: Block,
-}
-
-/// Transaction message
-#[derive(Clone, Debug)]
-pub struct TxMessage {
-    pub transactions: Vec<SignedTransaction>,
 }

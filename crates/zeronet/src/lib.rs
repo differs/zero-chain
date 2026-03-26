@@ -19,7 +19,7 @@ pub use discovery::{Discovery, NodeRecord};
 pub use peer::{Peer, PeerInfo, PeerManager, PeerStatus};
 pub use protocol::{
     BlockMessage, Protocol, ProtocolMessage, SyncBlockBody, SyncComputeTxRecord, SyncHeader,
-    SyncStateSnapshot, SyncTransferTxRecord, TxMessage,
+    SyncStateSnapshot, SyncTransferTxRecord,
 };
 pub use sync::{SyncManager, SyncState};
 
@@ -1262,7 +1262,7 @@ async fn write_protocol_message(
             "ZERO/STATE_SNAPSHOT_V2 {}\n",
             encode_sync_payload(&snapshot)?
         )),
-        ProtocolMessage::Transactions(_) | ProtocolMessage::Block(_) => None,
+        ProtocolMessage::Block(_) => None,
     };
 
     if let Some(line) = maybe_line {

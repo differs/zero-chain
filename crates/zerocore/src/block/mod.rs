@@ -2,7 +2,6 @@
 
 use crate::account::U256;
 use crate::crypto::{Address, Hash};
-use crate::transaction::SignedTransaction;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -109,15 +108,13 @@ impl BlockHeader {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Block {
     pub header: BlockHeader,
-    pub transactions: Vec<SignedTransaction>,
     pub uncles: Vec<BlockHeader>,
 }
 
 impl Block {
-    pub fn new(header: BlockHeader, transactions: Vec<SignedTransaction>) -> Self {
+    pub fn new(header: BlockHeader) -> Self {
         Self {
             header,
-            transactions,
             uncles: Vec::new(),
         }
     }
@@ -157,7 +154,6 @@ pub fn create_genesis_block() -> Block {
 
     Block {
         header,
-        transactions: Vec::new(),
         uncles: Vec::new(),
     }
 }
@@ -182,6 +178,5 @@ mod tests {
 
         assert_eq!(genesis.header.number, U256::zero());
         assert_eq!(genesis.header.parent_hash, Hash::zero());
-        assert!(genesis.transactions.is_empty());
     }
 }

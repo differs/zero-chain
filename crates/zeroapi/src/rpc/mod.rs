@@ -1347,7 +1347,6 @@ impl RpcApi {
 
         let block = Block {
             header: header.clone(),
-            transactions: Vec::new(),
             uncles: Vec::new(),
         };
         self.store_block(block.clone());
@@ -1643,7 +1642,6 @@ impl RpcApi {
         };
         let block = Block {
             header: header.clone(),
-            transactions: Vec::new(),
             uncles: Vec::new(),
         };
         self.store_block(block.clone());

@@ -2,9 +2,9 @@
 
 use crate::protocol::{ProtocolMessage, SyncBlockBody, SyncHeader, SyncStateSnapshot};
 use crate::{
-    global_block_by_number, global_block_number_for_hash, global_latest_block,
-    global_replace_accounts, global_replace_compute_txs, global_replace_transfer_txs,
-    global_store_block, global_synced_accounts, global_synced_compute_txs, global_synced_height,
+    global_block_by_number, global_latest_block, global_replace_accounts,
+    global_replace_compute_txs, global_replace_transfer_txs, global_store_block,
+    global_synced_accounts, global_synced_compute_txs, global_synced_height,
     global_synced_transfer_txs, set_global_synced_height, NetworkError, Result,
 };
 use parking_lot::RwLock;
@@ -148,12 +148,9 @@ impl SyncManager {
     }
 
     pub fn build_block_body_response(&self, block_hash: &Hash) -> Option<SyncBlockBody> {
-        let number = global_block_number_for_hash(block_hash)?;
-        let block = global_block_by_number(number)?;
         Some(SyncBlockBody {
             block_hash: *block_hash,
-            transactions: block.transactions.clone(),
-            tx_count: block.transactions.len() as u32,
+            tx_count: 0,
         })
     }
 
@@ -366,7 +363,7 @@ impl SyncManager {
                     .await
                     {
                         Ok(body) => {
-                            if body.tx_count != body.transactions.len() as u32 {
+                            if body.tx_count != 0 {
                                 body_ok = false;
                                 break;
                             }
@@ -456,9 +453,16 @@ impl SyncManager {
                     }
                     let mut block = block_from_sync_header(header);
                     if let Some(body) = bodies.get(&header.hash) {
-                        block.transactions = body.transactions.clone();
-                        block.header.transactions_root =
-                            derive_transactions_root(&block.transactions);
+                        if body.tx_count != 0 {
+                            retries = retries.saturating_add(1);
+                            *state.write() = SyncState::Recovering {
+                                reason: "unexpected_legacy_transactions".to_string(),
+                                retries,
+                            };
+                            peer_manager.update_score(&peer_id, -20);
+                            continue;
+                        }
+                        block.header.transactions_root = Hash::zero();
                     }
                     global_store_block(block);
                 }
@@ -555,7 +559,6 @@ fn block_from_sync_header(header: &SyncHeader) -> Block {
     };
     Block {
         header: block_header,
-        transactions: Vec::new(),
         uncles: Vec::new(),
     }
 }
@@ -679,20 +682,6 @@ async fn wait_for_state_snapshot(
     .map_err(|_| "timeout".to_string())?
 }
 
-fn derive_transactions_root(txs: &[zerocore::transaction::SignedTransaction]) -> Hash {
-    if txs.is_empty() {
-        return Hash::zero();
-    }
-    let mut ordered_hashes = txs.iter().map(|tx| tx.hash).collect::<Vec<_>>();
-    ordered_hashes.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
-    let mut data = Vec::with_capacity(12 + ordered_hashes.len() * 32);
-    data.extend_from_slice(b"ZERO-SYNC-T");
-    for hash in ordered_hashes {
-        data.extend_from_slice(hash.as_bytes());
-    }
-    Hash::from_bytes(zerocore::crypto::keccak256(&data))
-}
-
 pub(crate) fn derive_state_root(accounts: &[Account]) -> Hash {
     let mut ordered = accounts.to_vec();
     ordered.sort_by(|a, b| a.address.as_bytes().cmp(b.address.as_bytes()));
@@ -761,7 +750,6 @@ mod tests {
         header.hash = header.compute_hash();
         Block {
             header,
-            transactions: Vec::new(),
             uncles: Vec::new(),
         }
     }
@@ -870,7 +858,6 @@ mod tests {
                             "peer-sync-a".to_string(),
                             SyncBlockBody {
                                 block_hash,
-                                transactions: Vec::new(),
                                 tx_count: 0,
                             },
                         );

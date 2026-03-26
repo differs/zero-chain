@@ -376,14 +376,6 @@ impl SyncManager {
         self.consensus.verify_pow(&block.header)
             .map_err(|e| SyncError::InvalidBlock(e.to_string()))?;
         
-        // Validate transactions
-        for tx in &block.transactions {
-            // Validate each transaction
-            if !tx.verify_signature().unwrap_or(false) {
-                return Err(SyncError::InvalidBlock("Invalid transaction signature".into()));
-            }
-        }
-        
         // Validate gas used
         if block.header.gas_used > block.header.gas_limit {
             return Err(SyncError::InvalidBlock("Gas used exceeds limit".into()));
