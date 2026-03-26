@@ -22,7 +22,6 @@ pub mod compute;
 pub mod consensus;
 pub mod crypto;
 pub mod state;
-pub mod transaction;
 
 // Re-export commonly used types
 pub use account::{Account, AccountManager, AccountType};
@@ -31,7 +30,6 @@ pub use compute::{ComputeTx, ObjectId, ObjectOutput, OutputId, TxId};
 pub use consensus::{Consensus, PowAlgorithm};
 pub use crypto::{Address, Hash, PrivateKey, PublicKey, Signature};
 pub use state::StateDb;
-pub use transaction::{SignedTransaction, UnsignedTransaction as Transaction};
 
 /// ZeroChain protocol version
 pub const PROTOCOL_VERSION: u32 = 1;

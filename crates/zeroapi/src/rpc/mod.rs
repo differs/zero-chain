@@ -3272,18 +3272,6 @@ mod tests {
             .and_then(|v| v.as_str())
             .expect("parent hash");
 
-        let key = zerocore::crypto::PrivateKey::random();
-        let to = parse_address("ZER0x1111111111111111111111111111111111111111").expect("to");
-        let signed = zerocore::transaction::UnsignedTransaction::new_transfer(
-            0,
-            U256::from(1u64),
-            U256::from(21_000u64),
-            Some(to),
-            U256::from(7u64),
-            Vec::new(),
-            31337,
-        )
-        .sign(&key);
         let err = api
             .zero_import_block(Some(vec![serde_json::json!({
                 "hash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -3295,7 +3283,7 @@ mod tests {
                 "coinbase": "ZER0x526Dc404e751C7d52F6fFF75d563d8D0857C94E9",
                 "mix_hash": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                 "extra_data": "0x",
-                "transactions": [signed]
+                "transactions": [{"legacy": true}]
             })]))
             .expect_err("legacy transactions should be rejected");
         assert_eq!(err.code, -32602);
