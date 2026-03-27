@@ -49,8 +49,8 @@ pub enum ComputeError {
     #[error("Invalid signature for authorization")]
     InvalidSignature,
 
-    /// Transaction id does not match canonical signed body hash.
-    #[error("Transaction id does not match signed payload")]
+    /// Operation id does not match canonical signed body hash.
+    #[error("Operation id does not match signed payload")]
     TxIdMismatch,
 
     /// Signature is valid but does not match owner requirement.
@@ -77,7 +77,7 @@ pub enum ComputeError {
     #[error("Invalid version progression")]
     InvalidVersionProgression,
 
-    /// General invalid transaction condition.
-    #[error("Invalid transaction: {0}")]
-    InvalidTransaction(String),
+    /// General invalid operation condition.
+    #[error("Invalid operation: {0}")]
+    InvalidOperation(String),
 }

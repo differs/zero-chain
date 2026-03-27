@@ -282,9 +282,9 @@ pub(crate) enum AccountAction {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum ComputeAction {
-    /// Send compute transaction
+    /// Send compute operation
     Send {
-        /// Compute transaction JSON file path
+        /// Compute operation JSON file path
         #[arg(long)]
         tx_file: String,
         /// Wallet account name used for local signing
@@ -294,7 +294,7 @@ pub(crate) enum ComputeAction {
         #[arg(long)]
         passphrase: Option<String>,
     },
-    /// Get compute transaction result by tx id
+    /// Get compute operation result by tx id
     Get {
         #[arg(short, long)]
         tx_id: String,

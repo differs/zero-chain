@@ -1,4 +1,4 @@
-//! Transaction model for UTXO Compute v1.1.
+//! Compute operation model for UTXO Compute v1.1.
 
 use serde::{Deserialize, Serialize};
 
@@ -62,7 +62,7 @@ pub struct OutputProposal {
     pub extensions: Metadata,
 }
 
-/// Transaction command type.
+/// Compute command type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Command {
     /// Transfer ownership/value among object outputs.
@@ -119,7 +119,7 @@ impl TxSignature {
     }
 }
 
-/// UTXO Compute transaction.
+/// UTXO Compute operation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ComputeTx {
     /// Deterministic tx id.
@@ -128,7 +128,7 @@ pub struct ComputeTx {
     pub domain_id: DomainId,
     /// Command to execute.
     pub command: Command,
-    /// Inputs consumed by this transaction.
+    /// Inputs consumed by this operation.
     pub input_set: Vec<OutputId>,
     /// Explicit read set.
     pub read_set: Vec<ObjectReadRef>,
@@ -240,7 +240,7 @@ impl ComputeTx {
         keccak256(&self.signing_preimage())
     }
 
-    /// Canonical transaction id expected from the current transaction body.
+    /// Canonical operation id expected from the current operation body.
     pub fn expected_tx_id(&self) -> TxId {
         TxId(Hash::from_bytes(self.signing_digest()))
     }
@@ -250,12 +250,12 @@ impl ComputeTx {
         self.tx_id == self.expected_tx_id()
     }
 
-    /// Mutates transaction id to the canonical expected value.
+    /// Mutates operation id to the canonical expected value.
     pub fn assign_expected_tx_id(&mut self) {
         self.tx_id = self.expected_tx_id();
     }
 
-    /// Returns a copy with canonical transaction id assigned.
+    /// Returns a copy with canonical operation id assigned.
     pub fn with_expected_tx_id(mut self) -> Self {
         self.assign_expected_tx_id();
         self

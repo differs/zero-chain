@@ -15,7 +15,7 @@ pub struct ObjectId(pub Hash);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 pub struct OutputId(pub Hash);
 
-/// Transaction identifier.
+/// Operation identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 pub struct TxId(pub Hash);
 
@@ -44,7 +44,7 @@ impl ObjectId {
 }
 
 impl TxId {
-    /// Creates tx id from serialized transaction bytes.
+    /// Creates tx id from serialized operation bytes.
     pub fn from_bytes(bytes: &[u8]) -> Self {
         Self(Hash::from_bytes(keccak256(bytes)))
     }

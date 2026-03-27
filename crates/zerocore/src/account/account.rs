@@ -587,20 +587,20 @@ pub struct AccountConfig {
     pub enable_utxo: bool,
     /// Gas token whitelist (multi-gas support)
     pub gas_tokens: Vec<Address>,
-    /// Transaction limits
-    pub limits: TransactionLimits,
+    /// Operation limits
+    pub limits: OperationLimits,
     /// Permissions
     pub permissions: Permissions,
     /// Metadata (for account abstraction)
     pub metadata: BTreeMap<String, String>,
 }
 
-/// Transaction limits configuration
+/// Operation limits configuration
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct TransactionLimits {
-    /// Maximum single transaction amount
+pub struct OperationLimits {
+    /// Maximum single operation amount
     pub max_tx_amount: Option<U256>,
-    /// Daily transaction limit
+    /// Daily operation limit
     pub daily_limit: Option<U256>,
     /// Used daily limit
     pub daily_used: U256,
@@ -608,7 +608,7 @@ pub struct TransactionLimits {
     pub daily_reset_at: u64,
 }
 
-impl Default for TransactionLimits {
+impl Default for OperationLimits {
     fn default() -> Self {
         Self {
             max_tx_amount: None,

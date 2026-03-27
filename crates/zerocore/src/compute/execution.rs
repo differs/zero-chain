@@ -1,4 +1,4 @@
-//! Transaction validation/execution skeleton for UTXO Compute v1.1.
+//! Compute operation validation/execution skeleton for UTXO Compute v1.1.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -90,7 +90,7 @@ impl ObjectStore for InMemoryObjectStore {
         };
 
         if existing.spent {
-            return Err(ComputeError::InvalidTransaction(
+            return Err(ComputeError::InvalidOperation(
                 "double spend detected".to_string(),
             ));
         }
@@ -148,11 +148,11 @@ pub struct BasicTxValidator<
 impl<'a, S: ObjectStore, A: AuthorizationPolicy, R: ResourcePolicy, D: DomainRegistry>
     BasicTxValidator<'a, S, A, R, D>
 {
-    /// Validates one transaction and returns resolved context.
+    /// Validates one operation and returns resolved context.
     pub fn validate(&self, tx: &ComputeTx) -> ComputeResult<ValidationReport> {
         if !tx.basic_sanity_check() {
-            return Err(ComputeError::InvalidTransaction(
-                "transaction failed basic sanity check".to_string(),
+            return Err(ComputeError::InvalidOperation(
+                "operation failed basic sanity check".to_string(),
             ));
         }
         validate_tx_envelope(tx)?;
@@ -170,7 +170,7 @@ impl<'a, S: ObjectStore, A: AuthorizationPolicy, R: ResourcePolicy, D: DomainReg
                 return Err(ComputeError::ObjectNotFound(id.0));
             };
             if output.spent {
-                return Err(ComputeError::InvalidTransaction(
+                return Err(ComputeError::InvalidOperation(
                     "input already spent".to_string(),
                 ));
             }
@@ -239,12 +239,12 @@ impl<'a, S: ObjectStore, A: AuthorizationPolicy, R: ResourcePolicy, D: DomainReg
                         return Err(ComputeError::InvalidVersionProgression);
                     }
                     if proposal.created_at < parent.created_at {
-                        return Err(ComputeError::InvalidTransaction(
+                        return Err(ComputeError::InvalidOperation(
                             "proposal created_at must be >= predecessor created_at".to_string(),
                         ));
                     }
                     if (parent.flags & FLAG_FROZEN) != 0 {
-                        return Err(ComputeError::InvalidTransaction(
+                        return Err(ComputeError::InvalidOperation(
                             "frozen predecessor cannot be spent".to_string(),
                         ));
                     }
@@ -262,19 +262,19 @@ impl<'a, S: ObjectStore, A: AuthorizationPolicy, R: ResourcePolicy, D: DomainReg
 
 fn validate_tx_envelope(tx: &ComputeTx) -> ComputeResult<()> {
     if tx.nonce == Some(0) {
-        return Err(ComputeError::InvalidTransaction(
+        return Err(ComputeError::InvalidOperation(
             "nonce must be > 0 when present".to_string(),
         ));
     }
 
     if nonce_required(tx) && tx.nonce.is_none() {
-        return Err(ComputeError::InvalidTransaction(
-            "nonce is required for empty-input or cross-domain command transactions".to_string(),
+        return Err(ComputeError::InvalidOperation(
+            "nonce is required for empty-input or cross-domain command operations".to_string(),
         ));
     }
 
     if matches!(tx.command, Command::Mint) && tx.fee != 0 {
-        return Err(ComputeError::InvalidTransaction(
+        return Err(ComputeError::InvalidOperation(
             "mint command cannot carry non-zero fee".to_string(),
         ));
     }
@@ -293,7 +293,7 @@ fn nonce_required(tx: &ComputeTx) -> bool {
 
 fn validate_metadata(metadata: &[(String, Vec<u8>)]) -> ComputeResult<()> {
     if metadata.len() > MAX_METADATA_ENTRIES {
-        return Err(ComputeError::InvalidTransaction(format!(
+        return Err(ComputeError::InvalidOperation(format!(
             "metadata entries exceed limit: {} > {}",
             metadata.len(),
             MAX_METADATA_ENTRIES
@@ -303,26 +303,26 @@ fn validate_metadata(metadata: &[(String, Vec<u8>)]) -> ComputeResult<()> {
     let mut keys = HashSet::with_capacity(metadata.len());
     for (key, value) in metadata {
         if key.trim().is_empty() {
-            return Err(ComputeError::InvalidTransaction(
+            return Err(ComputeError::InvalidOperation(
                 "metadata key must not be empty".to_string(),
             ));
         }
         if key.len() > MAX_METADATA_KEY_BYTES {
-            return Err(ComputeError::InvalidTransaction(format!(
+            return Err(ComputeError::InvalidOperation(format!(
                 "metadata key too long: {} > {}",
                 key.len(),
                 MAX_METADATA_KEY_BYTES
             )));
         }
         if value.len() > MAX_METADATA_VALUE_BYTES {
-            return Err(ComputeError::InvalidTransaction(format!(
+            return Err(ComputeError::InvalidOperation(format!(
                 "metadata value too large: {} > {}",
                 value.len(),
                 MAX_METADATA_VALUE_BYTES
             )));
         }
         if !keys.insert(key.clone()) {
-            return Err(ComputeError::InvalidTransaction(format!(
+            return Err(ComputeError::InvalidOperation(format!(
                 "duplicate metadata key: {key}"
             )));
         }
@@ -353,7 +353,7 @@ fn register_replay_nonce(
     for actor in actors {
         let key = replay_nonce_key(&actor, tx, nonce);
         if registry_guard.contains_key(&key) {
-            return Err(ComputeError::InvalidTransaction(
+            return Err(ComputeError::InvalidOperation(
                 "replay nonce tuple already used in active window".to_string(),
             ));
         }
@@ -400,24 +400,24 @@ fn validate_existing_output_lifecycle(
     validate_common_flags(output.kind, output.flags, source)?;
     if let Some(rent) = output.rent_reserve {
         if rent == 0 {
-            return Err(ComputeError::InvalidTransaction(format!(
+            return Err(ComputeError::InvalidOperation(format!(
                 "{source} rent_reserve must be > 0 when present"
             )));
         }
     }
     if let Some(ttl) = output.ttl {
         if ttl <= output.created_at {
-            return Err(ComputeError::InvalidTransaction(format!(
+            return Err(ComputeError::InvalidOperation(format!(
                 "{source} ttl must be > created_at"
             )));
         }
         let exec_ref = tx.deadline_unix_secs.ok_or_else(|| {
-            ComputeError::InvalidTransaction(
+            ComputeError::InvalidOperation(
                 "deadline_unix_secs is required when ttl-protected objects are touched".to_string(),
             )
         })?;
         if ttl < exec_ref {
-            return Err(ComputeError::InvalidTransaction(format!(
+            return Err(ComputeError::InvalidOperation(format!(
                 "{source} object expired at {ttl}, tx reference time is {exec_ref}"
             )));
         }
@@ -429,29 +429,29 @@ fn validate_proposal_lifecycle(proposal: &OutputProposal, tx: &ComputeTx) -> Com
     validate_common_flags(proposal.kind, proposal.flags, "proposal")?;
     if let Some(rent) = proposal.rent_reserve {
         if rent == 0 {
-            return Err(ComputeError::InvalidTransaction(
+            return Err(ComputeError::InvalidOperation(
                 "proposal rent_reserve must be > 0 when present".to_string(),
             ));
         }
     }
     if let Some(ttl) = proposal.ttl {
         if ttl <= proposal.created_at {
-            return Err(ComputeError::InvalidTransaction(
+            return Err(ComputeError::InvalidOperation(
                 "proposal ttl must be > created_at".to_string(),
             ));
         }
         let exec_ref = tx.deadline_unix_secs.ok_or_else(|| {
-            ComputeError::InvalidTransaction(
+            ComputeError::InvalidOperation(
                 "deadline_unix_secs is required when proposal ttl is set".to_string(),
             )
         })?;
         if ttl < exec_ref {
-            return Err(ComputeError::InvalidTransaction(
+            return Err(ComputeError::InvalidOperation(
                 "proposal ttl is already expired relative to tx reference time".to_string(),
             ));
         }
         if proposal.rent_reserve.unwrap_or(0) == 0 {
-            return Err(ComputeError::InvalidTransaction(
+            return Err(ComputeError::InvalidOperation(
                 "proposal with ttl must include non-zero rent_reserve".to_string(),
             ));
         }
@@ -461,17 +461,17 @@ fn validate_proposal_lifecycle(proposal: &OutputProposal, tx: &ComputeTx) -> Com
 
 fn validate_common_flags(kind: ObjectKind, flags: u32, source: &str) -> ComputeResult<()> {
     if (flags & !KNOWN_FLAGS_MASK) != 0 {
-        return Err(ComputeError::InvalidTransaction(format!(
+        return Err(ComputeError::InvalidOperation(format!(
             "{source} contains unknown flag bits: 0x{flags:08x}"
         )));
     }
     if (flags & FLAG_AGENT) != 0 && kind != ObjectKind::Agent {
-        return Err(ComputeError::InvalidTransaction(format!(
+        return Err(ComputeError::InvalidOperation(format!(
             "{source} with agent flag must be ObjectKind::Agent"
         )));
     }
     if (flags & FLAG_CHANNEL) != 0 && kind != ObjectKind::Ticket {
-        return Err(ComputeError::InvalidTransaction(format!(
+        return Err(ComputeError::InvalidOperation(format!(
             "{source} with channel flag must be ObjectKind::Ticket"
         )));
     }
@@ -1226,7 +1226,7 @@ mod tests {
         let err = validator
             .validate(&tx)
             .expect_err("duplicate metadata keys must fail");
-        assert!(matches!(err, ComputeError::InvalidTransaction(_)));
+        assert!(matches!(err, ComputeError::InvalidOperation(_)));
     }
 
     #[test]
@@ -1291,7 +1291,7 @@ mod tests {
         let err = validator
             .validate(&tx)
             .expect_err("nonce must be required in empty-input/cross-domain command");
-        assert!(matches!(err, ComputeError::InvalidTransaction(_)));
+        assert!(matches!(err, ComputeError::InvalidOperation(_)));
     }
 
     #[test]
@@ -1353,7 +1353,7 @@ mod tests {
         let err = validator
             .validate(&tx)
             .expect_err("ttl proposal without deadline must fail");
-        assert!(matches!(err, ComputeError::InvalidTransaction(_)));
+        assert!(matches!(err, ComputeError::InvalidOperation(_)));
     }
 
     #[test]
@@ -1601,6 +1601,6 @@ mod tests {
         let err = executor
             .execute(&tx2)
             .expect_err("second tx should be rejected by replay tuple");
-        assert!(matches!(err, ComputeError::InvalidTransaction(_)));
+        assert!(matches!(err, ComputeError::InvalidOperation(_)));
     }
 }

@@ -46,7 +46,7 @@ pub trait AccountManager: Send + Sync {
         lock_rule: UtxoLock,
     ) -> Result<UtxoReference, AccountError>;
 
-    /// Verify transaction signature
+    /// Verify signature
     async fn verify_signature(
         &self,
         account: &Account,
@@ -92,7 +92,7 @@ pub enum BalanceChangeReason {
     BlockReward,
     /// Uncle reward
     UncleReward,
-    /// Transaction fee
+    /// Operation fee
     TransactionFee,
     /// Transfer
     Transfer,
@@ -258,7 +258,7 @@ impl AccountManager for InMemoryAccountManager {
         amount: U256,
         lock_rule: UtxoLock,
     ) -> Result<UtxoReference, AccountError> {
-        let tx_hash = Hash::from_bytes([1u8; 32]); // Would be computed from transaction
+        let tx_hash = Hash::from_bytes([1u8; 32]); // Would be computed from operation payload
 
         let utxo = UtxoOutput::new(amount, lock_rule.clone());
         self.utxos.insert(tx_hash, utxo);

@@ -65,22 +65,22 @@ impl ObjectStore for ComputeStore {
         if self
             .db
             .has(&key)
-            .map_err(|e| zerocore::compute::ComputeError::InvalidTransaction(e.to_string()))?
+            .map_err(|e| zerocore::compute::ComputeError::InvalidOperation(e.to_string()))?
         {
             return Err(zerocore::compute::ComputeError::DuplicateOutputId);
         }
 
         let serialized = serde_json::to_vec(&output)
-            .map_err(|e| zerocore::compute::ComputeError::InvalidTransaction(e.to_string()))?;
+            .map_err(|e| zerocore::compute::ComputeError::InvalidOperation(e.to_string()))?;
 
         self.db
             .put(&key, &serialized)
-            .map_err(|e| zerocore::compute::ComputeError::InvalidTransaction(e.to_string()))?;
+            .map_err(|e| zerocore::compute::ComputeError::InvalidOperation(e.to_string()))?;
 
         let latest_key = latest_key(output.object_id);
         self.db
             .put(&latest_key, output.output_id.0.as_bytes())
-            .map_err(|e| zerocore::compute::ComputeError::InvalidTransaction(e.to_string()))?;
+            .map_err(|e| zerocore::compute::ComputeError::InvalidOperation(e.to_string()))?;
         Ok(())
     }
 
@@ -89,16 +89,16 @@ impl ObjectStore for ComputeStore {
             return Err(zerocore::compute::ComputeError::ObjectNotFound(output_id.0));
         };
         if output.spent {
-            return Err(zerocore::compute::ComputeError::InvalidTransaction(
+            return Err(zerocore::compute::ComputeError::InvalidOperation(
                 "double spend detected".to_string(),
             ));
         }
         output.spent = true;
         let serialized = serde_json::to_vec(&output)
-            .map_err(|e| zerocore::compute::ComputeError::InvalidTransaction(e.to_string()))?;
+            .map_err(|e| zerocore::compute::ComputeError::InvalidOperation(e.to_string()))?;
         self.db
             .put(&output_key(output_id), &serialized)
-            .map_err(|e| zerocore::compute::ComputeError::InvalidTransaction(e.to_string()))?;
+            .map_err(|e| zerocore::compute::ComputeError::InvalidOperation(e.to_string()))?;
         Ok(())
     }
 }

@@ -1,4 +1,4 @@
-//! UTXO (Unspent Transaction Output) module for hybrid account model
+//! UTXO (Unspent Transfer Output) module for hybrid account model
 
 use crate::account::U256;
 use crate::crypto::{Address, Ed25519Signature, Hash};
@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 /// UTXO reference
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UtxoReference {
-    /// Transaction hash
+    /// Operation hash
     pub tx_hash: Hash,
     /// Output index
     pub output_index: u32,
@@ -107,7 +107,7 @@ pub struct UtxoOutput {
     pub lock_rule: UtxoLock,
     /// Is spent
     pub spent: bool,
-    /// Spent by transaction hash
+    /// Spent by operation hash
     pub spent_by: Option<Hash>,
     /// Creation timestamp
     pub created_at: u64,
@@ -172,7 +172,7 @@ impl UtxoOperation {
         self.input_amount() - self.output_amount()
     }
 
-    /// Validate transaction
+    /// Validate operation
     pub fn validate(&self) -> Result<(), UtxoError> {
         // Check inputs are not empty
         if self.inputs.is_empty() {

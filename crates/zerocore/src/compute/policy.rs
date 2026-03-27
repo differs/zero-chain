@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 /// Authorization policy checks ownership/capability validity.
 pub trait AuthorizationPolicy: Send + Sync {
-    /// Validates transaction authorization against resolved inputs/reads.
+    /// Validates operation authorization against resolved inputs/reads.
     fn authorize(
         &self,
         tx: &ComputeTx,
@@ -22,7 +22,7 @@ pub trait AuthorizationPolicy: Send + Sync {
 
 /// Resource policy validates resource accounting constraints.
 pub trait ResourcePolicy: Send + Sync {
-    /// Checks resource constraints for one transaction context.
+    /// Checks resource constraints for one operation context.
     fn check_resources(
         &self,
         tx: &ComputeTx,
@@ -194,14 +194,14 @@ fn evaluate_lock_script(lock: &Script, tx: &ComputeTx) -> ComputeResult<()> {
     }
 
     if !matches!(lock.vm, 0 | 1) {
-        return Err(ComputeError::InvalidTransaction(format!(
+        return Err(ComputeError::InvalidOperation(format!(
             "unsupported lock vm: {}",
             lock.vm
         )));
     }
 
     let expr = std::str::from_utf8(&lock.code)
-        .map_err(|_| ComputeError::InvalidTransaction("lock script must be utf8".to_string()))?;
+        .map_err(|_| ComputeError::InvalidOperation("lock script must be utf8".to_string()))?;
 
     match expr {
         "ALLOW" => Ok(()),
@@ -227,7 +227,7 @@ fn evaluate_lock_script(lock: &Script, tx: &ComputeTx) -> ComputeResult<()> {
         _ if expr.starts_with("PAYLOAD_EQ:") => {
             let expected_hex = expr.trim_start_matches("PAYLOAD_EQ:");
             let expected = hex::decode(expected_hex).map_err(|e| {
-                ComputeError::InvalidTransaction(format!("invalid PAYLOAD_EQ hex: {e}"))
+                ComputeError::InvalidOperation(format!("invalid PAYLOAD_EQ hex: {e}"))
             })?;
             if expected == tx.payload {
                 Ok(())
@@ -235,7 +235,7 @@ fn evaluate_lock_script(lock: &Script, tx: &ComputeTx) -> ComputeResult<()> {
                 Err(ComputeError::AuthorizationDenied)
             }
         }
-        _ => Err(ComputeError::InvalidTransaction(format!(
+        _ => Err(ComputeError::InvalidOperation(format!(
             "unsupported lock expression: {expr}"
         ))),
     }
