@@ -124,6 +124,20 @@ is_running_pid() {
     kill -0 "${pid}" 2>/dev/null
 }
 
+wait_pid_stopped() {
+    local pid="$1"
+    local timeout_tenths="${2:-50}"
+    local i=0
+    while (( i < timeout_tenths )); do
+        if ! is_running_pid "${pid}"; then
+            return 0
+        fi
+        sleep 0.1
+        i=$((i + 1))
+    done
+    return 1
+}
+
 wait_rpc_ready() {
     local port="$1"
     local timeout_secs="${2:-20}"
@@ -251,14 +265,14 @@ stop_node() {
     pid="$(cat "${PID_FILE}" 2>/dev/null || true)"
     if [[ -n "${pid}" ]] && is_running_pid "${pid}"; then
         kill "${pid}" 2>/dev/null || true
-        for _ in {1..40}; do
-            if ! is_running_pid "${pid}"; then
-                break
-            fi
-            sleep 0.1
-        done
+        wait_pid_stopped "${pid}" 40 || true
         if is_running_pid "${pid}"; then
             kill -9 "${pid}" 2>/dev/null || true
+            wait_pid_stopped "${pid}" 20 || true
+        fi
+        if is_running_pid "${pid}"; then
+            echo "failed to stop ${role} node pid=${pid}" >&2
+            exit 1
         fi
         echo "stopped ${role} node pid=${pid}"
     else

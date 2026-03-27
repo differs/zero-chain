@@ -15,7 +15,9 @@ BOOTNODE_ENODE_PLACEHOLDER="enode://BOOTNODE_PEER_ID@127.0.0.1:30303"
 
 PIDS=()
 LOG_DIR="${ROOT_DIR}/artifacts/mainnet-local-bringup"
+RUN_STATE_DIR="${ROOT_DIR}/artifacts/mainnet-local-bringup-state"
 mkdir -p "${LOG_DIR}"
+mkdir -p "${RUN_STATE_DIR}"
 
 cleanup() {
   for pid in "${PIDS[@]:-}"; do
@@ -23,7 +25,6 @@ cleanup() {
   done
   wait >/dev/null 2>&1 || true
 }
-trap cleanup EXIT
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -85,7 +86,9 @@ echo "==> start pool"
   --port "${POOL_PORT}" \
   --node-rpc "http://127.0.0.1:8545" \
   > "${LOG_DIR}/pool.log" 2>&1) &
-PIDS+=("$!")
+pool_pid=$!
+PIDS+=("${pool_pid}")
+echo "${pool_pid}" > "${RUN_STATE_DIR}/pool.pid"
 
 echo "==> start miner"
 (cd "${MINING_STACK_DIR}" && cargo run --release -- \
@@ -96,7 +99,9 @@ echo "==> start miner"
   --metrics-port "${MINER_METRICS_PORT}" \
   --target-leading-zero-bytes 0 \
   > "${LOG_DIR}/miner.log" 2>&1) &
-PIDS+=("$!")
+miner_pid=$!
+PIDS+=("${miner_pid}")
+echo "${miner_pid}" > "${RUN_STATE_DIR}/miner.pid"
 
 echo "==> start explorer backend"
 (cd "${EXPLORER_BACKEND_DIR}" && \
@@ -104,7 +109,9 @@ echo "==> start explorer backend"
   ZERO_EXPLORER_BACKEND_BIND="127.0.0.1:${EXPLORER_BACKEND_PORT}" \
   cargo run --release \
   > "${LOG_DIR}/explorer-backend.log" 2>&1) &
-PIDS+=("$!")
+explorer_pid=$!
+PIDS+=("${explorer_pid}")
+echo "${explorer_pid}" > "${RUN_STATE_DIR}/explorer-backend.pid"
 
 wait_http_ok "http://127.0.0.1:${POOL_PORT}/health" 60
 wait_http_ok "http://127.0.0.1:${MINER_METRICS_PORT}/health" 60

@@ -61,7 +61,5 @@ curl -fsS http://127.0.0.1:19080/api/overview
 
 ```bash
 cd zero-chain
-./scripts/mainnet.sh stop observer
-./scripts/mainnet.sh stop follower
-./scripts/mainnet.sh stop bootnode
+bash scripts/mainnet_local_stop.sh
 ```
