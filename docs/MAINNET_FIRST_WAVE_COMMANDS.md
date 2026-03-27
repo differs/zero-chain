@@ -30,6 +30,11 @@ export REMOTE_P2P_PORT="30303"
 export BOOTNODE_ENODE="enode://bootnode-1@${REMOTE_HOST}:${REMOTE_P2P_PORT}"
 ```
 
+注意：
+
+- 这里的 `BOOTNODE_ENODE` 应使用 `enode://peer@ip:port`
+- 不要直接把节点日志里的 `discovery local ENR:` 字符串原样传给 `--bootnode`
+
 ## 2. 启动 bootnode
 
 如果当前机器承担首个主节点，并且要给外部矿池/矿工提供 work：

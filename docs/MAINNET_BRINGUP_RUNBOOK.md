@@ -109,6 +109,7 @@ scripts/mainnet.sh start follower \
 
 - follower 初期建议不开挖矿
 - 如果有多个 bootnode，可重复传 `--bootnode`
+- 当前 `--bootnode` 请使用 `enode://peer@ip:port`，不要直接把 discovery 日志里的 `ENR` 字符串原样传入
 
 ### 步骤 4：启动 observer
 
@@ -118,6 +119,10 @@ observer 建议与 follower 类似，但不承担外部流量入口：
 scripts/mainnet.sh start observer \
   --bootnode enode://mainnet-node-1@BOOTNODE_IP:30303
 ```
+
+说明：
+
+- observer 的 `--bootnode` 口径与 follower 相同，使用 `enode://peer@ip:port`
 
 ### 步骤 5：启动矿池与矿工
 

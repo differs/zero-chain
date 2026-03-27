@@ -122,6 +122,23 @@ is_running_pid() {
     kill -0 "${pid}" 2>/dev/null
 }
 
+wait_rpc_ready() {
+    local port="$1"
+    local timeout_secs="${2:-20}"
+    local elapsed=0
+    while (( elapsed < timeout_secs )); do
+        if curl -fsS --max-time 2 \
+            -H 'Content-Type: application/json' \
+            -d '{"jsonrpc":"2.0","method":"net_version","params":[],"id":1}' \
+            "http://127.0.0.1:${port}" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+    return 1
+}
+
 start_node() {
     local role="$1"
     local mine="$2"
@@ -184,15 +201,21 @@ start_node() {
         args+=(--bootnode "${bootnode}")
     done
 
-    nohup "${BIN}" "${args[@]}" >"${LOG_FILE}" 2>&1 &
+    if command -v setsid >/dev/null 2>&1; then
+        setsid "${BIN}" "${args[@]}" >"${LOG_FILE}" 2>&1 < /dev/null &
+    else
+        nohup "${BIN}" "${args[@]}" >"${LOG_FILE}" 2>&1 < /dev/null &
+    fi
     local pid=$!
     echo "${pid}" > "${PID_FILE}"
 
-    sleep 1
-    if is_running_pid "${pid}"; then
+    if is_running_pid "${pid}" && wait_rpc_ready "${http_port}" 20; then
         echo "started ${role} node pid=${pid}"
         echo "rpc=http://127.0.0.1:${http_port} ws=ws://127.0.0.1:${ws_port} p2p=${p2p_port}"
         echo "mine=${mine} disable_local_miner=${disable_local_miner} rpc_rate_limit_per_minute=${rpc_rate_limit_per_minute:-default}"
+        if [[ "${role}" == "bootnode" ]]; then
+            echo "bootnode_enode_hint=enode://BOOTNODE_PEER_ID@127.0.0.1:${p2p_port}"
+        fi
         if [[ ${#bootnodes[@]} -gt 0 ]]; then
             echo "bootnodes=${bootnodes[*]}"
         fi
@@ -200,6 +223,13 @@ start_node() {
     else
         echo "failed to start ${role} node"
         tail -n 80 "${LOG_FILE}" || true
+        if is_running_pid "${pid}"; then
+            kill "${pid}" 2>/dev/null || true
+            sleep 1
+            if is_running_pid "${pid}"; then
+                kill -9 "${pid}" 2>/dev/null || true
+            fi
+        fi
         rm -f "${PID_FILE}"
         exit 1
     fi

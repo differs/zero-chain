@@ -53,6 +53,7 @@ scripts/mainnet.sh start follower \
 
 - 初期不开挖矿
 - 初期不开放 `zero_getWork` / `zero_submitWork`
+- `--bootnode` 当前优先使用 `enode://peer@ip:port`
 
 ### 3. observer
 
@@ -73,6 +74,7 @@ scripts/mainnet.sh start observer \
 
 - 不承担挖矿
 - 不承担 pool 入口
+- `--bootnode` 当前优先使用 `enode://peer@ip:port`
 
 ## 挖矿执行面矩阵
 
