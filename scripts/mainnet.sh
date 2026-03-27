@@ -14,7 +14,7 @@ WS_PORT=8546
 usage() {
     cat <<'EOF'
 Usage:
-  scripts/mainnet.sh start [--mine] [--coinbase ZER0x...] [--clean-data]
+  scripts/mainnet.sh start [--mine] [--coinbase ZER0x...] [--clean-data] [--bootnode enode://...] [--disable-local-miner] [--rpc-rate-limit-per-minute N] [--rpc-auth-token TOKEN]
   scripts/mainnet.sh stop
   scripts/mainnet.sh status
   scripts/mainnet.sh logs
@@ -22,6 +22,8 @@ Usage:
 Examples:
   scripts/mainnet.sh start
   scripts/mainnet.sh start --mine --coinbase ZER0x0000000000000000000000000000000000000001
+  scripts/mainnet.sh start --bootnode enode://bootnode-1@1.2.3.4:30303
+  scripts/mainnet.sh start --mine --disable-local-miner --rpc-rate-limit-per-minute 0
   scripts/mainnet.sh status
   scripts/mainnet.sh logs
   scripts/mainnet.sh stop
@@ -52,6 +54,11 @@ start_node() {
     local mine="$1"
     local coinbase="$2"
     local clean_data="$3"
+    local disable_local_miner="$4"
+    local rpc_rate_limit_per_minute="$5"
+    local rpc_auth_token="$6"
+    shift 6
+    local bootnodes=("$@")
 
     ensure_binary
     mkdir -p "${DATA_DIR}"
@@ -83,9 +90,21 @@ start_node() {
     if [[ "${mine}" == "true" ]]; then
         args+=(--mine)
     fi
+    if [[ "${disable_local_miner}" == "true" ]]; then
+        args+=(--disable-local-miner)
+    fi
     if [[ -n "${coinbase}" ]]; then
         args+=(--coinbase "${coinbase}" --rpc-coinbase "${coinbase}")
     fi
+    if [[ -n "${rpc_rate_limit_per_minute}" ]]; then
+        args+=(--rpc-rate-limit-per-minute "${rpc_rate_limit_per_minute}")
+    fi
+    if [[ -n "${rpc_auth_token}" ]]; then
+        args+=(--rpc-auth-token "${rpc_auth_token}")
+    fi
+    for bootnode in "${bootnodes[@]}"; do
+        args+=(--bootnode "${bootnode}")
+    done
 
     nohup "${BIN}" "${args[@]}" >"${LOG_FILE}" 2>&1 &
     local pid=$!
@@ -95,6 +114,10 @@ start_node() {
     if is_running_pid "${pid}"; then
         echo "started mainnet node pid=${pid}"
         echo "rpc=http://127.0.0.1:${HTTP_PORT} ws=ws://127.0.0.1:${WS_PORT}"
+        echo "mine=${mine} disable_local_miner=${disable_local_miner} rpc_rate_limit_per_minute=${rpc_rate_limit_per_minute:-default}"
+        if [[ ${#bootnodes[@]} -gt 0 ]]; then
+            echo "bootnodes=${bootnodes[*]}"
+        fi
         echo "log=${LOG_FILE}"
     else
         echo "failed to start mainnet node"
@@ -158,6 +181,10 @@ case "${cmd}" in
         mine="false"
         coinbase=""
         clean_data="false"
+        disable_local_miner="false"
+        rpc_rate_limit_per_minute=""
+        rpc_auth_token=""
+        bootnodes=()
         while [[ $# -gt 0 ]]; do
             case "$1" in
                 --mine)
@@ -172,6 +199,22 @@ case "${cmd}" in
                     clean_data="true"
                     shift
                     ;;
+                --bootnode)
+                    bootnodes+=("${2:-}")
+                    shift 2
+                    ;;
+                --disable-local-miner)
+                    disable_local_miner="true"
+                    shift
+                    ;;
+                --rpc-rate-limit-per-minute)
+                    rpc_rate_limit_per_minute="${2:-}"
+                    shift 2
+                    ;;
+                --rpc-auth-token)
+                    rpc_auth_token="${2:-}"
+                    shift 2
+                    ;;
                 *)
                     echo "unknown option: $1"
                     usage
@@ -179,7 +222,7 @@ case "${cmd}" in
                     ;;
             esac
         done
-        start_node "${mine}" "${coinbase}" "${clean_data}"
+        start_node "${mine}" "${coinbase}" "${clean_data}" "${disable_local_miner}" "${rpc_rate_limit_per_minute}" "${rpc_auth_token}" "${bootnodes[@]}"
         ;;
     stop)
         stop_node

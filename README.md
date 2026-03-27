@@ -118,6 +118,18 @@ cargo test
 ./scripts/mainnet_checklist.sh
 ```
 
+## Mainnet Bring-up
+
+受控启网与受控真实挖矿 runbook：
+
+- `docs/MAINNET_BRINGUP_RUNBOOK.md`
+
+主节点启动入口：
+
+```bash
+./scripts/mainnet.sh start --mine --coinbase ZER0xYOUR_COINBASE
+```
+
 ## Workspace Acceptance
 
 统一验收当前多仓工作区：
