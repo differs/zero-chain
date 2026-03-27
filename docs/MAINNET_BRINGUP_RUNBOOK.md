@@ -72,6 +72,7 @@ scripts/mainnet.sh start bootnode \
 
 - `--disable-local-miner` 表示只开放 `zero_getWork` / `zero_submitWork`，不启动节点内置本地矿工
 - `--rpc-rate-limit-per-minute 0` 只建议在受控 bring-up 阶段使用，避免外部矿工 smoke 被默认限流击穿
+- 启动后优先从节点日志读取 `bootnode enode hint: ...`，将该值提供给 follower / observer
 
 ### 步骤 2：确认首节点可用
 

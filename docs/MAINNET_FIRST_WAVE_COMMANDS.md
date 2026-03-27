@@ -34,6 +34,7 @@ export BOOTNODE_ENODE="enode://bootnode-1@${REMOTE_HOST}:${REMOTE_P2P_PORT}"
 
 - 这里的 `BOOTNODE_ENODE` 应使用 `enode://peer@ip:port`
 - 不要直接把节点日志里的 `discovery local ENR:` 字符串原样传给 `--bootnode`
+- 启动 `bootnode` 后，优先使用日志里打印出来的 `bootnode enode hint: ...`
 
 ## 2. 启动 bootnode
 

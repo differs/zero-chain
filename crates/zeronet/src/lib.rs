@@ -373,6 +373,12 @@ impl NetworkService {
         // Start discovery
         if let Some(discovery) = &self.discovery {
             discovery.start().await?;
+            tracing::info!(
+                "bootnode enode hint: enode://{}@{}:{}",
+                self.local_peer_id,
+                self.config.listen_addr,
+                self.config.listen_port
+            );
             if let Some(local_enr) = discovery.local_enr_base64() {
                 tracing::info!("discovery local ENR: {}", local_enr);
             }
