@@ -16,6 +16,38 @@ REPORT_FILE="${REPORT_DIR}/workspace-acceptance-report.md"
 mkdir -p "${REPORT_DIR}"
 
 DATE_UTC="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+MODE="full"
+
+usage() {
+  cat <<'EOF'
+Usage: bash scripts/workspace_acceptance.sh [--quick|--full]
+
+  --quick  Run the fast local acceptance subset
+  --full   Run the full cross-repo acceptance suite (default)
+EOF
+}
+
+while (($# > 0)); do
+  case "$1" in
+    --quick)
+      MODE="quick"
+      shift
+      ;;
+    --full)
+      MODE="full"
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
 
 run_step() {
   local name="$1"
@@ -37,33 +69,51 @@ assert_dir "${EXPLORER_BACKEND_DIR}"
 assert_dir "${WALLET_CHROME_DIR}"
 assert_dir "${WALLET_MOBILE_DIR}"
 
-run_step "zero-chain full-chain e2e" bash -lc "cd '${ROOT_DIR}' && bash scripts/full_chain_e2e.sh"
-run_step "zero-mining-stack nightly local qa" bash -lc "cd '${MINING_STACK_DIR}' && bash scripts/nightly_local_qa.sh"
+AUTOMATED_CHECKS=()
+
+record_check() {
+  AUTOMATED_CHECKS+=("$1")
+}
 
 run_step "zero-wallet-chrome build" bash -lc "cd '${WALLET_CHROME_DIR}' && bun run build"
+record_check "zero-wallet-chrome bun run build"
 run_step "zero-wallet-chrome tests" bash -lc "cd '${WALLET_CHROME_DIR}' && bun run test"
-run_step "zero-wallet-chrome extension smoke" bash -lc "cd '${WALLET_CHROME_DIR}' && bun run qa:extension"
+record_check "zero-wallet-chrome bun run test"
 
 run_step "zero-wallet-mobile analyze" bash -lc "cd '${WALLET_MOBILE_DIR}' && flutter analyze"
+record_check "zero-wallet-mobile flutter analyze"
 run_step "zero-wallet-mobile tests" bash -lc "cd '${WALLET_MOBILE_DIR}' && flutter test"
-run_step "zero-wallet-mobile devices" bash -lc "cd '${WALLET_MOBILE_DIR}' && flutter devices"
+record_check "zero-wallet-mobile flutter test"
+
+if [[ "${MODE}" == "quick" ]]; then
+  run_step "zero-chain full-chain e2e" bash -lc "cd '${ROOT_DIR}' && bash scripts/full_chain_e2e.sh"
+  record_check "zero-chain/scripts/full_chain_e2e.sh"
+else
+  run_step "zero-chain full-chain e2e" bash -lc "cd '${ROOT_DIR}' && bash scripts/full_chain_e2e.sh"
+  record_check "zero-chain/scripts/full_chain_e2e.sh"
+  run_step "zero-mining-stack nightly local qa" bash -lc "cd '${MINING_STACK_DIR}' && bash scripts/nightly_local_qa.sh"
+  record_check "zero-mining-stack/scripts/nightly_local_qa.sh"
+  run_step "zero-wallet-chrome extension smoke" bash -lc "cd '${WALLET_CHROME_DIR}' && bun run qa:extension"
+  record_check "zero-wallet-chrome bun run qa:extension"
+  run_step "zero-wallet-mobile devices" bash -lc "cd '${WALLET_MOBILE_DIR}' && flutter devices"
+  record_check "zero-wallet-mobile flutter devices"
+fi
+
+CHECKS_MARKDOWN=""
+for check in "${AUTOMATED_CHECKS[@]}"; do
+  CHECKS_MARKDOWN+="- [x] ${check}"$'\n'
+done
 
 cat > "${REPORT_FILE}" <<EOF
 # Workspace Acceptance Report
 
 - Generated at: ${DATE_UTC}
 - Workspace: ${WORKSPACE_DIR}
+- Mode: ${MODE}
 
 ## Automated Checks
 
-- [x] zero-chain/scripts/full_chain_e2e.sh
-- [x] zero-mining-stack/scripts/nightly_local_qa.sh
-- [x] zero-wallet-chrome bun run build
-- [x] zero-wallet-chrome bun run test
-- [x] zero-wallet-chrome bun run qa:extension
-- [x] zero-wallet-mobile flutter analyze
-- [x] zero-wallet-mobile flutter test
-- [x] zero-wallet-mobile flutter devices
+${CHECKS_MARKDOWN}
 
 ## Manual Follow-up
 

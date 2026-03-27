@@ -124,7 +124,14 @@ cargo test
 
 ```bash
 cd zero-chain
-bash scripts/workspace_acceptance.sh
+bash scripts/workspace_acceptance.sh --quick
+```
+
+完整模式：
+
+```bash
+cd zero-chain
+bash scripts/workspace_acceptance.sh --full
 ```
 
 详细口径见：

@@ -12,10 +12,31 @@
 
 ```bash
 cd zero-chain
-bash scripts/workspace_acceptance.sh
+bash scripts/workspace_acceptance.sh --quick
+```
+
+完整模式：
+
+```bash
+cd zero-chain
+bash scripts/workspace_acceptance.sh --full
 ```
 
 ## 自动化门禁
+
+### Quick
+
+用于本地快速回归确认，默认优先：
+
+1. `zero-chain/scripts/full_chain_e2e.sh`
+2. `zero-wallet-chrome`
+   - `bun run build`
+   - `bun run test`
+3. `zero-wallet-mobile`
+   - `flutter analyze`
+   - `flutter test`
+
+### Full
 
 以下项目应由统一脚本自动完成，并全部通过：
 
