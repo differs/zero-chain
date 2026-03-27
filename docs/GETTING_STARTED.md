@@ -40,9 +40,7 @@ cargo build --release
 
 ```bash
 ./target/release/zerochain compute send \
-  --tx-file ./tx.json \
-  --account-name ed25519-1 \
-  --passphrase "StrongPassphrase123!"
+  --tx-file ./tx.json
 
 ./target/release/zerochain compute get --tx-id 0x...
 ```

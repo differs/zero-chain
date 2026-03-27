@@ -419,9 +419,7 @@ cargo build --release
 
 ```bash
 ./target/release/zerochain compute send \
-  --from 0xYourAddress \
-  --to 0xRecipientAddress \
-  --amount 100
+  --tx-file ./tx.json
 ```
 
 ## 连接测试网

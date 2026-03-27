@@ -33,7 +33,7 @@ struct Cli {
     #[arg(long, default_value = "local")]
     network: String,
 
-    /// JSON-RPC URL used by account/compute query commands
+    /// JSON-RPC URL used by account/compute/block query commands
     #[arg(long)]
     rpc_url: Option<String>,
 
@@ -165,13 +165,13 @@ enum Commands {
         action: ComputeAction,
     },
 
-    /// Block commands
+    /// Block query commands
     Block {
         #[command(subcommand)]
         action: BlockAction,
     },
 
-    /// Console/REPL mode
+    /// Console placeholder (not implemented)
     Console,
 
     /// Version information
@@ -287,15 +287,10 @@ pub(crate) enum ComputeAction {
         /// Compute operation JSON file path
         #[arg(long)]
         tx_file: String,
-        /// Wallet account name used for local signing
-        #[arg(long)]
-        account_name: String,
-        /// Wallet passphrase used to decrypt signing key (optional if wallet unlock token exists)
-        #[arg(long)]
-        passphrase: Option<String>,
     },
     /// Get compute operation result by tx id
     Get {
+        /// Compute operation id
         #[arg(short, long)]
         tx_id: String,
     },
@@ -307,6 +302,7 @@ enum BlockAction {
     Latest,
     /// Get block by number
     Get {
+        /// Block height in decimal
         #[arg(short, long)]
         number: u64,
     },
@@ -486,7 +482,7 @@ async fn main() -> Result<()> {
             commands::compute::handle_compute(action, &shared_data_dir, &rpc_url).await?;
         }
         Some(Commands::Block { action }) => {
-            commands::block::handle_block(format!("{:?}", action)).await?;
+            commands::block::handle_block(action, &rpc_url).await?;
         }
         Some(Commands::Console) => {
             commands::console::start_console().await?;

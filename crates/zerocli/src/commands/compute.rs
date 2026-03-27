@@ -22,11 +22,7 @@ pub async fn handle_compute(action: ComputeAction, _data_dir: &str, rpc_url: &st
                 serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string())
             );
         }
-        ComputeAction::Send {
-            tx_file,
-            account_name,
-            passphrase,
-        } => {
+        ComputeAction::Send { tx_file } => {
             let raw = fs::read_to_string(&tx_file)
                 .with_context(|| format!("failed to read tx file `{}`", tx_file))?;
             let tx_value: serde_json::Value = serde_json::from_str(&raw)
@@ -45,12 +41,6 @@ pub async fn handle_compute(action: ComputeAction, _data_dir: &str, rpc_url: &st
 
             println!("rpc_url: {}", rpc_url);
             println!("tx_file: {}", tx_file);
-            println!("account_name: {}", account_name);
-            if passphrase.is_some() {
-                println!("passphrase: provided");
-            } else {
-                println!("passphrase: not provided");
-            }
             println!(
                 "submit_result: {}",
                 serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string())

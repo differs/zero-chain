@@ -67,7 +67,7 @@ zerochain wallet unlock --name ed25519-1 --passphrase "StrongPassphrase123!" --t
 zerochain wallet sign --name ed25519-1 --message "hello"
 
 # Submit compute operation from JSON file
-zerochain compute send --tx-file ./tx.json --account-name ed25519-1 --passphrase "StrongPassphrase123!"
+zerochain compute send --tx-file ./tx.json
 
 # Query compute operation result
 zerochain compute get --tx-id 0x...
