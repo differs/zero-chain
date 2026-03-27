@@ -63,7 +63,7 @@ echo "==> start bootnode"
   --rpc-rate-limit-per-minute 0 \
   --p2p-listen-addr 127.0.0.1
 
-BOOTNODE_ENODE="$(grep -m1 'bootnode enode hint=' /root/.zerochain/mainnet/bootnode/bootnode.log 2>/dev/null | sed 's/.*=//')"
+BOOTNODE_ENODE="$(grep -m1 'bootnode enode hint:' /root/.zerochain/mainnet/bootnode/bootnode.log 2>/dev/null | sed 's/.*hint: //')"
 if [[ -z "${BOOTNODE_ENODE}" ]]; then
   BOOTNODE_ENODE="${BOOTNODE_ENODE_PLACEHOLDER}"
 fi
