@@ -34,11 +34,11 @@
   - `crates/zeronet/src/lib.rs`（全局同步缓存）
 
 ## 4. RPC 只读本地状态/本地索引
-- 现状（修复前）：`zero_getAccount`、`zero_getTransactionByHash` 不看同步缓存。
+- 现状（修复前）：`zero_getAccount`、`zero_getOperationByHash` 不看同步缓存。
 - 修复：
   - `zero_getAccount`：本地账户缺失时回退读取同步账户快照。
-  - `zero_getTransactionByHash`：本地未命中时回退读取同步 compute 索引。
-  - `zero_listTransactions`、`zero_listComputeTxResults` 合并本地 + 同步索引并去重。
+  - `zero_getOperationByHash`：本地未命中时回退读取同步 compute 索引。
+  - `zero_listOperations`、`zero_listComputeTxResults` 合并本地 + 同步索引并去重。
   - 本地状态变更时把账户/索引写入全局同步缓存（compute、block reward）。
 - 代码：
   - `crates/zeroapi/src/rpc/mod.rs`

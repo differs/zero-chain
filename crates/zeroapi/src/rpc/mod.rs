@@ -503,9 +503,9 @@ impl RpcApi {
             "zero_submitComputeTx" => self.zero_submit_compute_tx(params),
             "zero_getComputeTxResult" => self.zero_get_compute_tx_result(params),
             "zero_listComputeTxResults" => self.zero_list_compute_tx_results(params),
-            "zero_getTransactionByHash" => self.zero_get_transaction_by_hash(params),
-            "zero_listTransactions" => self.zero_list_transactions(params),
-            "zero_getTransactionsByAddress" => self.zero_get_transactions_by_address(params),
+            "zero_getOperationByHash" => self.zero_get_operation_by_hash(params),
+            "zero_listOperations" => self.zero_list_operations(params),
+            "zero_getOperationsByAddress" => self.zero_get_operations_by_address(params),
             "zero_getWork" => self.zero_get_work(params),
             "zero_submitWork" => self.zero_submit_work(params),
             "zero_getLatestBlock" => self.zero_get_latest_block(params),
@@ -923,7 +923,7 @@ impl RpcApi {
         }))
     }
 
-    fn zero_get_transaction_by_hash(
+    fn zero_get_operation_by_hash(
         &self,
         params: Option<Vec<serde_json::Value>>,
     ) -> Result<serde_json::Value, RpcErrorObject> {
@@ -958,7 +958,7 @@ impl RpcApi {
         Ok(serde_json::Value::Null)
     }
 
-    fn zero_list_transactions(
+    fn zero_list_operations(
         &self,
         params: Option<Vec<serde_json::Value>>,
     ) -> Result<serde_json::Value, RpcErrorObject> {
@@ -969,7 +969,7 @@ impl RpcApi {
             if let Some(first) = values.first() {
                 let obj = first.as_object().ok_or_else(|| {
                     RpcErrorObject::invalid_params(
-                        "query object required for zero_listTransactions".to_string(),
+                        "query object required for zero_listOperations".to_string(),
                     )
                 })?;
                 if let Some(parsed_page) = parse_u64_opt(obj.get("page"))? {
@@ -1044,7 +1044,7 @@ impl RpcApi {
         }))
     }
 
-    fn zero_get_transactions_by_address(
+    fn zero_get_operations_by_address(
         &self,
         params: Option<Vec<serde_json::Value>>,
     ) -> Result<serde_json::Value, RpcErrorObject> {
@@ -3706,10 +3706,10 @@ mod tests {
     }
 
     #[test]
-    fn test_zero_get_transactions_by_address_returns_explicit_unsupported_response() {
+    fn test_zero_get_operations_by_address_returns_explicit_unsupported_response() {
         let api = build_test_api_with_persistent_compute();
         let result = api
-            .zero_get_transactions_by_address(Some(vec![serde_json::json!({
+            .zero_get_operations_by_address(Some(vec![serde_json::json!({
                 "address": "ZER0x1111111111111111111111111111111111111111",
                 "page": 1,
                 "limit": 10
@@ -3727,7 +3727,7 @@ mod tests {
     }
 
     #[test]
-    fn test_zero_list_transactions_compute_filter_and_pagination() {
+    fn test_zero_list_operations_compute_filter_and_pagination() {
         let api = build_test_api_with_persistent_compute();
         let older_hash = Hash::from_bytes([0x31; 32]);
         let newer_hash = Hash::from_bytes([0x32; 32]);
@@ -3758,7 +3758,7 @@ mod tests {
         }
 
         let first_page = api
-            .zero_list_transactions(Some(vec![serde_json::json!({
+            .zero_list_operations(Some(vec![serde_json::json!({
                 "page": 1,
                 "limit": 1,
                 "kind": "compute"
@@ -3803,7 +3803,7 @@ mod tests {
         );
 
         let second_page = api
-            .zero_list_transactions(Some(vec![serde_json::json!({
+            .zero_list_operations(Some(vec![serde_json::json!({
                 "page": 2,
                 "limit": 1,
                 "kind": "compute"
@@ -3822,10 +3822,10 @@ mod tests {
     }
 
     #[test]
-    fn test_zero_list_transactions_rejects_invalid_kind() {
+    fn test_zero_list_operations_rejects_invalid_kind() {
         let api = build_test_api_with_persistent_compute();
         let err = api
-            .zero_list_transactions(Some(vec![serde_json::json!({
+            .zero_list_operations(Some(vec![serde_json::json!({
                 "page": 1,
                 "limit": 10,
                 "kind": "legacy"

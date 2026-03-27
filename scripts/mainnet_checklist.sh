@@ -396,8 +396,8 @@ fi
 
 if [[ -n "${CHECK_TX_HASH}" ]]; then
   local_tx_json=''; remote_tx_json=''
-  if local_tx_json="$(rpc_local "${PUBLIC_LOCAL_RPC_URL}" zero_getTransactionByHash "[\"${CHECK_TX_HASH}\"]" 2>/dev/null)" && \
-     remote_tx_json="$(rpc_remote zero_getTransactionByHash "[\"${CHECK_TX_HASH}\"]" 2>/dev/null)"; then
+  if local_tx_json="$(rpc_local "${PUBLIC_LOCAL_RPC_URL}" zero_getOperationByHash "[\"${CHECK_TX_HASH}\"]" 2>/dev/null)" && \
+     remote_tx_json="$(rpc_remote zero_getOperationByHash "[\"${CHECK_TX_HASH}\"]" 2>/dev/null)"; then
     local_is_null=0
     remote_is_null=0
     [[ "${local_tx_json}" == *'"result":null'* ]] && local_is_null=1
