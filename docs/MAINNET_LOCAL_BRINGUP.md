@@ -41,7 +41,7 @@ bash scripts/mainnet_local_bringup.sh
 ./scripts/mainnet.sh status bootnode
 ./scripts/mainnet.sh status follower
 ./scripts/mainnet.sh status observer
-scripts/node_sync_check.sh
+bash scripts/mainnet_local_check.sh
 curl -fsS http://127.0.0.1:9332/v1/stats
 curl -fsS http://127.0.0.1:19080/api/overview
 ```
