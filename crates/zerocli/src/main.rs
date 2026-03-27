@@ -202,13 +202,16 @@ enum WalletAction {
     List,
     /// Show wallet account details
     Show {
+        /// Wallet account name
         #[arg(long)]
         name: String,
     },
     /// Sign message with wallet account
     Sign {
+        /// Wallet account name
         #[arg(long)]
         name: String,
+        /// Message to sign
         #[arg(long)]
         message: String,
         /// Passphrase used to decrypt key material (optional if unlocked)
@@ -217,41 +220,52 @@ enum WalletAction {
     },
     /// Verify signature with wallet account public key
     Verify {
+        /// Wallet account name
         #[arg(long)]
         name: String,
+        /// Original message
         #[arg(long)]
         message: String,
+        /// Hex-encoded ed25519 signature
         #[arg(long)]
         signature: String,
     },
     /// Delete wallet account
     Delete {
+        /// Wallet account name
         #[arg(long)]
         name: String,
     },
 
     /// Re-encrypt account with a new passphrase
     RotatePassphrase {
+        /// Wallet account name
         #[arg(long)]
         name: String,
+        /// Current wallet passphrase
         #[arg(long)]
         old_passphrase: String,
+        /// New wallet passphrase
         #[arg(long)]
         new_passphrase: String,
     },
 
     /// Unlock account for a temporary signing session
     Unlock {
+        /// Wallet account name
         #[arg(long)]
         name: String,
+        /// Wallet passphrase used to unlock the account
         #[arg(long)]
         passphrase: String,
+        /// Session token lifetime in seconds
         #[arg(long, default_value_t = 600)]
         ttl_secs: u64,
     },
 
     /// Migrate legacy wallet v1 (plaintext key) to encrypted v2 format
     MigrateV1 {
+        /// New passphrase used to encrypt migrated key material
         #[arg(long)]
         passphrase: String,
     },
