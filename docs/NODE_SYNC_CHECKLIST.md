@@ -13,7 +13,7 @@
 - 远端公网节点 RPC 可达。
 
 2. 网络参数一致性
-- 公网双节点 `net_version` 一致，且等于预期值（当前 `31337`）。
+- 公网双节点 `net_version` 一致，且等于预期值（当前 `10086`）。
 
 3. 对等连接健康
 - 公网双节点 `net_peerCount >= 1`。
@@ -46,7 +46,7 @@ scripts/node_sync_check.sh
 ## 可调参数（环境变量）
 
 ```bash
-EXPECTED_NET_VERSION=31337 \
+EXPECTED_NET_VERSION=10086 \
 MIN_PUBLIC_PEERS=1 \
 MAX_PUBLIC_BLOCK_GAP=0 \
 MIN_PUBLIC_BLOCK_HEIGHT=0 \

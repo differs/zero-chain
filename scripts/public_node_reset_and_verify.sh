@@ -21,8 +21,8 @@ OBSERVER_RPC_PORT="${OBSERVER_RPC_PORT:-39745}"
 OBSERVER_WS_PORT="${OBSERVER_WS_PORT:-39746}"
 OBSERVER_P2P_PORT="${OBSERVER_P2P_PORT:-32303}"
 
-NETWORK_ID="${NETWORK_ID:-31337}"
-CHAIN_ID="${CHAIN_ID:-31337}"
+NETWORK_ID="${NETWORK_ID:-10086}"
+CHAIN_ID="${CHAIN_ID:-10086}"
 COINBASE="${COINBASE:-ZER0x526Dc404e751C7d52F6fFF75d563d8D0857C94E9}"
 
 VERIFY_TIMEOUT_SECS="${VERIFY_TIMEOUT_SECS:-180}"
@@ -116,6 +116,54 @@ wait_rpc_up() {
     elapsed=$((elapsed + interval))
   done
   return 1
+}
+
+wait_local_bootnode_enode() {
+  local log_file="$1"
+  local timeout_secs="$2"
+  local interval=2
+  local elapsed=0
+  while (( elapsed < timeout_secs )); do
+    local enode
+    enode="$(grep -m1 'bootnode enode hint:' "${log_file}" 2>/dev/null | sed 's/.*hint: //')"
+    if [[ -n "${enode}" ]]; then
+      printf '%s\n' "${enode}"
+      return 0
+    fi
+    sleep "${interval}"
+    elapsed=$((elapsed + interval))
+  done
+  return 1
+}
+
+wait_remote_bootnode_enode() {
+  local timeout_secs="$1"
+  local interval=2
+  local elapsed=0
+  while (( elapsed < timeout_secs )); do
+    local enode
+    enode="$(ssh_cmd '
+set -euo pipefail
+if [ -f /root/works/zero-chain-public-soak/current.env ]; then
+  . /root/works/zero-chain-public-soak/current.env
+  if [ -n "${LOG_FILE:-}" ] && [ -f "${LOG_FILE}" ]; then
+    grep -m1 "bootnode enode hint:" "${LOG_FILE}" 2>/dev/null | sed "s/.*hint: //"
+  fi
+fi
+' 2>/dev/null || true)"
+    if [[ -n "${enode}" ]]; then
+      printf '%s\n' "${enode}"
+      return 0
+    fi
+    sleep "${interval}"
+    elapsed=$((elapsed + interval))
+  done
+  return 1
+}
+
+remote_bootnode_enode_to_public() {
+  local enode="$1"
+  printf '%s\n' "${enode/@0.0.0.0:/@${REMOTE_HOST}:}"
 }
 
 require_cmd curl
@@ -230,6 +278,13 @@ echo \"\${NEW_PID}\" > /root/works/zero-chain-public-soak/remote-node.pid
 echo \"remote_pid=\${NEW_PID}\"
 "
 
+REMOTE_BOOTNODE_ENODE_RAW="$(wait_remote_bootnode_enode 25)" || {
+  echo "remote bootnode enode hint did not become ready" >&2
+  exit 1
+}
+REMOTE_BOOTNODE_ENODE="$(remote_bootnode_enode_to_public "${REMOTE_BOOTNODE_ENODE_RAW}")"
+log "远端 bootnode enode=${REMOTE_BOOTNODE_ENODE}"
+
 log "启动本地公网节点（follower，不挖矿）"
 TS="$(date -u +%Y%m%dT%H%M%SZ)"
 LOCAL_RUN_DIR="${ROOT_DIR}/artifacts/public-node-soak/${TS}"
@@ -246,7 +301,7 @@ if command -v setsid >/dev/null 2>&1; then
     --ws-port "${LOCAL_WS_PORT}" \
     --p2p-listen-addr 0.0.0.0 \
     --p2p-listen-port "${LOCAL_P2P_PORT}" \
-    --bootnode "enode://remote-public@${REMOTE_HOST}:${REMOTE_P2P_PORT}" \
+    --bootnode "${REMOTE_BOOTNODE_ENODE}" \
     --chain-id "${CHAIN_ID}" \
     --network-id "${NETWORK_ID}" \
     >"${LOCAL_LOG_FILE}" 2>&1 < /dev/null &
@@ -260,7 +315,7 @@ else
     --ws-port "${LOCAL_WS_PORT}" \
     --p2p-listen-addr 0.0.0.0 \
     --p2p-listen-port "${LOCAL_P2P_PORT}" \
-    --bootnode "enode://remote-public@${REMOTE_HOST}:${REMOTE_P2P_PORT}" \
+    --bootnode "${REMOTE_BOOTNODE_ENODE}" \
     --chain-id "${CHAIN_ID}" \
     --network-id "${NETWORK_ID}" \
     >"${LOCAL_LOG_FILE}" 2>&1 < /dev/null &
@@ -273,6 +328,12 @@ LOG_FILE=${LOCAL_LOG_FILE}
 NODE_PID=${LOCAL_PID}
 ENV
 echo "${LOCAL_PID}" > artifacts/public-node-soak/local-node.pid
+
+LOCAL_BOOTNODE_ENODE="$(wait_local_bootnode_enode "${LOCAL_LOG_FILE}" 25)" || {
+  echo "local follower bootnode enode hint did not become ready" >&2
+  exit 1
+}
+log "本地 follower enode=${LOCAL_BOOTNODE_ENODE}"
 
 log "启动 observer 节点（follower，双 bootnode）"
 OBSERVER_RUN_DIR="${ROOT_DIR}/artifacts/public-node-observer/${TS}"
@@ -287,8 +348,8 @@ if command -v setsid >/dev/null 2>&1; then
     --ws-port "${OBSERVER_WS_PORT}" \
     --p2p-listen-addr 0.0.0.0 \
     --p2p-listen-port "${OBSERVER_P2P_PORT}" \
-    --bootnode "enode://local-public@127.0.0.1:${LOCAL_P2P_PORT}" \
-    --bootnode "enode://remote-public@${REMOTE_HOST}:${REMOTE_P2P_PORT}" \
+    --bootnode "${LOCAL_BOOTNODE_ENODE}" \
+    --bootnode "${REMOTE_BOOTNODE_ENODE}" \
     --chain-id "${CHAIN_ID}" \
     --network-id "${NETWORK_ID}" \
     --rpc-coinbase "${COINBASE}" \
@@ -301,8 +362,8 @@ else
     --ws-port "${OBSERVER_WS_PORT}" \
     --p2p-listen-addr 0.0.0.0 \
     --p2p-listen-port "${OBSERVER_P2P_PORT}" \
-    --bootnode "enode://local-public@127.0.0.1:${LOCAL_P2P_PORT}" \
-    --bootnode "enode://remote-public@${REMOTE_HOST}:${REMOTE_P2P_PORT}" \
+    --bootnode "${LOCAL_BOOTNODE_ENODE}" \
+    --bootnode "${REMOTE_BOOTNODE_ENODE}" \
     --chain-id "${CHAIN_ID}" \
     --network-id "${NETWORK_ID}" \
     --rpc-coinbase "${COINBASE}" \
