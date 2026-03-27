@@ -1106,7 +1106,7 @@ impl RpcApi {
             "has_more": false,
             "items": [],
             "unsupported": true,
-            "reason": "address transaction history is not supported on compute-only nodes",
+            "reason": "address operation history is not supported on compute-only nodes",
         }))
     }
 
@@ -1726,9 +1726,7 @@ fn compute_error_to_json(err: &zerocore::compute::ComputeError) -> serde_json::V
             (5001, "resource_error", "resource")
         }
         zerocore::compute::ComputeError::InvalidObjectKind
-        | zerocore::compute::ComputeError::InvalidTransaction(_) => {
-            (6001, "tx_error", "transaction")
-        }
+        | zerocore::compute::ComputeError::InvalidOperation(_) => (6001, "op_error", "operation"),
     };
 
     serde_json::json!({
@@ -3722,7 +3720,7 @@ mod tests {
         assert_eq!(result.get("total").and_then(|v| v.as_u64()), Some(0));
         assert_eq!(
             result.get("reason").and_then(|v| v.as_str()),
-            Some("address transaction history is not supported on compute-only nodes")
+            Some("address operation history is not supported on compute-only nodes")
         );
     }
 

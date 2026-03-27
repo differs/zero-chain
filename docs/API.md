@@ -44,7 +44,7 @@ curl -X POST http://127.0.0.1:8545 \
   -d '{"jsonrpc":"2.0","method":"zero_submitWork","params":[{"work_id":"work-...","nonce":7,"hash_hex":"0x...","miner":"miner-1"}],"id":1}'
 ```
 
-### 5) 提交 Compute 交易
+### 5) 提交 Compute 操作
 
 ```bash
 curl -X POST http://127.0.0.1:8545 \
@@ -52,7 +52,7 @@ curl -X POST http://127.0.0.1:8545 \
   -d '{"jsonrpc":"2.0","method":"zero_submitComputeTx","params":[{"tx_id":"0x...","domain_id":0,"command":"Transfer","input_set":[],"output_proposals":[],"witness":{"signatures":[{"scheme":"ed25519","public_key":"0x...","signature":"0x..."}]}}],"id":1}'
 ```
 
-### 6) 查询 Compute 结果
+### 6) 查询 Compute 操作结果
 
 ```bash
 curl -X POST http://127.0.0.1:8545 \
