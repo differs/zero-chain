@@ -37,6 +37,7 @@ Options:
   --coinbase ZER0x...
   --clean-data
   --bootnode enode://...        repeatable
+  --p2p-listen-addr ADDR
   --disable-local-miner
   --rpc-rate-limit-per-minute N
   --rpc-auth-token TOKEN
@@ -46,6 +47,7 @@ Options:
 
 Examples:
   scripts/mainnet.sh start bootnode --mine --coinbase ZER0x0000000000000000000000000000000000000001
+  scripts/mainnet.sh start bootnode --p2p-listen-addr 127.0.0.1
   scripts/mainnet.sh start follower --bootnode enode://bootnode-1@1.2.3.4:30303
   scripts/mainnet.sh start observer --bootnode enode://bootnode-1@1.2.3.4:30303
   scripts/mainnet.sh status bootnode
@@ -147,10 +149,11 @@ start_node() {
     local disable_local_miner="$5"
     local rpc_rate_limit_per_minute="$6"
     local rpc_auth_token="$7"
-    local http_port="$8"
-    local ws_port="$9"
-    local p2p_port="${10}"
-    shift 10
+    local p2p_listen_addr="$8"
+    local http_port="$9"
+    local ws_port="${10}"
+    local p2p_port="${11}"
+    shift 11
     local bootnodes=("$@")
 
     ensure_binary
@@ -179,6 +182,7 @@ start_node() {
         run
         --http-port "${http_port}"
         --ws-port "${ws_port}"
+        --p2p-listen-addr "${p2p_listen_addr}"
         --p2p-listen-port "${p2p_port}"
     )
 
@@ -211,10 +215,10 @@ start_node() {
 
     if is_running_pid "${pid}" && wait_rpc_ready "${http_port}" 20; then
         echo "started ${role} node pid=${pid}"
-        echo "rpc=http://127.0.0.1:${http_port} ws=ws://127.0.0.1:${ws_port} p2p=${p2p_port}"
+        echo "rpc=http://127.0.0.1:${http_port} ws=ws://127.0.0.1:${ws_port} p2p=${p2p_listen_addr}:${p2p_port}"
         echo "mine=${mine} disable_local_miner=${disable_local_miner} rpc_rate_limit_per_minute=${rpc_rate_limit_per_minute:-default}"
         if [[ "${role}" == "bootnode" ]]; then
-            echo "bootnode_enode_hint=enode://BOOTNODE_PEER_ID@127.0.0.1:${p2p_port}"
+            echo "bootnode_enode_hint=enode://BOOTNODE_PEER_ID@${p2p_listen_addr}:${p2p_port}"
         fi
         if [[ ${#bootnodes[@]} -gt 0 ]]; then
             echo "bootnodes=${bootnodes[*]}"
@@ -306,6 +310,7 @@ case "${cmd}" in
         disable_local_miner="${DEFAULT_DISABLE_LOCAL_MINER}"
         rpc_rate_limit_per_minute=""
         rpc_auth_token=""
+        p2p_listen_addr="0.0.0.0"
         http_port="${DEFAULT_HTTP_PORT}"
         ws_port="${DEFAULT_WS_PORT}"
         p2p_port="${DEFAULT_P2P_PORT}"
@@ -326,6 +331,10 @@ case "${cmd}" in
                     ;;
                 --bootnode)
                     bootnodes+=("${2:-}")
+                    shift 2
+                    ;;
+                --p2p-listen-addr)
+                    p2p_listen_addr="${2:-}"
                     shift 2
                     ;;
                 --disable-local-miner)
@@ -359,7 +368,7 @@ case "${cmd}" in
                     ;;
             esac
         done
-        start_node "${role}" "${mine}" "${coinbase}" "${clean_data}" "${disable_local_miner}" "${rpc_rate_limit_per_minute}" "${rpc_auth_token}" "${http_port}" "${ws_port}" "${p2p_port}" "${bootnodes[@]}"
+        start_node "${role}" "${mine}" "${coinbase}" "${clean_data}" "${disable_local_miner}" "${rpc_rate_limit_per_minute}" "${rpc_auth_token}" "${p2p_listen_addr}" "${http_port}" "${ws_port}" "${p2p_port}" "${bootnodes[@]}"
         ;;
     stop)
         stop_node "${role}"
