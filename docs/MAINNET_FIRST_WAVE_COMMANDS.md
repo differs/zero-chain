@@ -2,6 +2,16 @@
 
 这份文档提供第一批 bring-up 的可直接执行命令。
 
+## 0. 先替换这些变量
+
+最少需要确认并替换：
+
+- `COINBASE`
+- `REMOTE_HOST`
+- `REMOTE_P2P_PORT`
+- `POOL_IP`
+- `BOOTNODE_ENODE`
+
 适用前提：
 
 - `bootnode`：当前机器或首个受控主节点
@@ -97,7 +107,7 @@ cargo run --release -- \
 
 ```bash
 cd zero-explore/backend
-ZERO_RPC_URL="http://127.0.0.1:8745" cargo run --release
+ZERO_RPC_URL="http://127.0.0.1:39745" cargo run --release
 ```
 
 如果 observer 尚未就绪，可临时接 bootnode：
