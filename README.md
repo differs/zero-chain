@@ -123,11 +123,12 @@ cargo test
 受控启网与受控真实挖矿 runbook：
 
 - `docs/MAINNET_BRINGUP_RUNBOOK.md`
+- `docs/MAINNET_NODE_MATRIX.md`
 
 主节点启动入口：
 
 ```bash
-./scripts/mainnet.sh start --mine --coinbase ZER0xYOUR_COINBASE
+./scripts/mainnet.sh start bootnode --mine --coinbase ZER0xYOUR_COINBASE
 ```
 
 ## Workspace Acceptance

@@ -55,13 +55,13 @@ bash scripts/workspace_acceptance.sh --quick
 如果采用节点内置挖矿：
 
 ```bash
-scripts/mainnet.sh start --mine --coinbase ZER0xYOUR_COINBASE
+scripts/mainnet.sh start bootnode --mine --coinbase ZER0xYOUR_COINBASE
 ```
 
 如果采用外部矿工模式，建议：
 
 ```bash
-scripts/mainnet.sh start \
+scripts/mainnet.sh start bootnode \
   --mine \
   --disable-local-miner \
   --coinbase ZER0xYOUR_COINBASE \
@@ -101,7 +101,7 @@ curl -sS -H 'Content-Type: application/json' \
 用首节点作为 bootnode：
 
 ```bash
-scripts/mainnet.sh start \
+scripts/mainnet.sh start follower \
   --bootnode enode://mainnet-node-1@BOOTNODE_IP:30303
 ```
 
@@ -112,7 +112,12 @@ scripts/mainnet.sh start \
 
 ### 步骤 4：启动 observer
 
-observer 建议与 follower 类似，但不承担外部流量入口。
+observer 建议与 follower 类似，但不承担外部流量入口：
+
+```bash
+scripts/mainnet.sh start observer \
+  --bootnode enode://mainnet-node-1@BOOTNODE_IP:30303
+```
 
 ### 步骤 5：启动矿池与矿工
 
@@ -139,7 +144,7 @@ cargo run --release -- \
 如果是受控 bring-up，想先降低本地验收难度，可暂时在节点侧显式设置：
 
 ```bash
-scripts/mainnet.sh start \
+scripts/mainnet.sh start bootnode \
   --mine \
   --disable-local-miner \
   --coinbase ZER0xYOUR_COINBASE \
@@ -207,13 +212,17 @@ scripts/mainnet_checklist.sh
 节点停止：
 
 ```bash
-scripts/mainnet.sh stop
+scripts/mainnet.sh stop bootnode
+scripts/mainnet.sh stop follower
+scripts/mainnet.sh stop observer
 ```
 
 查看日志：
 
 ```bash
-scripts/mainnet.sh logs
+scripts/mainnet.sh logs bootnode
+scripts/mainnet.sh logs follower
+scripts/mainnet.sh logs observer
 ```
 
 ## 6. 当前推荐口径
