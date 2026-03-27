@@ -80,7 +80,7 @@ curl -X POST http://127.0.0.1:8545 \
   -d '{"jsonrpc":"2.0","method":"zero_getBlocksRange","params":[{"from":"0x1","to":"0x64","limit":50}],"id":1}'
 ```
 
-### 10) 最近 Compute 交易列表（新增）
+### 10) 最近 Compute 操作列表（新增）
 
 ```bash
 curl -X POST http://127.0.0.1:8545 \

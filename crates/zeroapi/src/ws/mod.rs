@@ -2,7 +2,7 @@
 //!
 //! Provides real-time subscriptions for:
 //! - New block headers
-//! - New pending transactions
+//! - New pending operations
 //! - Event logs
 
 mod server;
@@ -66,8 +66,8 @@ impl Default for WsConfig {
 pub enum SubscriptionType {
     /// New block headers
     NewHeads,
-    /// New pending transactions
-    NewPendingTransactions,
+    /// New pending operations
+    PendingOperations,
     /// Event logs
     Logs(LogsFilter),
     /// Syncing status
@@ -239,8 +239,8 @@ impl SubscriptionManager {
         Ok(())
     }
 
-    /// Broadcast new pending transaction
-    pub fn broadcast_new_pending_tx(&self, tx_hash: serde_json::Value) -> Result<()> {
+    /// Broadcast new pending operation
+    pub fn broadcast_new_pending_operation(&self, tx_hash: serde_json::Value) -> Result<()> {
         self.channels
             .new_pending_txs
             .send(tx_hash)

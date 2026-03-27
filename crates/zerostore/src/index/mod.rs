@@ -7,14 +7,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use zerocore::crypto::{Address, Hash};
 
-/// Transaction index entry
+/// Operation index entry
 #[derive(Clone, Debug)]
 pub struct TxIndex {
     /// Block hash
     pub block_hash: Hash,
     /// Block number
     pub block_number: u64,
-    /// Transaction index in block
+    /// Operation index in block
     pub index: u32,
 }
 
@@ -83,8 +83,8 @@ impl IndexDB {
         }
     }
 
-    /// Index transaction
-    pub fn index_transaction(
+    /// Index operation
+    pub fn index_operation(
         &self,
         tx_hash: Hash,
         block_hash: Hash,
@@ -121,8 +121,8 @@ impl IndexDB {
         Ok(())
     }
 
-    /// Get transaction by hash
-    pub fn get_transaction(&self, tx_hash: &Hash) -> Result<Option<TxIndex>> {
+    /// Get operation by hash
+    pub fn get_operation(&self, tx_hash: &Hash) -> Result<Option<TxIndex>> {
         // Check cache first
         if let Some(index) = self.tx_cache.read().get(tx_hash) {
             return Ok(Some(index.clone()));
@@ -178,8 +178,8 @@ impl IndexDB {
         *self.latest_block.read()
     }
 
-    /// Batch index transactions
-    pub fn batch_index_transactions(&self, txs: &[(Hash, Hash, u64, u32)]) -> Result<()> {
+    /// Batch index operations
+    pub fn batch_index_operations(&self, txs: &[(Hash, Hash, u64, u32)]) -> Result<()> {
         let mut batch = self.db.batch();
 
         for (tx_hash, block_hash, block_number, index) in txs {
@@ -219,7 +219,7 @@ impl IndexDB {
     }
 }
 
-/// Address transaction index
+/// Address operation index
 pub struct AddressTxIndex {
     db: Arc<dyn KeyValueDB>,
 }
@@ -229,8 +229,8 @@ impl AddressTxIndex {
         Self { db }
     }
 
-    /// Index transaction for address
-    pub fn index_tx_for_address(
+    /// Index operation for address
+    pub fn index_op_for_address(
         &self,
         address: &Address,
         tx_hash: Hash,
@@ -240,8 +240,8 @@ impl AddressTxIndex {
         self.db.put(&key, tx_hash.as_bytes())
     }
 
-    /// Get transactions for address
-    pub fn get_transactions_for_address(
+    /// Get operations for address
+    pub fn get_operations_for_address(
         &self,
         address: &Address,
         from_block: Option<u64>,
@@ -297,10 +297,10 @@ mod tests {
         let block_hash = Hash::from_bytes([2u8; 32]);
 
         index_db
-            .index_transaction(tx_hash, block_hash, 100, 0)
+            .index_operation(tx_hash, block_hash, 100, 0)
             .unwrap();
 
-        let retrieved = index_db.get_transaction(&tx_hash).unwrap().unwrap();
+        let retrieved = index_db.get_operation(&tx_hash).unwrap().unwrap();
         assert_eq!(retrieved.block_hash, block_hash);
         assert_eq!(retrieved.block_number, 100);
         assert_eq!(retrieved.index, 0);

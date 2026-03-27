@@ -415,10 +415,10 @@ cargo build --release
 ./target/release/zerochain account list
 ```
 
-### 发送交易
+### 发送 Compute 操作
 
 ```bash
-./target/release/zerochain transaction send \
+./target/release/zerochain compute send \
   --from 0xYourAddress \
   --to 0xRecipientAddress \
   --amount 100
@@ -587,13 +587,13 @@ ws.onmessage = (msg) => {
 };
 ```
 
-### 订阅新交易
+### 订阅新操作
 
 ```javascript
 ws.send(JSON.stringify({
   jsonrpc: '2.0',
   method: 'zero_subscribe',
-  params: ['newPendingTransactions'],
+  params: ['pendingOperations'],
   id: 2
 }));
 ```

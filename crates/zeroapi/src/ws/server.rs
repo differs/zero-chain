@@ -271,7 +271,7 @@ fn handle_subscribe(
 
     let sub_type = match sub_type_str {
         "newHeads" => SubscriptionType::NewHeads,
-        "newPendingTransactions" => SubscriptionType::NewPendingTransactions,
+        "pendingOperations" => SubscriptionType::PendingOperations,
         "logs" => {
             let filter = params
                 .get(1)

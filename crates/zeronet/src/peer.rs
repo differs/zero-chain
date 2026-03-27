@@ -121,12 +121,12 @@ impl Peer {
     }
 
     /// Check if peer knows compute operation
-    pub fn knows_transaction(&self, tx_hash: &Hash) -> bool {
+    pub fn knows_operation(&self, tx_hash: &Hash) -> bool {
         self.known_transactions.read().contains(tx_hash)
     }
 
     /// Mark compute operation as known
-    pub fn mark_transaction_known(&self, tx_hash: Hash) {
+    pub fn mark_operation_known(&self, tx_hash: Hash) {
         let mut known = self.known_transactions.write();
 
         // Limit size

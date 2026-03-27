@@ -36,7 +36,7 @@ cargo build --release
 ./target/release/zerochain account list
 ```
 
-## 提交 Compute 交易
+## 提交 Compute 操作
 
 ```bash
 ./target/release/zerochain compute send \
