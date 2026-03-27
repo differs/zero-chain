@@ -118,6 +118,19 @@ cargo test
 ./scripts/mainnet_checklist.sh
 ```
 
+## Workspace Acceptance
+
+统一验收当前多仓工作区：
+
+```bash
+cd zero-chain
+bash scripts/workspace_acceptance.sh
+```
+
+详细口径见：
+
+- `docs/WORKSPACE_ACCEPTANCE_CHECKLIST.md`
+
 Key checks include:
 - local/remote/observer RPC reachability, peerCount, block heights, `zero_syncStatus`
 - local/remote block-gap threshold
