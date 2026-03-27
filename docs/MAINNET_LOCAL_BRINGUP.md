@@ -16,6 +16,13 @@ cd zero-chain
 bash scripts/mainnet_local_bringup.sh
 ```
 
+## 一键闭环
+
+```bash
+cd zero-chain
+bash scripts/mainnet_local_cycle.sh
+```
+
 默认会：
 
 1. 停掉已有本地 `bootnode/follower/observer`
