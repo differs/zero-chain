@@ -124,6 +124,7 @@ cargo test
 
 - `docs/MAINNET_BRINGUP_RUNBOOK.md`
 - `docs/MAINNET_NODE_MATRIX.md`
+- `docs/MAINNET_FIRST_WAVE_COMMANDS.md`
 
 主节点启动入口：
 

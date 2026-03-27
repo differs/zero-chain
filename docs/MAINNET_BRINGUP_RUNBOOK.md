@@ -235,3 +235,9 @@ scripts/mainnet.sh logs observer
 4. 再接 1 组白名单 pool/miner
 5. 连续观察同步、出块、shares、钱包创建
 6. 稳定后再逐步扩容
+
+## 7. 直接命令清单
+
+如果需要直接照抄执行，见：
+
+- [MAINNET_FIRST_WAVE_COMMANDS.md](/root/workspaces/blockchain/zero-chain/docs/MAINNET_FIRST_WAVE_COMMANDS.md)
