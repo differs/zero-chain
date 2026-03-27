@@ -154,6 +154,8 @@ pub struct RpcConfig {
     pub coinbase: String,
     /// Whether mining RPC methods are enabled (`zero_getWork` / `zero_submitWork`).
     pub mining_enabled: bool,
+    /// Optional override for `zero_getWork.target_leading_zero_bytes`.
+    pub mining_work_target_leading_zero_bytes: Option<usize>,
     /// Optional static auth token for all JSON-RPC requests.
     pub auth_token: Option<String>,
     /// Per-client request budget per rolling minute. `0` means disabled.
@@ -198,6 +200,7 @@ impl Default for RpcConfig {
             network_id: 10086,
             coinbase: "ZER0x0000000000000000000000000000000000000000".to_string(),
             mining_enabled: false,
+            mining_work_target_leading_zero_bytes: None,
             auth_token: None,
             rate_limit_per_minute: 600,
         }
@@ -215,6 +218,13 @@ impl RpcConfig {
         }
         if parse_address(&self.coinbase).is_err() {
             return Err("coinbase must be a valid 20-byte address with ZER0x prefix".to_string());
+        }
+        if let Some(target) = self.mining_work_target_leading_zero_bytes {
+            if target > 32 {
+                return Err(
+                    "mining_work_target_leading_zero_bytes must be between 0 and 32".to_string(),
+                );
+            }
         }
         if let Some(token) = &self.auth_token {
             if token.trim().is_empty() {
@@ -1121,11 +1131,16 @@ impl RpcApi {
         }
         let now = current_unix_secs();
         let latest = self.latest_block.read();
-        let target_leading_zero_bytes = latest
-            .as_ref()
-            .map(|b| leading_zero_target_from_difficulty(b.header.difficulty))
+        let target_leading_zero_bytes = self
+            .config
+            .mining_work_target_leading_zero_bytes
             .unwrap_or_else(|| {
-                leading_zero_target_from_difficulty(U256::from_u128(BASE_MINING_DIFFICULTY))
+                latest
+                    .as_ref()
+                    .map(|b| leading_zero_target_from_difficulty(b.header.difficulty))
+                    .unwrap_or_else(|| {
+                        leading_zero_target_from_difficulty(U256::from_u128(BASE_MINING_DIFFICULTY))
+                    })
             });
         let (prev_hash, height) = match latest.as_ref() {
             Some(b) => (b.header.hash, b.header.number.as_u64().saturating_add(1)),

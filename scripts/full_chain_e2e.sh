@@ -146,6 +146,9 @@ echo "==> Start node"
   --data-dir "${TMP_RUN_DIR}/node-data" \
   run \
   --mine \
+  --disable-local-miner \
+  --mining-work-target-leading-zero-bytes 1 \
+  --rpc-rate-limit-per-minute 0 \
   --coinbase "${COINBASE_NATIVE}" \
   --rpc-coinbase "${COINBASE_NATIVE}" \
   --http-port "${NODE_RPC_PORT}" \
@@ -169,6 +172,7 @@ echo "==> Start miner"
   --miner-id "${MINER_ID}" \
   --metrics-host 127.0.0.1 \
   --metrics-port "${MINER_METRICS_PORT}" \
+  --target-leading-zero-bytes 0 \
   >"${MINER_LOG}" 2>&1) &
 PIDS+=("$!")
 

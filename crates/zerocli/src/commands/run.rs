@@ -12,6 +12,7 @@ use zeronet::{NetworkConfig, NetworkService};
 
 pub struct RunNodeConfig {
     pub mine: bool,
+    pub disable_local_miner: bool,
     pub coinbase: Option<String>,
     pub http_port: u16,
     pub ws_port: u16,
@@ -34,6 +35,7 @@ pub struct RunNodeConfig {
 pub async fn run_node(cfg: RunNodeConfig) -> Result<()> {
     let RunNodeConfig {
         mine,
+        disable_local_miner,
         coinbase,
         http_port,
         ws_port,
@@ -92,6 +94,14 @@ pub async fn run_node(cfg: RunNodeConfig) -> Result<()> {
             .clone()
             .unwrap_or_else(|| "ZER0x0000000000000000000000000000000000000000".to_string());
         println!("   🎯 Mining worker coinbase: {}", display_coinbase);
+        println!(
+            "   Local mining worker: {}",
+            if disable_local_miner {
+                "disabled"
+            } else {
+                "enabled"
+            }
+        );
     } else if let Some(ref cb) = coinbase {
         println!("   Coinbase: {}", cb);
     }
@@ -127,12 +137,14 @@ pub async fn run_node(cfg: RunNodeConfig) -> Result<()> {
             .map_err(|e| anyhow::anyhow!("failed to start API service: {e}"))?;
         println!("   HTTP RPC service started on port {}", http_port);
 
-        if mine {
+        if mine && !disable_local_miner {
             let rpc_url = format!("http://127.0.0.1:{http_port}");
             println!("   🎯 Starting RPC-backed mining worker at {}", rpc_url);
             tokio::spawn(async move {
                 run_rpc_backed_miner(rpc_url, "zerochain-local".to_string()).await;
             });
+        } else if mine {
+            println!("   ⛏️  Mining RPC enabled without local mining worker");
         }
 
         Some(api)

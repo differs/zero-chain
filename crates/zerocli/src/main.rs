@@ -61,6 +61,10 @@ enum Commands {
         #[arg(long)]
         mine: bool,
 
+        /// Do not start the built-in local mining worker when mining RPC is enabled
+        #[arg(long, default_value_t = false)]
+        disable_local_miner: bool,
+
         /// Coinbase address
         #[arg(long)]
         coinbase: Option<String>,
@@ -100,6 +104,10 @@ enum Commands {
         /// RPC rate limit budget per client per minute, 0 to disable
         #[arg(long, default_value = "600")]
         rpc_rate_limit_per_minute: u32,
+
+        /// Optional override for zero_getWork target leading zero bytes (0..=32)
+        #[arg(long)]
+        mining_work_target_leading_zero_bytes: Option<usize>,
 
         /// P2P listen address
         #[arg(long, default_value = "0.0.0.0")]
@@ -364,6 +372,7 @@ async fn main() -> Result<()> {
     match command {
         Some(Commands::Run {
             mine,
+            disable_local_miner,
             coinbase,
             http_port,
             ws_port,
@@ -374,6 +383,7 @@ async fn main() -> Result<()> {
             rpc_coinbase,
             rpc_auth_token,
             rpc_rate_limit_per_minute,
+            mining_work_target_leading_zero_bytes,
             p2p_listen_addr,
             p2p_listen_port,
             bootnodes,
@@ -425,6 +435,7 @@ async fn main() -> Result<()> {
                 mining_enabled: mine,
                 auth_token: rpc_auth_token,
                 rate_limit_per_minute: rpc_rate_limit_per_minute,
+                mining_work_target_leading_zero_bytes,
                 ..api_config.http_rpc
             };
             api_config.ws.port = ws_port;
@@ -456,6 +467,7 @@ async fn main() -> Result<()> {
 
             commands::run::run_node(commands::run::RunNodeConfig {
                 mine,
+                disable_local_miner,
                 coinbase,
                 http_port,
                 ws_port,
