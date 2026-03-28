@@ -2324,6 +2324,15 @@ fn parse_compute_tx(value: serde_json::Value) -> Result<ComputeTx, RpcErrorObjec
     })
 }
 
+pub fn canonicalize_compute_tx_json(
+    mut tx_json: serde_json::Value,
+) -> Result<serde_json::Value, RpcErrorObject> {
+    let mut tx = parse_compute_tx(tx_json.clone())?;
+    tx.assign_expected_tx_id();
+    tx_json["tx_id"] = serde_json::Value::String(format!("0x{}", tx.tx_id.0.to_hex()));
+    Ok(tx_json)
+}
+
 fn parse_witness(v: Option<&serde_json::Value>) -> Result<TxWitness, RpcErrorObject> {
     let obj = v
         .and_then(|x| x.as_object())
@@ -2979,11 +2988,8 @@ mod tests {
         );
     }
 
-    fn canonicalize_compute_tx_id(mut tx_json: serde_json::Value) -> serde_json::Value {
-        let mut tx = parse_compute_tx(tx_json.clone()).expect("tx json should parse");
-        tx.assign_expected_tx_id();
-        tx_json["tx_id"] = serde_json::Value::String(format!("0x{}", tx.tx_id.0.to_hex()));
-        tx_json
+    fn canonicalize_compute_tx_id(tx_json: serde_json::Value) -> serde_json::Value {
+        canonicalize_compute_tx_json(tx_json).expect("tx json should parse")
     }
 
     fn canonicalize_and_sign_compute_tx(mut tx_json: serde_json::Value) -> serde_json::Value {

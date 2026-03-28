@@ -10,6 +10,7 @@ use serde_json::json;
 struct JsonRpcError {
     code: i64,
     message: String,
+    data: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -49,7 +50,7 @@ where
     if let Some(error) = body.error {
         return Err(anyhow!(
             "{}",
-            format_rpc_error(method, error.code, &error.message)
+            format_rpc_error(method, error.code, &error.message, error.data.as_ref())
         ));
     }
 
@@ -57,10 +58,46 @@ where
         .ok_or_else(|| anyhow!("rpc `{}` missing result field", method))
 }
 
-fn format_rpc_error(method: &str, code: i64, message: &str) -> String {
+fn format_rpc_error(
+    method: &str,
+    code: i64,
+    message: &str,
+    data: Option<&serde_json::Value>,
+) -> String {
     if code == -32010 && method == "zero_submitComputeTx" {
         return "当前节点拒绝提交 compute 交易，请检查节点配置与交易内容。".to_string();
     }
 
-    format!("rpc `{}` error {}: {}", method, code, message)
+    match data {
+        Some(data) => format!(
+            "rpc `{}` error {}: {} ({})",
+            method,
+            code,
+            message,
+            serde_json::to_string(data).unwrap_or_else(|_| data.to_string())
+        ),
+        None => format!("rpc `{}` error {}: {}", method, code, message),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_rpc_error;
+
+    #[test]
+    fn format_rpc_error_includes_error_data() {
+        let message = format_rpc_error(
+            "zero_submitComputeTx",
+            -32602,
+            "Invalid params",
+            Some(&serde_json::json!({
+                "code": "signature_owner_mismatch",
+                "message": "signature does not authorize owner"
+            })),
+        );
+
+        assert!(message.contains("Invalid params"));
+        assert!(message.contains("signature_owner_mismatch"));
+        assert!(message.contains("signature does not authorize owner"));
+    }
 }
