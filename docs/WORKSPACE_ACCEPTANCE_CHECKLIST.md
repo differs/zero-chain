@@ -36,6 +36,8 @@ bash scripts/workspace_acceptance.sh --full
    - `flutter analyze`
    - `flutter test`
 
+4. `zero-chain/scripts/check_compute_json_fixtures.sh`
+
 ### Full
 
 以下项目应由统一脚本自动完成，并全部通过：
@@ -75,6 +77,14 @@ bash scripts/workspace_acceptance.sh --full
    - analyze 无错误
    - 测试通过
    - 至少能列出当前可用设备
+
+5. `compute JSON` 跨仓一致性
+   命令：
+   - `zero-chain/scripts/check_compute_json_fixtures.sh`
+   预期：
+   - `zeroapi` fixture 解析与 `canonical_tx_id` 校验通过
+   - `zero-wallet-chrome` 对共享 fixture 的 owner / tx_id 归一化结果与协议一致
+   - `zero-wallet-mobile` 对共享 fixture 的 owner / tx_id 归一化结果与协议一致
 
 ## 人工复核
 

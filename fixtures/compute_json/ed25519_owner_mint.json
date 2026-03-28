@@ -1,0 +1,59 @@
+{
+  "name": "ed25519_owner_mint",
+  "description": "Ed25519 owner fixture with duplicated 0x prefix tolerated by wallet clients",
+  "input": {
+    "tx_id": "0x2222222222222222222222222222222222222222222222222222222222222222",
+    "domain_id": 0,
+    "command": "Mint",
+    "input_set": [],
+    "read_set": [],
+    "output_proposals": [
+      {
+        "output_id": "0x5656565656565656565656565656565656565656565656565656565656565656",
+        "object_id": "0x7878787878787878787878787878787878787878787878787878787878787878",
+        "domain_id": 0,
+        "kind": "Asset",
+        "owner": {
+          "type": "Ed25519",
+          "public_key": "0xea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+        },
+        "predecessor": null,
+        "version": 1,
+        "state": "0x",
+        "state_root": null,
+        "resources": [],
+        "lock": { "vm": 1, "code": "0x" },
+        "logic": null,
+        "created_at": 0,
+        "ttl": null,
+        "rent_reserve": null,
+        "flags": 0,
+        "extensions": []
+      }
+    ],
+    "fee": 0,
+    "nonce": 9,
+    "metadata": [],
+    "payload": "0x",
+    "deadline_unix_secs": null,
+    "chain_id": 10086,
+    "network_id": 10086,
+    "witness": {
+      "threshold": 1,
+      "signatures": [
+        {
+          "scheme": "ed25519",
+          "signature": "0x5fcd20e2da3a47a4c12655b5106878a808d4432a5cda586f08b743c2d1aaeb455475306197bbc10d0d7f1202aa437be78c599a435779a59e94a80039f293b60f",
+          "public_key": "0xea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+        }
+      ]
+    }
+  },
+  "expected": {
+    "canonical_tx_id": "0xdfe4e081c885ee95df9138effee0b77325509ac1623c55d1655f7bd9250f13da",
+    "owner": {
+      "type": "Ed25519",
+      "public_key": "0xea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+    }
+  }
+}

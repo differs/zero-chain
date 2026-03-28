@@ -79,6 +79,8 @@ run_step "zero-wallet-chrome build" bash -lc "cd '${WALLET_CHROME_DIR}' && bun r
 record_check "zero-wallet-chrome bun run build"
 run_step "zero-wallet-chrome tests" bash -lc "cd '${WALLET_CHROME_DIR}' && bun run test"
 record_check "zero-wallet-chrome bun run test"
+run_step "cross-stack compute json fixtures" bash -lc "cd '${ROOT_DIR}' && bash scripts/check_compute_json_fixtures.sh"
+record_check "zero-chain/scripts/check_compute_json_fixtures.sh"
 
 run_step "zero-wallet-mobile analyze" bash -lc "cd '${WALLET_MOBILE_DIR}' && flutter analyze"
 record_check "zero-wallet-mobile flutter analyze"

@@ -3093,6 +3093,63 @@ mod tests {
     }
 
     #[test]
+    fn compute_json_fixture_address_owner_mint_matches_protocol() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../fixtures/compute_json/address_owner_mint.json"
+        ))
+        .expect("fixture should parse");
+        let input = fixture["input"].clone();
+        let expected = fixture["expected"].clone();
+
+        let canonical = canonicalize_compute_tx_json(input.clone()).expect("tx should canonicalize");
+        assert_eq!(
+            canonical["tx_id"].as_str(),
+            expected["canonical_tx_id"].as_str()
+        );
+
+        let parsed = parse_compute_tx(canonical).expect("canonical tx should parse");
+        assert!(matches!(
+            parsed.output_proposals[0].owner,
+            Ownership::Address(_)
+        ));
+        assert_eq!(
+            parsed.output_proposals[0]
+                .resources
+                .iter()
+                .map(|(asset_id, _)| format!("0x{}", hex::encode(asset_id.as_bytes())))
+                .collect::<Vec<_>>(),
+            expected["resource_asset_ids_sorted"]
+                .as_array()
+                .expect("sorted asset ids")
+                .iter()
+                .map(|value| value.as_str().expect("asset id").to_string())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn compute_json_fixture_ed25519_owner_mint_matches_protocol() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../fixtures/compute_json/ed25519_owner_mint.json"
+        ))
+        .expect("fixture should parse");
+        let input = fixture["input"].clone();
+        let expected = fixture["expected"].clone();
+
+        let canonical = canonicalize_compute_tx_json(input).expect("tx should canonicalize");
+        assert_eq!(
+            canonical["tx_id"].as_str(),
+            expected["canonical_tx_id"].as_str()
+        );
+
+        let parsed = parse_compute_tx(canonical).expect("canonical tx should parse");
+        assert!(matches!(
+            parsed.output_proposals[0].owner,
+            Ownership::Ed25519(_)
+        ));
+    }
+
+    #[test]
     fn test_zero_get_work_returns_work_payload() {
         let api = build_test_api_with_persistent_compute();
         let work = api

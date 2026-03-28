@@ -1,0 +1,72 @@
+{
+  "name": "address_owner_mint",
+  "description": "Address owner fixture shared across zero-chain CLI and both wallets",
+  "input": {
+    "tx_id": "0x1111111111111111111111111111111111111111111111111111111111111111",
+    "domain_id": 0,
+    "command": "Mint",
+    "input_set": [],
+    "read_set": [],
+    "output_proposals": [
+      {
+        "output_id": "0x1212121212121212121212121212121212121212121212121212121212121212",
+        "object_id": "0x3434343434343434343434343434343434343434343434343434343434343434",
+        "domain_id": 0,
+        "kind": "Asset",
+        "owner": {
+          "type": "Address",
+          "address": "ZER0x1111111111111111111111111111111111111111"
+        },
+        "predecessor": null,
+        "version": 1,
+        "state": "01",
+        "state_root": null,
+        "resources": [
+          {
+            "asset_id": "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "value": { "type": "Amount", "amount": "2" }
+          },
+          {
+            "asset_id": "0x0101010101010101010101010101010101010101010101010101010101010101",
+            "value": { "type": "Amount", "amount": "1" }
+          }
+        ],
+        "lock": { "vm": 1, "code": "0x" },
+        "logic": null,
+        "created_at": 0,
+        "ttl": null,
+        "rent_reserve": null,
+        "flags": 0,
+        "extensions": []
+      }
+    ],
+    "fee": 0,
+    "nonce": 7,
+    "metadata": [],
+    "payload": "01",
+    "deadline_unix_secs": null,
+    "chain_id": 10086,
+    "network_id": 10086,
+    "witness": {
+      "threshold": 1,
+      "signatures": [
+        {
+          "scheme": "ed25519",
+          "signature": "0x0884d4a17fe9640a229d2db96ebc9c6ad54692417fba8e7e60fc5fc7912a379a0108a98f52b4499ac51142445138d1a1cb561a3e2669ec8add6d6fc9ac7d400f",
+          "public_key": "0xea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+        }
+      ]
+    }
+  },
+  "expected": {
+    "canonical_tx_id": "0xe4c108e8ac98f76ed61fdb2c5c7113ae2138ccf4a6e30ac2649cd1f8b1a30c6a",
+    "owner": {
+      "type": "Address",
+      "address": "ZER0x1111111111111111111111111111111111111111"
+    },
+    "resource_asset_ids_sorted": [
+      "0x0101010101010101010101010101010101010101010101010101010101010101",
+      "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    ]
+  }
+}
