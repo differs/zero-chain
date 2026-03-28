@@ -73,6 +73,9 @@ zerochain compute send --tx-file ./tx.json
 zerochain compute get --tx-id 0x...
 ```
 
+Compute JSON 共享规范见：
+- [COMPUTE_JSON_SPEC.md](/root/workspaces/blockchain/zero-chain/docs/COMPUTE_JSON_SPEC.md)
+
 ## RPC Example
 
 ```bash
