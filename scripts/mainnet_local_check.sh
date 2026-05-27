@@ -7,6 +7,7 @@ OBSERVER_RPC_URL="${OBSERVER_RPC_URL:-http://127.0.0.1:39745}"
 POOL_URL="${POOL_URL:-http://127.0.0.1:9332}"
 MINER_METRICS_URL="${MINER_METRICS_URL:-http://127.0.0.1:9333}"
 EXPLORER_BACKEND_URL="${EXPLORER_BACKEND_URL:-http://127.0.0.1:19080}"
+RPC_AUTH_TOKEN="${RPC_AUTH_TOKEN:-}"
 
 EXPECTED_NET_VERSION="${EXPECTED_NET_VERSION:-10086}"
 MIN_FOLLOWER_PEERS="${MIN_FOLLOWER_PEERS:-1}"
@@ -33,9 +34,15 @@ log_fail() {
 rpc_call() {
   local url="$1"
   local method="$2"
-  curl -fsS --max-time "${RPC_TIMEOUT_SECS}" \
-    -H 'Content-Type: application/json' \
-    -d "{\"jsonrpc\":\"2.0\",\"method\":\"${method}\",\"params\":[],\"id\":1}" \
+  local curl_args=(
+    -fsS --max-time "${RPC_TIMEOUT_SECS}"
+    -H 'Content-Type: application/json'
+    -d "{\"jsonrpc\":\"2.0\",\"method\":\"${method}\",\"params\":[],\"id\":1}"
+  )
+  if [[ -n "${RPC_AUTH_TOKEN}" ]]; then
+    curl_args+=(-H "authorization: Bearer ${RPC_AUTH_TOKEN}")
+  fi
+  curl "${curl_args[@]}" \
     "${url}"
 }
 

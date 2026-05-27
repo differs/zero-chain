@@ -37,6 +37,10 @@ struct Cli {
     #[arg(long)]
     rpc_url: Option<String>,
 
+    /// Optional auth token used by outbound JSON-RPC client commands
+    #[arg(long)]
+    rpc_token: Option<String>,
+
     /// Optional node config file (JSON)
     #[arg(long)]
     config: Option<String>,
@@ -337,6 +341,7 @@ async fn main() -> Result<()> {
         data_dir,
         network,
         rpc_url,
+        rpc_token,
         config,
         otel_enabled,
         otel_endpoint,
@@ -502,13 +507,25 @@ async fn main() -> Result<()> {
             println!("API config written to {}", cfg_path);
         }
         Some(Commands::Account { action }) => {
-            commands::account::handle_account(action, &shared_data_dir, &rpc_url).await?;
+            commands::account::handle_account(
+                action,
+                &shared_data_dir,
+                &rpc_url,
+                rpc_token.as_deref(),
+            )
+            .await?;
         }
         Some(Commands::Compute { action }) => {
-            commands::compute::handle_compute(action, &shared_data_dir, &rpc_url).await?;
+            commands::compute::handle_compute(
+                action,
+                &shared_data_dir,
+                &rpc_url,
+                rpc_token.as_deref(),
+            )
+            .await?;
         }
         Some(Commands::Block { action }) => {
-            commands::block::handle_block(action, &rpc_url).await?;
+            commands::block::handle_block(action, &rpc_url, rpc_token.as_deref()).await?;
         }
         Some(Commands::Console) => {
             commands::console::start_console().await?;

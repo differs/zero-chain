@@ -66,7 +66,7 @@ async fn compute_submit_result_output_smoke_redb_backend() {
         payload: vec![],
         deadline_unix_secs: None,
         chain_id: Some(10086),
-        network_id: Some(1),
+        network_id: Some(10086),
         witness: TxWitness {
             signatures: vec![],
             threshold: Some(1),
@@ -86,7 +86,7 @@ async fn compute_submit_result_output_smoke_redb_backend() {
             "tx_id": tx_id_hex.clone(),
             "domain_id": 0,
             "chain_id": 10086,
-            "network_id": 1,
+            "network_id": 10086,
             "command": "Mint",
             "nonce": 1,
             "input_set": [],

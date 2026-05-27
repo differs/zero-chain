@@ -24,6 +24,7 @@ MINER_METRICS_URL="http://127.0.0.1:${MINER_METRICS_PORT}"
 
 CHAIN_ID="${CHAIN_ID:-10086}"
 NETWORK_ID="${NETWORK_ID:-10086}"
+RPC_AUTH_TOKEN="${RPC_AUTH_TOKEN:-cli-mining-smoke-token}"
 COINBASE_NATIVE="${COINBASE_NATIVE:-ZER0x0000000000000000000000000000000000000000}"
 MINER_ID="${MINER_ID:-miner-smoke-1}"
 FIXTURE_FILE="${FIXTURE_FILE:-${ROOT_DIR}/fixtures/compute_json/ed25519_owner_mint.json}"
@@ -47,6 +48,7 @@ Environment overrides:
   MINER_METRICS_PORT    zero-mining-stack miner metrics port (default: 9333)
   CHAIN_ID              zerochain chain_id override (default: 10086)
   NETWORK_ID            zerochain network_id override (default: 10086)
+  RPC_AUTH_TOKEN        Auth token required by node RPC write methods
   COINBASE_NATIVE       Coinbase used for mining RPC (default: all-zero ZER0x)
   MINER_ID              Miner identifier label (default: miner-smoke-1)
   FIXTURE_FILE          Compute fixture JSON with top-level {"input":...}
@@ -144,6 +146,7 @@ rpc_call() {
   local params_json="$2"
   curl -fsS \
     -H 'content-type: application/json' \
+    -H "authorization: Bearer ${RPC_AUTH_TOKEN}" \
     --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"${method}\",\"params\":${params_json}}" \
     "${NODE_RPC_URL}"
 }
@@ -221,6 +224,7 @@ echo "==> Start zerochain node"
   --p2p-listen-port "${NODE_P2P_PORT}" \
   --chain-id "${CHAIN_ID}" \
   --network-id "${NETWORK_ID}" \
+  --rpc-auth-token "${RPC_AUTH_TOKEN}" \
   --rpc-rate-limit-per-minute 0 \
   --mining-work-target-leading-zero-bytes 0 \
   --coinbase "${COINBASE_NATIVE}" \
@@ -231,8 +235,8 @@ PIDS+=("$!")
 wait_rpc_ok 60
 
 echo "==> Verify block CLI and RPC"
-latest_block_json="$("${ROOT_DIR}/target/debug/zerochain" --rpc-url "${NODE_RPC_URL}" block latest)"
-genesis_block_json="$("${ROOT_DIR}/target/debug/zerochain" --rpc-url "${NODE_RPC_URL}" block get --number 0)"
+latest_block_json="$("${ROOT_DIR}/target/debug/zerochain" --rpc-url "${NODE_RPC_URL}" --rpc-token "${RPC_AUTH_TOKEN}" block latest)"
+genesis_block_json="$("${ROOT_DIR}/target/debug/zerochain" --rpc-url "${NODE_RPC_URL}" --rpc-token "${RPC_AUTH_TOKEN}" block get --number 0)"
 net_version_json="$(rpc_call "net_version" "[]")"
 get_work_before_json="$(rpc_call "zero_getWork" "[]")"
 
@@ -254,7 +258,7 @@ if [[ "${net_version}" != "${NETWORK_ID}" ]]; then
 fi
 
 echo "==> Submit compute transaction via CLI"
-compute_send_output="$("${ROOT_DIR}/target/debug/zerochain" --rpc-url "${NODE_RPC_URL}" compute send --tx-file "${TX_INPUT_FILE}")"
+compute_send_output="$("${ROOT_DIR}/target/debug/zerochain" --rpc-url "${NODE_RPC_URL}" --rpc-token "${RPC_AUTH_TOKEN}" compute send --tx-file "${TX_INPUT_FILE}")"
 canonical_tx_id="$(printf '%s' "${compute_send_output}" | sed -n 's/^canonical_tx_id: \(0x[0-9a-fA-F]\+\)$/\1/p')"
 if [[ -z "${canonical_tx_id}" ]]; then
   echo "Failed to extract canonical_tx_id from compute send output" >&2
@@ -262,7 +266,7 @@ if [[ -z "${canonical_tx_id}" ]]; then
   exit 1
 fi
 
-compute_get_output="$("${ROOT_DIR}/target/debug/zerochain" --rpc-url "${NODE_RPC_URL}" compute get --tx-id "${canonical_tx_id}")"
+compute_get_output="$("${ROOT_DIR}/target/debug/zerochain" --rpc-url "${NODE_RPC_URL}" --rpc-token "${RPC_AUTH_TOKEN}" compute get --tx-id "${canonical_tx_id}")"
 output_json="$(rpc_call "zero_getOutput" "[\"0x5656565656565656565656565656565656565656565656565656565656565656\"]")"
 object_json="$(rpc_call "zero_getObject" "[\"0x7878787878787878787878787878787878787878787878787878787878787878\"]")"
 
@@ -288,6 +292,7 @@ echo "==> Start mining pool"
   --host 127.0.0.1 \
   --port "${POOL_PORT}" \
   --node-rpc "${NODE_RPC_URL}" \
+  --node-rpc-token "${RPC_AUTH_TOKEN}" \
   >"${POOL_LOG}" 2>&1 &
 PIDS+=("$!")
 

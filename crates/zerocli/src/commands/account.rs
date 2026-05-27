@@ -5,7 +5,12 @@ use crate::commands::wallet::{self, WalletCommand, WalletScheme};
 use crate::{AccountAction, Result};
 use serde_json::json;
 
-pub async fn handle_account(action: AccountAction, data_dir: &str, rpc_url: &str) -> Result<()> {
+pub async fn handle_account(
+    action: AccountAction,
+    data_dir: &str,
+    rpc_url: &str,
+    rpc_token: Option<&str>,
+) -> Result<()> {
     match action {
         AccountAction::New {
             name,
@@ -26,9 +31,13 @@ pub async fn handle_account(action: AccountAction, data_dir: &str, rpc_url: &str
             wallet::handle_wallet(data_dir, WalletCommand::List).await?;
         }
         AccountAction::Balance { address } => {
-            let account_info =
-                rpc_call::<serde_json::Value>(rpc_url, "zero_getAccount", json!([address.clone()]))
-                    .await?;
+            let account_info = rpc_call::<serde_json::Value>(
+                rpc_url,
+                rpc_token,
+                "zero_getAccount",
+                json!([address.clone()]),
+            )
+            .await?;
 
             println!("rpc_url: {}", rpc_url);
             println!("address: {}", address);

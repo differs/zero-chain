@@ -19,7 +19,12 @@ struct JsonRpcResponse<T> {
     error: Option<JsonRpcError>,
 }
 
-pub async fn rpc_call<T>(rpc_url: &str, method: &str, params: serde_json::Value) -> Result<T>
+pub async fn rpc_call<T>(
+    rpc_url: &str,
+    rpc_token: Option<&str>,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<T>
 where
     T: DeserializeOwned,
 {
@@ -31,9 +36,12 @@ where
         "params": params,
     });
 
-    let response = client
-        .post(rpc_url)
-        .json(&payload)
+    let mut request = client.post(rpc_url).json(&payload);
+    if let Some(token) = rpc_token {
+        request = request.bearer_auth(token);
+    }
+
+    let response = request
         .send()
         .await
         .with_context(|| format!("failed to call rpc method `{method}`"))?;

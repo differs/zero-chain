@@ -67,10 +67,10 @@ zerochain wallet unlock --name ed25519-1 --passphrase "StrongPassphrase123!" --t
 zerochain wallet sign --name ed25519-1 --message "hello"
 
 # Submit compute operation from JSON file
-zerochain compute send --tx-file ./tx.json
+zerochain --rpc-token YOUR_RPC_TOKEN compute send --tx-file ./tx.json
 
 # Query compute operation result
-zerochain compute get --tx-id 0x...
+zerochain --rpc-token YOUR_RPC_TOKEN compute get --tx-id 0x...
 ```
 
 Compute JSON 共享规范见：
@@ -84,9 +84,14 @@ Compute JSON 共享规范见：
 # - testnet: 18545
 # - devnet: 28545
 curl -X POST http://localhost:8545 \
+  -H "Authorization: Bearer YOUR_RPC_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","method":"zero_getAccount","params":["ZER0x..."],"id":1}'
 ```
+
+说明：
+- 未配置 `auth_token` 时，读方法默认可访问，但有状态写方法会直接拒绝。
+- 配置 `auth_token` 后，所有 RPC 请求都需要携带 token。
 
 ## Development
 
@@ -168,6 +173,13 @@ bash scripts/workspace_acceptance.sh --full
 ```bash
 cd zero-chain
 bash scripts/cli_mining_smoke.sh
+```
+
+本地主网严格口径 smoke（mainnet 拓扑 + RocksDb + 默认限流 + RPC 鉴权）：
+
+```bash
+cd zero-chain
+bash scripts/mainnet_strict_smoke.sh
 ```
 
 Key checks include:

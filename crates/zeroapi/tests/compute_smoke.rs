@@ -55,7 +55,7 @@ async fn compute_submit_result_output_smoke() {
         payload: vec![],
         deadline_unix_secs: None,
         chain_id: Some(10086),
-        network_id: Some(1),
+        network_id: Some(10086),
         witness: TxWitness {
             signatures: vec![],
             threshold: Some(1),
@@ -78,7 +78,7 @@ async fn compute_submit_result_output_smoke() {
             "tx_id": tx_id,
             "domain_id": 0,
             "chain_id": 10086,
-            "network_id": 1,
+            "network_id": 10086,
             "command": "Mint",
             "nonce": 1,
             "input_set": [],

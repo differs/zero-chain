@@ -7,11 +7,17 @@ use serde_json::json;
 use std::fs;
 use zeroapi::rpc::canonicalize_compute_tx_json;
 
-pub async fn handle_compute(action: ComputeAction, _data_dir: &str, rpc_url: &str) -> Result<()> {
+pub async fn handle_compute(
+    action: ComputeAction,
+    _data_dir: &str,
+    rpc_url: &str,
+    rpc_token: Option<&str>,
+) -> Result<()> {
     match action {
         ComputeAction::Get { tx_id } => {
             let result = rpc_call::<serde_json::Value>(
                 rpc_url,
+                rpc_token,
                 "zero_getComputeTxResult",
                 json!([tx_id.clone()]),
             )
@@ -41,6 +47,7 @@ pub async fn handle_compute(action: ComputeAction, _data_dir: &str, rpc_url: &st
 
             let result = rpc_call::<serde_json::Value>(
                 rpc_url,
+                rpc_token,
                 "zero_submitComputeTx",
                 json!([tx_value.clone()]),
             )
@@ -77,11 +84,14 @@ mod tests {
             },
             temp.path().to_str().expect("temp path"),
             "http://127.0.0.1:1",
+            None,
         )
         .await
         .expect_err("non-object payload should fail");
 
-        assert!(err.to_string().contains("compute payload must be a JSON object"));
+        assert!(err
+            .to_string()
+            .contains("compute payload must be a JSON object"));
     }
 
     #[tokio::test]
@@ -132,6 +142,7 @@ mod tests {
             },
             temp.path().to_str().expect("temp path"),
             "http://127.0.0.1:1",
+            None,
         )
         .await
         .expect_err("rpc should fail after local canonicalization");

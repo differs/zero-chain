@@ -7,6 +7,7 @@ MINING_STACK_DIR="${WORKSPACE_DIR}/zero-mining-stack"
 EXPLORER_BACKEND_DIR="${WORKSPACE_DIR}/zero-explore/backend"
 
 COINBASE="${COINBASE:-ZER0x526Dc404e751C7d52F6fFF75d563d8D0857C94E9}"
+RPC_AUTH_TOKEN="${RPC_AUTH_TOKEN:-mainnet-local-bringup-token}"
 POOL_PORT="${POOL_PORT:-9332}"
 MINER_METRICS_PORT="${MINER_METRICS_PORT:-9333}"
 EXPLORER_BACKEND_PORT="${EXPLORER_BACKEND_PORT:-19080}"
@@ -61,6 +62,7 @@ echo "==> start bootnode"
   --mine \
   --disable-local-miner \
   --coinbase "${COINBASE}" \
+  --rpc-auth-token "${RPC_AUTH_TOKEN}" \
   --rpc-rate-limit-per-minute 0 \
   --p2p-listen-addr 127.0.0.1
 
@@ -85,6 +87,7 @@ echo "==> start pool"
   --host 127.0.0.1 \
   --port "${POOL_PORT}" \
   --node-rpc "http://127.0.0.1:8545" \
+  --node-rpc-token "${RPC_AUTH_TOKEN}" \
   > "${LOG_DIR}/pool.log" 2>&1) &
 pool_pid=$!
 PIDS+=("${pool_pid}")

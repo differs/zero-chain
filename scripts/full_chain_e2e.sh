@@ -26,6 +26,7 @@ POOL_URL="http://127.0.0.1:${POOL_PORT}"
 MINER_METRICS_URL="http://127.0.0.1:${MINER_METRICS_PORT}"
 EXPLORER_BACKEND_URL="http://127.0.0.1:${EXPLORER_BACKEND_PORT}"
 EXPLORER_FRONTEND_URL="http://127.0.0.1:${EXPLORER_FRONTEND_PORT}"
+RPC_AUTH_TOKEN="${RPC_AUTH_TOKEN:-full-chain-e2e-token}"
 
 COINBASE_NATIVE="${COINBASE_NATIVE:-ZER0x526Dc404e751C7d52F6fFF75d563d8D0857C94E9}"
 RECIPIENT_NATIVE="${RECIPIENT_NATIVE:-ZER0x1111111111111111111111111111111111111111}"
@@ -94,6 +95,7 @@ rpc_call() {
   local params_json="$2"
   curl -fsS \
     -H 'content-type: application/json' \
+    -H "authorization: Bearer ${RPC_AUTH_TOKEN}" \
     --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"${method}\",\"params\":${params_json}}" \
     "${NODE_RPC_URL}"
 }
@@ -151,6 +153,7 @@ echo "==> Start node"
   --rpc-rate-limit-per-minute 0 \
   --coinbase "${COINBASE_NATIVE}" \
   --rpc-coinbase "${COINBASE_NATIVE}" \
+  --rpc-auth-token "${RPC_AUTH_TOKEN}" \
   --http-port "${NODE_RPC_PORT}" \
   --ws-port "${NODE_WS_PORT}" \
   >"${NODE_LOG}" 2>&1 &
@@ -162,6 +165,7 @@ echo "==> Start mining pool"
   --host 127.0.0.1 \
   --port "${POOL_PORT}" \
   --node-rpc "${NODE_RPC_URL}" \
+  --node-rpc-token "${RPC_AUTH_TOKEN}" \
   >"${POOL_LOG}" 2>&1) &
 PIDS+=("$!")
 

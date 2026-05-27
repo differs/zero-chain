@@ -141,12 +141,18 @@ wait_pid_stopped() {
 wait_rpc_ready() {
     local port="$1"
     local timeout_secs="${2:-20}"
+    local rpc_auth_token="${3:-}"
     local elapsed=0
     while (( elapsed < timeout_secs )); do
-        if curl -fsS --max-time 2 \
-            -H 'Content-Type: application/json' \
-            -d '{"jsonrpc":"2.0","method":"net_version","params":[],"id":1}' \
-            "http://127.0.0.1:${port}" >/dev/null 2>&1; then
+        local curl_args=(
+            -fsS --max-time 2
+            -H 'Content-Type: application/json'
+            -d '{"jsonrpc":"2.0","method":"net_version","params":[],"id":1}'
+        )
+        if [[ -n "${rpc_auth_token}" ]]; then
+            curl_args+=(-H "authorization: Bearer ${rpc_auth_token}")
+        fi
+        if curl "${curl_args[@]}" "http://127.0.0.1:${port}" >/dev/null 2>&1; then
             return 0
         fi
         sleep 1
@@ -227,7 +233,7 @@ start_node() {
     local pid=$!
     echo "${pid}" > "${PID_FILE}"
 
-    if is_running_pid "${pid}" && wait_rpc_ready "${http_port}" 20; then
+    if is_running_pid "${pid}" && wait_rpc_ready "${http_port}" 20 "${rpc_auth_token}"; then
         echo "started ${role} node pid=${pid}"
         echo "rpc=http://127.0.0.1:${http_port} ws=ws://127.0.0.1:${ws_port} p2p=${p2p_listen_addr}:${p2p_port}"
         echo "mine=${mine} disable_local_miner=${disable_local_miner} rpc_rate_limit_per_minute=${rpc_rate_limit_per_minute:-default}"

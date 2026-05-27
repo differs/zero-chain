@@ -121,6 +121,7 @@ pub async fn run_node(cfg: RunNodeConfig) -> Result<()> {
         .map(|cfg| cfg.network_id)
         .unwrap_or(10086);
     let _api_service = if let Some(mut cfg) = rpc_config.clone() {
+        let rpc_token = cfg.auth_token.clone();
         cfg.port = http_port;
         cfg.mining_enabled = mine;
         let mut api_cfg = ApiConfig {
@@ -141,7 +142,7 @@ pub async fn run_node(cfg: RunNodeConfig) -> Result<()> {
             let rpc_url = format!("http://127.0.0.1:{http_port}");
             println!("   🎯 Starting RPC-backed mining worker at {}", rpc_url);
             tokio::spawn(async move {
-                run_rpc_backed_miner(rpc_url, "zerochain-local".to_string()).await;
+                run_rpc_backed_miner(rpc_url, rpc_token, "zerochain-local".to_string()).await;
             });
         } else if mine {
             println!("   ⛏️  Mining RPC enabled without local mining worker");
@@ -218,19 +219,21 @@ struct SubmitWorkPayload {
 async fn rpc_call<T: DeserializeOwned>(
     client: &reqwest::Client,
     rpc_url: &str,
+    rpc_token: Option<&str>,
     method: &str,
     params: serde_json::Value,
 ) -> anyhow::Result<T> {
-    let response = client
-        .post(rpc_url)
-        .json(&serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": method,
-            "params": params,
-        }))
-        .send()
-        .await?;
+    let mut request = client.post(rpc_url).json(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": method,
+        "params": params,
+    }));
+    if let Some(token) = rpc_token {
+        request = request.bearer_auth(token);
+    }
+
+    let response = request.send().await?;
 
     let status = response.status();
     let body = response.text().await?;
@@ -264,7 +267,7 @@ fn compute_pow_hash(prev_hash: &[u8; 32], height: u64, nonce: u64) -> [u8; 32] {
     keccak256(&data)
 }
 
-async fn run_rpc_backed_miner(rpc_url: String, miner_label: String) {
+async fn run_rpc_backed_miner(rpc_url: String, rpc_token: Option<String>, miner_label: String) {
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
@@ -277,17 +280,22 @@ async fn run_rpc_backed_miner(rpc_url: String, miner_label: String) {
     };
 
     loop {
-        let work =
-            match rpc_call::<WorkPayload>(&client, &rpc_url, "zero_getWork", serde_json::json!([]))
-                .await
-            {
-                Ok(work) => work,
-                Err(err) => {
-                    println!("   ⚠️ Failed to fetch mining work: {}", err);
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    continue;
-                }
-            };
+        let work = match rpc_call::<WorkPayload>(
+            &client,
+            &rpc_url,
+            rpc_token.as_deref(),
+            "zero_getWork",
+            serde_json::json!([]),
+        )
+        .await
+        {
+            Ok(work) => work,
+            Err(err) => {
+                println!("   ⚠️ Failed to fetch mining work: {}", err);
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                continue;
+            }
+        };
 
         let prev_hash_hex = work.prev_hash.trim_start_matches("0x");
         let prev_hash_bytes = match hex::decode(prev_hash_hex) {
@@ -320,6 +328,7 @@ async fn run_rpc_backed_miner(rpc_url: String, miner_label: String) {
                 let submit = rpc_call::<SubmitWorkPayload>(
                     &client,
                     &rpc_url,
+                    rpc_token.as_deref(),
                     "zero_submitWork",
                     serde_json::json!([{
                         "work_id": work.work_id,

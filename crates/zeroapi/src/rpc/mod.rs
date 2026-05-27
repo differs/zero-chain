@@ -1,13 +1,17 @@
 //! JSON-RPC Server Implementation
 
 use axum::{
-    extract::DefaultBodyLimit, extract::State, http::HeaderMap, routing::post, Json, Router,
+    extract::{ConnectInfo, DefaultBodyLimit, State},
+    http::HeaderMap,
+    routing::post,
+    Json, Router,
 };
 use once_cell::sync::OnceCell;
 use parking_lot::RwLock;
 use prometheus::{Encoder, IntCounterVec, IntGauge, Registry, TextEncoder};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::oneshot;
 use tower_http::cors::{Any, CorsLayer};
@@ -741,6 +745,7 @@ impl RpcApi {
             .clone();
 
         let tx = parse_compute_tx(tx_value)?;
+        validate_compute_tx_network(&tx, &self.config)?;
 
         if let Some(persistent) = &self.persistent_compute_store {
             if let Ok(Some(existing)) = persistent.get_tx_result(tx.tx_id) {
@@ -1619,24 +1624,22 @@ impl RpcApi {
             ));
         }
 
-        let mut latest = self.latest_block.write();
-        if let Some(current) = latest.as_ref() {
-            let current_num = current.header.number.as_u64();
-            if number <= current_num {
-                return Ok(serde_json::json!({
-                    "imported": false,
-                    "reason": "stale_or_duplicate"
-                }));
-            }
-            if number != current_num.saturating_add(1) || parent_hash != current.header.hash {
-                return Ok(serde_json::json!({
-                    "imported": false,
-                    "reason": "parent_mismatch"
-                }));
-            }
+        let current = self.current_head_block();
+        let current_num = current.header.number.as_u64();
+        if number <= current_num {
+            return Ok(serde_json::json!({
+                "imported": false,
+                "reason": "stale_or_duplicate"
+            }));
+        }
+        if number != current_num.saturating_add(1) || parent_hash != current.header.hash {
+            return Ok(serde_json::json!({
+                "imported": false,
+                "reason": "parent_mismatch"
+            }));
         }
 
-        let header = BlockHeader {
+        let mut header = BlockHeader {
             version: 1,
             parent_hash,
             uncle_hashes: Vec::new(),
@@ -1655,10 +1658,12 @@ impl RpcApi {
             base_fee_per_gas: U256::from(1_000_000_000u64),
             hash,
         };
+        validate_imported_block_header(&current.header, &mut header)?;
         let block = Block {
             header: header.clone(),
             uncles: Vec::new(),
         };
+        let mut latest = self.latest_block.write();
         self.store_block(block.clone());
         *latest = Some(block);
         set_global_synced_height(number);
@@ -1877,7 +1882,11 @@ impl RpcServer {
         *self.shutdown_tx.lock() = Some(shutdown_tx);
 
         let task = tokio::spawn(async move {
-            let server = axum::serve(listener, app).with_graceful_shutdown(async {
+            let server = axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .with_graceful_shutdown(async {
                 let _ = shutdown_rx.await;
             });
 
@@ -1904,9 +1913,25 @@ impl RpcServer {
 
 async fn handle_rpc_request(
     State(state): State<RpcServerState>,
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(request): Json<JsonRpcRequest>,
 ) -> Json<JsonRpcResponse> {
+    if method_requires_auth_token(&request.method) && state.security.auth_token.is_none() {
+        return Json(JsonRpcResponse {
+            jsonrpc: "2.0".into(),
+            result: None,
+            error: Some(RpcErrorObject {
+                code: -32001,
+                message: "Unauthorized".into(),
+                data: Some(serde_json::json!(
+                    "stateful rpc methods require auth_token on this node"
+                )),
+            }),
+            id: request.id,
+        });
+    }
+
     if !is_authorized(&headers, state.security.auth_token.as_deref()) {
         return Json(JsonRpcResponse {
             jsonrpc: "2.0".into(),
@@ -1920,7 +1945,7 @@ async fn handle_rpc_request(
         });
     }
 
-    let client = extract_client_key(&headers);
+    let client = remote_addr.ip().to_string();
     if !state.security.allow_request(&client) {
         return Json(JsonRpcResponse {
             jsonrpc: "2.0".into(),
@@ -1938,22 +1963,6 @@ async fn handle_rpc_request(
     }
 
     Json(state.api.handle_request(request).await)
-}
-
-fn extract_client_key(headers: &HeaderMap) -> String {
-    if let Some(v) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-        let first = v.split(',').next().unwrap_or_default().trim();
-        if !first.is_empty() {
-            return first.to_string();
-        }
-    }
-    if let Some(v) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
-        let ip = v.trim();
-        if !ip.is_empty() {
-            return ip.to_string();
-        }
-    }
-    "local".to_string()
 }
 
 fn is_authorized(headers: &HeaderMap, expected_token: Option<&str>) -> bool {
@@ -1976,6 +1985,85 @@ fn is_authorized(headers: &HeaderMap, expected_token: Option<&str>) -> bool {
         .and_then(|v| v.to_str().ok())
         .map(|v| v.trim() == expected)
         .unwrap_or(false)
+}
+
+fn method_requires_auth_token(method: &str) -> bool {
+    matches!(
+        method,
+        "zero_submitComputeTx" | "zero_submitWork" | "zero_importBlock"
+    )
+}
+
+fn validate_compute_tx_network(tx: &ComputeTx, config: &RpcConfig) -> Result<(), RpcErrorObject> {
+    let tx_chain_id = tx.chain_id.ok_or_else(|| {
+        RpcErrorObject::invalid_params("compute tx chain_id must be set".to_string())
+    })?;
+    let tx_network_id = tx.network_id.ok_or_else(|| {
+        RpcErrorObject::invalid_params("compute tx network_id must be set".to_string())
+    })?;
+
+    if tx_chain_id != config.chain_id {
+        return Err(RpcErrorObject::invalid_params(format!(
+            "compute tx chain_id {} does not match node chain_id {}",
+            tx_chain_id, config.chain_id
+        )));
+    }
+    if u64::from(tx_network_id) != config.network_id {
+        return Err(RpcErrorObject::invalid_params(format!(
+            "compute tx network_id {} does not match node network_id {}",
+            tx_network_id, config.network_id
+        )));
+    }
+
+    Ok(())
+}
+
+fn validate_imported_block_header(
+    parent: &BlockHeader,
+    header: &mut BlockHeader,
+) -> Result<(), RpcErrorObject> {
+    let expected_hash = header.compute_hash();
+    if header.hash != expected_hash {
+        return Err(RpcErrorObject::invalid_params(
+            "block hash does not match header contents".to_string(),
+        ));
+    }
+
+    header
+        .validate(parent)
+        .map_err(|e| RpcErrorObject::invalid_params(format!("invalid block header: {e}")))?;
+
+    let expected_difficulty =
+        adjust_mining_difficulty(parent.difficulty, parent.timestamp, header.timestamp);
+    if header.difficulty != expected_difficulty {
+        return Err(RpcErrorObject::invalid_params(format!(
+            "invalid difficulty: expected 0x{:x}, got 0x{:x}",
+            expected_difficulty.as_u64(),
+            header.difficulty.as_u64()
+        )));
+    }
+
+    let mut data = Vec::new();
+    data.extend_from_slice(parent.hash.as_bytes());
+    data.extend_from_slice(&header.number.as_u64().to_be_bytes());
+    data.extend_from_slice(&header.nonce.to_be_bytes());
+    let expected_mix = zerocore::crypto::keccak256(&data);
+    if header.mix_hash != Hash::from_bytes(expected_mix) {
+        return Err(RpcErrorObject::invalid_params(
+            "block mix_hash does not match expected mining digest".to_string(),
+        ));
+    }
+
+    let leading = expected_mix.iter().take_while(|b| **b == 0).count();
+    let required_leading = leading_zero_target_from_difficulty(header.difficulty);
+    if leading < required_leading {
+        return Err(RpcErrorObject::invalid_params(format!(
+            "block pow below required difficulty: leading_zero_bytes={} required={}",
+            leading, required_leading
+        )));
+    }
+
+    Ok(())
 }
 
 fn build_default_rpc_api(config: RpcConfig) -> std::result::Result<RpcApi, crate::ApiError> {
@@ -3055,7 +3143,7 @@ mod tests {
             "tx_id": format!("0x{}", hex::encode([0x91u8; 32])),
             "domain_id": 0,
             "chain_id": 10086,
-            "network_id": 1,
+            "network_id": 10086,
             "command": "Transfer",
             "nonce": 1,
             "input_set": [format!("0x{}", hex::encode([0x92u8; 32]))],
@@ -3101,7 +3189,8 @@ mod tests {
         let input = fixture["input"].clone();
         let expected = fixture["expected"].clone();
 
-        let canonical = canonicalize_compute_tx_json(input.clone()).expect("tx should canonicalize");
+        let canonical =
+            canonicalize_compute_tx_json(input.clone()).expect("tx should canonicalize");
         assert_eq!(
             canonical["tx_id"].as_str(),
             expected["canonical_tx_id"].as_str()
@@ -3703,7 +3792,7 @@ mod tests {
             "tx_id": format!("0x{}", hex::encode([0x21u8; 32])),
             "domain_id": 0,
             "chain_id": 10086,
-            "network_id": 1,
+            "network_id": 10086,
             "command": "Mint",
             "nonce": 1,
             "input_set": [],
@@ -3729,7 +3818,7 @@ mod tests {
             "tx_id": format!("0x{}", hex::encode([0x22u8; 32])),
             "domain_id": 0,
             "chain_id": 10086,
-            "network_id": 1,
+            "network_id": 10086,
             "command": "Mint",
             "nonce": 2,
             "input_set": [],
@@ -4062,6 +4151,48 @@ mod tests {
     }
 
     #[test]
+    fn test_zero_import_block_rejects_invalid_header_hash() {
+        let api = build_test_api_with_persistent_compute();
+        let latest = api.zero_get_latest_block(None).expect("latest block");
+        let parent_hash = latest["hash"].as_str().expect("parent hash");
+        let timestamp = latest["timestamp"].as_u64().unwrap_or(0) + 10;
+        let difficulty = adjust_mining_difficulty(
+            zerocore::account::U256::from_u128(1_000_000_000_000_000u128),
+            latest["timestamp"].as_u64().unwrap_or(0),
+            timestamp,
+        );
+        let nonce = 11u64;
+        let mut data = Vec::new();
+        data.extend_from_slice(
+            &hex::decode(parent_hash.strip_prefix("0x").unwrap_or(parent_hash)).unwrap(),
+        );
+        data.extend_from_slice(&1u64.to_be_bytes());
+        data.extend_from_slice(&nonce.to_be_bytes());
+        let mix_hash = zerocore::crypto::keccak256(&data);
+
+        let err = api
+            .zero_import_block(Some(vec![serde_json::json!({
+                "hash": "0x1111111111111111111111111111111111111111111111111111111111111111",
+                "parent_hash": parent_hash,
+                "number": "0x1",
+                "timestamp": timestamp,
+                "difficulty": format!("0x{:x}", difficulty.as_u64()),
+                "nonce": nonce,
+                "coinbase": "ZER0x526Dc404e751C7d52F6fFF75d563d8D0857C94E9",
+                "mix_hash": format!("0x{}", hex::encode(mix_hash)),
+                "extra_data": "0x"
+            })]))
+            .expect_err("invalid hash should be rejected");
+        assert_eq!(err.code, -32602);
+        assert_eq!(
+            err.data,
+            Some(serde_json::Value::String(
+                "block hash does not match header contents".to_string(),
+            ))
+        );
+    }
+
+    #[test]
     fn test_zero_get_metrics_contains_rpc_and_mining_counters() {
         let api = build_test_api_with_persistent_compute();
 
@@ -4127,6 +4258,15 @@ mod tests {
     }
 
     #[test]
+    fn test_method_requires_auth_token_for_stateful_writes() {
+        assert!(method_requires_auth_token("zero_submitComputeTx"));
+        assert!(method_requires_auth_token("zero_submitWork"));
+        assert!(method_requires_auth_token("zero_importBlock"));
+        assert!(!method_requires_auth_token("zero_getLatestBlock"));
+        assert!(!method_requires_auth_token("zero_getAccount"));
+    }
+
+    #[test]
     fn test_rate_limiter_enforces_budget() {
         let cfg = RpcConfig {
             rate_limit_per_minute: 2,
@@ -4137,6 +4277,47 @@ mod tests {
         assert!(limiter.allow_request("127.0.0.1"));
         assert!(!limiter.allow_request("127.0.0.1"));
         assert!(limiter.allow_request("10.0.0.1"));
+    }
+
+    #[test]
+    fn test_zero_submit_compute_tx_rejects_network_mismatch() {
+        let api = build_test_api_with_compute();
+
+        let tx = canonicalize_and_sign_compute_tx(serde_json::json!({
+            "tx_id": format!("0x{}", hex::encode([0x21u8; 32])),
+            "domain_id": 0,
+            "chain_id": 10086,
+            "network_id": 1,
+            "command": "Mint",
+            "nonce": 1,
+            "input_set": [],
+            "read_set": [],
+            "output_proposals": [{
+                "output_id": format!("0x{}", hex::encode([0x22u8; 32])),
+                "object_id": format!("0x{}", hex::encode([0x23u8; 32])),
+                "domain_id": 0,
+                "kind": "State",
+                "owner": { "type": "Shared" },
+                "predecessor": null,
+                "version": 1,
+                "state": "0x01",
+                "logic": null
+            }],
+            "payload": "0x",
+            "deadline_unix_secs": null,
+            "witness": {"signatures": [], "threshold": 1}
+        }));
+
+        let err = api
+            .zero_submit_compute_tx(Some(vec![tx]))
+            .expect_err("network mismatch should be rejected");
+        assert_eq!(err.code, -32602);
+        assert_eq!(
+            err.data,
+            Some(serde_json::Value::String(
+                "compute tx network_id 1 does not match node network_id 10086".to_string(),
+            ))
+        );
     }
 
     #[test]
@@ -4240,7 +4421,7 @@ mod tests {
             "tx_id": format!("0x{}", hex::encode([0x55u8; 32])),
             "domain_id": 0,
             "chain_id": 10086,
-            "network_id": 1,
+            "network_id": 10086,
             "command": "Mint",
             "nonce": 1,
             "input_set": [],
@@ -4294,7 +4475,7 @@ mod tests {
             "tx_id": format!("0x{}", hex::encode([0x99u8; 32])),
             "domain_id": 9,
             "chain_id": 10086,
-            "network_id": 1,
+            "network_id": 10086,
             "command": "Mint",
             "nonce": 2,
             "input_set": [],
@@ -4341,7 +4522,7 @@ mod tests {
             "tx_id": format!("0x{}", hex::encode([0xD1u8; 32])),
             "domain_id": 0,
             "chain_id": 10086,
-            "network_id": 1,
+            "network_id": 10086,
             "command": "Transfer",
             "nonce": 2,
             "input_set": [format!("0x{}", hex::encode([0xD2u8; 32]))],
@@ -4435,7 +4616,7 @@ mod tests {
             "tx_id": format!("0x{}", hex::encode([0xF1u8; 32])),
             "domain_id": 0,
             "chain_id": 10086,
-            "network_id": 1,
+            "network_id": 10086,
             "command": "Transfer",
             "nonce": 3,
             "input_set": [format!("0x{}", hex::encode([0xF2u8; 32]))],
@@ -4508,7 +4689,7 @@ mod tests {
             "tx_id": format!("0x{}", hex::encode([0xADu8; 32])),
             "domain_id": 0,
             "chain_id": 10086,
-            "network_id": 1,
+            "network_id": 10086,
             "command": "Transfer",
             "nonce": 4,
             "input_set": [format!("0x{}", hex::encode([0xABu8; 32]))],
@@ -4555,7 +4736,7 @@ mod tests {
             "tx_id": format!("0x{}", hex::encode([0x11u8; 32])),
             "domain_id": 0,
             "chain_id": 10086,
-            "network_id": 1,
+            "network_id": 10086,
             "command": "Mint",
             "nonce": 3,
             "input_set": [],
@@ -4576,7 +4757,7 @@ mod tests {
             "tx_id": format!("0x{}", hex::encode([0xA1u8; 32])),
             "domain_id": 0,
             "chain_id": 10086,
-            "network_id": 1,
+            "network_id": 10086,
             "command": "Mint",
             "nonce": 4,
             "input_set": [],
