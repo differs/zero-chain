@@ -163,6 +163,13 @@ bash scripts/workspace_acceptance.sh --full
 
 - `docs/WORKSPACE_ACCEPTANCE_CHECKLIST.md`
 
+本地 CLI + 外部矿工最小闭环 smoke：
+
+```bash
+cd zero-chain
+bash scripts/cli_mining_smoke.sh
+```
+
 Key checks include:
 - local/remote/observer RPC reachability, peerCount, block heights, `zero_syncStatus`
 - local/remote block-gap threshold
