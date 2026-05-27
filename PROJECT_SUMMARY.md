@@ -28,3 +28,5 @@
 - `ARCHITECTURE.md`
 - `docs/GETTING_STARTED.md`
 - `docs/API.md`
+- `docs/GO_NO_GO_CHECKLIST.md`
+- `docs/KEY_MANAGEMENT_ACCEPTANCE.md`

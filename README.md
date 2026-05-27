@@ -114,6 +114,12 @@ cargo test
 - CI 阻断：`.github/workflows/redline-guard.yml`
 - 发布门禁包含 redline 检查：`scripts/run_tests.sh`
 
+## Release Gates
+
+- 上线阻断清单：`docs/GO_NO_GO_CHECKLIST.md`
+- P0 发布阻塞推进板：`docs/P0_RELEASE_BLOCKERS_2026-03.md`
+- 密钥托管与轮换验收：`docs/KEY_MANAGEMENT_ACCEPTANCE.md`
+
 ## Mainnet Checklist
 
 ```bash

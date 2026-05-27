@@ -47,7 +47,12 @@
    - 轮换前签名成功；
    - 轮换后签名成功；
    - 旧密钥撤销成功。
-3. 输出 `artifacts/security/key-rotation-drill-<date>.md`。
+3. 按 `docs/KEY_MANAGEMENT_ACCEPTANCE.md` 逐项留证，至少覆盖：
+   - KMS/HSM 托管形态
+   - RBAC/IAM 与双人审批
+   - 轮换窗口与紧急吊销
+   - 审计日志与告警
+4. 输出 `artifacts/security/key-rotation-drill-<date>.md`。
 
 ### F1-F4 可观测与回滚
 
