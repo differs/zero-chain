@@ -11,7 +11,10 @@ use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use sha3::{Digest, Keccak256};
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write as _;
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 use zerocore::crypto::keccak256;
@@ -602,7 +605,7 @@ fn save_wallet_file(path: &Path, wallet: &WalletFile) -> Result<()> {
     }
     let json = serde_json::to_string_pretty(wallet)
         .map_err(|e| anyhow::anyhow!("failed to encode wallet file: {}", e))?;
-    fs::write(path, json)
+    write_secret_file(path, json.as_bytes())
         .map_err(|e| anyhow::anyhow!("failed to write wallet file {}: {}", path.display(), e))?;
     Ok(())
 }
@@ -627,8 +630,28 @@ fn save_session_file(path: &Path, session: &SessionFile) -> Result<()> {
     }
     let json = serde_json::to_string_pretty(session)
         .map_err(|e| anyhow::anyhow!("failed to encode session file: {}", e))?;
-    fs::write(path, json)
+    write_secret_file(path, json.as_bytes())
         .map_err(|e| anyhow::anyhow!("failed to write session file {}: {}", path.display(), e))?;
+    Ok(())
+}
+
+fn write_secret_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut options = OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+
+    #[cfg(unix)]
+    {
+        options.mode(0o600);
+    }
+
+    let mut file = options.open(path)?;
+    #[cfg(unix)]
+    {
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+    file.write_all(bytes)?;
+    file.sync_all()?;
+
     Ok(())
 }
 
@@ -814,6 +837,22 @@ mod tests {
         assert!(entry.session_token_hash_hex.is_some());
         assert!(entry.encrypted_secret.is_some());
         assert!(entry.key_hash_hex.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saved_secret_files_are_owner_only() {
+        let temp = TempDir::new().expect("create tempdir");
+        let path = temp.path().join("secret.json");
+
+        write_secret_file(&path, br#"{"secret":true}"#).expect("write secret file");
+
+        let mode = std::fs::metadata(&path)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     #[test]

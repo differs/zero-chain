@@ -705,6 +705,7 @@ impl RpcApi {
             .clone();
 
         let tx = parse_compute_tx(tx_value)?;
+        validate_compute_tx_network(&tx, &self.config)?;
         let executor = BasicTxExecutor::new(
             self.compute_store.clone(),
             DefaultAuthorizationPolicy,
@@ -4311,6 +4312,47 @@ mod tests {
         let err = api
             .zero_submit_compute_tx(Some(vec![tx]))
             .expect_err("network mismatch should be rejected");
+        assert_eq!(err.code, -32602);
+        assert_eq!(
+            err.data,
+            Some(serde_json::Value::String(
+                "compute tx network_id 1 does not match node network_id 10086".to_string(),
+            ))
+        );
+    }
+
+    #[test]
+    fn test_zero_simulate_compute_tx_rejects_network_mismatch() {
+        let api = build_test_api_with_compute();
+
+        let tx = canonicalize_and_sign_compute_tx(serde_json::json!({
+            "tx_id": format!("0x{}", hex::encode([0x24u8; 32])),
+            "domain_id": 0,
+            "chain_id": 10086,
+            "network_id": 1,
+            "command": "Mint",
+            "nonce": 1,
+            "input_set": [],
+            "read_set": [],
+            "output_proposals": [{
+                "output_id": format!("0x{}", hex::encode([0x25u8; 32])),
+                "object_id": format!("0x{}", hex::encode([0x26u8; 32])),
+                "domain_id": 0,
+                "kind": "State",
+                "owner": { "type": "Shared" },
+                "predecessor": null,
+                "version": 1,
+                "state": "0x01",
+                "logic": null
+            }],
+            "payload": "0x",
+            "deadline_unix_secs": null,
+            "witness": {"signatures": [], "threshold": 1}
+        }));
+
+        let err = api
+            .zero_simulate_compute_tx(Some(vec![tx]))
+            .expect_err("simulate must reject network mismatch");
         assert_eq!(err.code, -32602);
         assert_eq!(
             err.data,
