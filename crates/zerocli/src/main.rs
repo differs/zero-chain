@@ -232,9 +232,9 @@ enum WalletAction {
         /// Signature scheme: ed25519
         #[arg(long, default_value = "ed25519")]
         scheme: String,
-        /// Passphrase for encrypting private key (required)
+        /// Passphrase for encrypting private key; prompts securely if omitted
         #[arg(long)]
-        passphrase: String,
+        passphrase: Option<String>,
     },
     /// List wallet accounts
     List,
@@ -252,7 +252,7 @@ enum WalletAction {
         /// Message to sign
         #[arg(long)]
         message: String,
-        /// Passphrase used to decrypt key material (optional if unlocked)
+        /// Passphrase used to decrypt key material; prompts securely if omitted and no unlock session exists
         #[arg(long)]
         passphrase: Option<String>,
     },
@@ -280,12 +280,12 @@ enum WalletAction {
         /// Wallet account name
         #[arg(long)]
         name: String,
-        /// Current wallet passphrase
+        /// Current wallet passphrase; prompts securely if omitted
         #[arg(long)]
-        old_passphrase: String,
-        /// New wallet passphrase
+        old_passphrase: Option<String>,
+        /// New wallet passphrase; prompts securely if omitted
         #[arg(long)]
-        new_passphrase: String,
+        new_passphrase: Option<String>,
     },
 
     /// Unlock account for a temporary signing session
@@ -293,9 +293,9 @@ enum WalletAction {
         /// Wallet account name
         #[arg(long)]
         name: String,
-        /// Wallet passphrase used to unlock the account
+        /// Wallet passphrase used to unlock the account; prompts securely if omitted
         #[arg(long)]
-        passphrase: String,
+        passphrase: Option<String>,
         /// Session token lifetime in seconds
         #[arg(long, default_value_t = 600)]
         ttl_secs: u64,
@@ -303,9 +303,9 @@ enum WalletAction {
 
     /// Migrate legacy wallet v1 (plaintext key) to encrypted v2 format
     MigrateV1 {
-        /// New passphrase used to encrypt migrated key material
+        /// New passphrase used to encrypt migrated key material; prompts securely if omitted
         #[arg(long)]
-        passphrase: String,
+        passphrase: Option<String>,
     },
 }
 
@@ -319,9 +319,9 @@ pub(crate) enum AccountAction {
         /// Signature scheme: ed25519
         #[arg(long, default_value = "ed25519")]
         scheme: String,
-        /// Passphrase for encrypting private key
+        /// Passphrase for encrypting private key; prompts securely if omitted
         #[arg(long)]
-        passphrase: String,
+        passphrase: Option<String>,
     },
     /// List accounts
     List,

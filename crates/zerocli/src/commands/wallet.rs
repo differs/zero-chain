@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use sha3::{Digest, Keccak256};
 use std::fs::{self, OpenOptions};
-use std::io::Write as _;
+use std::io::{self, IsTerminal, Write as _};
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -27,7 +27,7 @@ pub enum WalletCommand {
     New {
         name: Option<String>,
         scheme: WalletScheme,
-        passphrase: String,
+        passphrase: Option<String>,
     },
     List,
     Show {
@@ -48,16 +48,16 @@ pub enum WalletCommand {
     },
     RotatePassphrase {
         name: String,
-        old_passphrase: String,
-        new_passphrase: String,
+        old_passphrase: Option<String>,
+        new_passphrase: Option<String>,
     },
     Unlock {
         name: String,
-        passphrase: String,
+        passphrase: Option<String>,
         ttl_secs: u64,
     },
     MigrateV1 {
-        passphrase: String,
+        passphrase: Option<String>,
     },
 }
 
@@ -133,10 +133,15 @@ pub(crate) struct WalletSigningContext {
 
 pub async fn handle_wallet(data_dir: &str, cmd: WalletCommand) -> Result<()> {
     let path = wallet_file_path(data_dir);
+    let _wallet_lock = if wallet_command_mutates_wallet_file(&cmd) {
+        Some(acquire_wallet_lock(&path)?)
+    } else {
+        None
+    };
 
-    if let WalletCommand::MigrateV1 { passphrase } = &cmd {
-        ensure_passphrase_strength(passphrase)?;
-        let migrated = migrate_wallet_v1_to_v2(&path, passphrase)?;
+    if let WalletCommand::MigrateV1 { passphrase } = cmd {
+        let passphrase = resolve_new_passphrase(passphrase, "New wallet passphrase")?;
+        let migrated = migrate_wallet_v1_to_v2(&path, &passphrase)?;
         println!(
             "✅ migrated wallet v1 -> v2 with {} accounts: {}",
             migrated.accounts.len(),
@@ -153,7 +158,7 @@ pub async fn handle_wallet(data_dir: &str, cmd: WalletCommand) -> Result<()> {
             scheme,
             passphrase,
         } => {
-            ensure_passphrase_strength(&passphrase)?;
+            let passphrase = resolve_new_passphrase(passphrase, "Wallet passphrase")?;
             let account_name = name.unwrap_or_else(|| default_name(scheme, wallet.accounts.len()));
             if wallet.accounts.iter().any(|a| a.name == account_name) {
                 anyhow::bail!("wallet account already exists: {}", account_name);
@@ -266,7 +271,9 @@ pub async fn handle_wallet(data_dir: &str, cmd: WalletCommand) -> Result<()> {
             old_passphrase,
             new_passphrase,
         } => {
-            ensure_passphrase_strength(&new_passphrase)?;
+            let old_passphrase =
+                resolve_existing_passphrase(old_passphrase, "Current wallet passphrase")?;
+            let new_passphrase = resolve_new_passphrase(new_passphrase, "New wallet passphrase")?;
             let account = wallet
                 .accounts
                 .iter_mut()
@@ -282,6 +289,7 @@ pub async fn handle_wallet(data_dir: &str, cmd: WalletCommand) -> Result<()> {
             passphrase,
             ttl_secs,
         } => {
+            let passphrase = resolve_existing_passphrase(passphrase, "Wallet passphrase")?;
             let account = find_account(&wallet, &name)?;
             let secret = decrypt_secret(&account.encrypted_private_key, &passphrase)?;
             let session_token = save_unlocked_session(data_dir, &name, &secret, ttl_secs)?;
@@ -364,6 +372,48 @@ fn resolve_account_for_signing<'a>(
 fn ensure_passphrase_strength(passphrase: &str) -> Result<()> {
     if passphrase.len() < 10 {
         anyhow::bail!("passphrase too short: at least 10 characters required");
+    }
+    Ok(())
+}
+
+fn resolve_new_passphrase(passphrase: Option<String>, prompt: &str) -> Result<String> {
+    if let Some(passphrase) = passphrase {
+        ensure_passphrase_strength(&passphrase)?;
+        return Ok(passphrase);
+    }
+
+    ensure_interactive_stdin(prompt)?;
+    let passphrase = rpassword::prompt_password(format!("{prompt}: "))
+        .map_err(|e| anyhow::anyhow!("failed to read passphrase: {e}"))?;
+    ensure_passphrase_strength(&passphrase)?;
+    let confirmation = rpassword::prompt_password(format!("Confirm {prompt}: "))
+        .map_err(|e| anyhow::anyhow!("failed to read passphrase confirmation: {e}"))?;
+    if passphrase != confirmation {
+        anyhow::bail!("passphrase confirmation does not match");
+    }
+    Ok(passphrase)
+}
+
+fn resolve_existing_passphrase(passphrase: Option<String>, prompt: &str) -> Result<String> {
+    if let Some(passphrase) = passphrase {
+        return Ok(passphrase);
+    }
+
+    prompt_existing_passphrase(prompt)
+}
+
+fn prompt_existing_passphrase(prompt: &str) -> Result<String> {
+    ensure_interactive_stdin(prompt)?;
+    rpassword::prompt_password(format!("{prompt}: "))
+        .map_err(|e| anyhow::anyhow!("failed to read passphrase: {e}"))
+}
+
+fn ensure_interactive_stdin(action: &str) -> Result<()> {
+    if !io::stdin().is_terminal() {
+        anyhow::bail!(
+            "{} requires an interactive terminal when --passphrase is omitted",
+            action
+        );
     }
     Ok(())
 }
@@ -453,7 +503,20 @@ fn decrypt_or_session(
     if let Some(p) = passphrase {
         return decrypt_secret(&account.encrypted_private_key, p);
     }
-    load_unlocked_session(data_dir, &account.name)
+    match load_unlocked_session(data_dir, &account.name) {
+        Ok(secret) => Ok(secret),
+        Err(session_err) => {
+            if !io::stdin().is_terminal() {
+                anyhow::bail!(
+                    "{}; pass --passphrase in non-interactive mode or run wallet unlock first",
+                    session_err
+                );
+            }
+            let passphrase =
+                prompt_existing_passphrase(&format!("Wallet passphrase for {}", account.name))?;
+            decrypt_secret(&account.encrypted_private_key, &passphrase)
+        }
+    }
 }
 
 fn native_address_from_public_key(pubkey: &[u8; 32]) -> [u8; 20] {
@@ -636,23 +699,129 @@ fn save_session_file(path: &Path, session: &SessionFile) -> Result<()> {
 }
 
 fn write_secret_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_else(|| "secret".into());
+    let tmp_path = parent.join(format!(
+        ".{}.tmp.{}.{}",
+        file_name,
+        std::process::id(),
+        Uuid::new_v4()
+    ));
+
+    let result = write_secret_file_atomic(path, &tmp_path, bytes);
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp_path);
+    }
+    result
+}
+
+fn write_secret_file_atomic(path: &Path, tmp_path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let mut options = OpenOptions::new();
-    options.create(true).truncate(true).write(true);
+    options.create_new(true).write(true);
 
     #[cfg(unix)]
     {
         options.mode(0o600);
     }
 
-    let mut file = options.open(path)?;
+    let mut file = options.open(tmp_path)?;
     #[cfg(unix)]
     {
         file.set_permissions(fs::Permissions::from_mode(0o600))?;
     }
     file.write_all(bytes)?;
     file.sync_all()?;
+    drop(file);
+
+    fs::rename(tmp_path, path)?;
+
+    #[cfg(unix)]
+    {
+        if let Some(parent) = path.parent() {
+            if let Ok(dir) = OpenOptions::new().read(true).open(parent) {
+                let _ = dir.sync_all();
+            }
+        }
+    }
 
     Ok(())
+}
+
+fn wallet_command_mutates_wallet_file(cmd: &WalletCommand) -> bool {
+    matches!(
+        cmd,
+        WalletCommand::New { .. }
+            | WalletCommand::Delete { .. }
+            | WalletCommand::RotatePassphrase { .. }
+            | WalletCommand::MigrateV1 { .. }
+    )
+}
+
+#[derive(Debug)]
+struct WalletFileLock {
+    path: PathBuf,
+}
+
+impl Drop for WalletFileLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn acquire_wallet_lock(wallet_path: &Path) -> Result<WalletFileLock> {
+    if let Some(parent) = wallet_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| {
+            anyhow::anyhow!("failed to create wallet dir {}: {}", parent.display(), e)
+        })?;
+    }
+
+    let lock_path = wallet_lock_path(wallet_path);
+    let mut options = OpenOptions::new();
+    options.create_new(true).write(true);
+
+    #[cfg(unix)]
+    {
+        options.mode(0o600);
+    }
+
+    match options.open(&lock_path) {
+        Ok(mut file) => {
+            writeln!(
+                file,
+                "pid={}\ncreated_unix_secs={}",
+                std::process::id(),
+                now_unix_secs()
+            )
+            .map_err(|e| anyhow::anyhow!("failed to write wallet lock: {e}"))?;
+            file.sync_all()
+                .map_err(|e| anyhow::anyhow!("failed to sync wallet lock: {e}"))?;
+            Ok(WalletFileLock { path: lock_path })
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            anyhow::bail!(
+                "wallet file is locked by another process: {}. Retry later, or remove the lock only after confirming no wallet command is running.",
+                lock_path.display()
+            )
+        }
+        Err(e) => Err(anyhow::anyhow!(
+            "failed to acquire wallet lock {}: {}",
+            lock_path.display(),
+            e
+        )),
+    }
+}
+
+fn wallet_lock_path(wallet_path: &Path) -> PathBuf {
+    let parent = wallet_path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = wallet_path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_else(|| "wallet.json".into());
+    parent.join(format!("{file_name}.lock"))
 }
 
 fn save_unlocked_session(
@@ -853,6 +1022,69 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[tokio::test]
+    async fn wallet_new_preserves_accounts_and_rejects_duplicate_name() {
+        let temp = TempDir::new().expect("create tempdir");
+        let data_dir = temp.path().to_string_lossy().to_string();
+
+        handle_wallet(
+            &data_dir,
+            WalletCommand::New {
+                name: Some("miner-1".to_string()),
+                scheme: WalletScheme::Ed25519,
+                passphrase: Some("StrongPassphrase123!".to_string()),
+            },
+        )
+        .await
+        .expect("create first account");
+        handle_wallet(
+            &data_dir,
+            WalletCommand::New {
+                name: Some("miner-2".to_string()),
+                scheme: WalletScheme::Ed25519,
+                passphrase: Some("StrongPassphrase456!".to_string()),
+            },
+        )
+        .await
+        .expect("create second account");
+
+        let path = wallet_file_path(&data_dir);
+        let wallet = load_wallet_file(&path).expect("load wallet");
+        assert_eq!(wallet.accounts.len(), 2);
+        assert!(wallet.accounts.iter().any(|a| a.name == "miner-1"));
+        assert!(wallet.accounts.iter().any(|a| a.name == "miner-2"));
+
+        let before = fs::read_to_string(&path).expect("read before duplicate");
+        let err = handle_wallet(
+            &data_dir,
+            WalletCommand::New {
+                name: Some("miner-1".to_string()),
+                scheme: WalletScheme::Ed25519,
+                passphrase: Some("StrongPassphrase789!".to_string()),
+            },
+        )
+        .await
+        .expect_err("duplicate account should fail");
+        assert!(err.to_string().contains("wallet account already exists"));
+        let after = fs::read_to_string(&path).expect("read after duplicate");
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn wallet_lock_rejects_concurrent_mutation() {
+        let temp = TempDir::new().expect("create tempdir");
+        let wallet_path = temp.path().join("wallet.json");
+        let lock_path = wallet_lock_path(&wallet_path);
+
+        let first_lock = acquire_wallet_lock(&wallet_path).expect("acquire first lock");
+        let err = acquire_wallet_lock(&wallet_path).expect_err("second lock should fail");
+        assert!(err.to_string().contains("wallet file is locked"));
+        assert!(lock_path.exists());
+
+        drop(first_lock);
+        assert!(!lock_path.exists());
     }
 
     #[test]

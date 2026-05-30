@@ -50,20 +50,20 @@ cargo test
 
 ```bash
 # Create native wallet account
-zerochain wallet new --name ed25519-1 --scheme ed25519 --passphrase "StrongPassphrase123!"
+zerochain wallet new --name ed25519-1 --scheme ed25519
 
 # List wallet accounts
 zerochain wallet list
 
 # Account alias command (delegates to wallet)
-zerochain account new --name ed25519-2 --scheme ed25519 --passphrase "StrongPassphrase123!"
+zerochain account new --name ed25519-2 --scheme ed25519
 zerochain account list
 
-# Sign message
-zerochain wallet sign --name ed25519-1 --message "hello" --passphrase "StrongPassphrase123!"
+# Sign message (prompts for passphrase if the wallet is not unlocked)
+zerochain wallet sign --name ed25519-1 --message "hello"
 
 # Unlock then sign without passphrase
-zerochain wallet unlock --name ed25519-1 --passphrase "StrongPassphrase123!" --ttl-secs 600
+zerochain wallet unlock --name ed25519-1 --ttl-secs 600
 zerochain wallet sign --name ed25519-1 --message "hello"
 
 # Submit compute operation from JSON file
@@ -72,6 +72,10 @@ zerochain --rpc-token YOUR_RPC_TOKEN compute send --tx-file ./tx.json
 # Query compute operation result
 zerochain --rpc-token YOUR_RPC_TOKEN compute get --tx-id 0x...
 ```
+
+完整的钱包建立、coinbase 配置、内置挖矿、外部 pool/miner 挖矿教程见：
+
+- `docs/CLI_WALLET_MINING_TUTORIAL.md`
 
 Compute JSON 共享规范见：
 - [COMPUTE_JSON_SPEC.md](/root/workspaces/blockchain/zero-chain/docs/COMPUTE_JSON_SPEC.md)

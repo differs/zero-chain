@@ -30,11 +30,14 @@ cargo build --release
 ```bash
 ./target/release/zerochain account new \
   --name ed25519-1 \
-  --scheme ed25519 \
-  --passphrase "StrongPassphrase123!"
+  --scheme ed25519
 
 ./target/release/zerochain account list
 ```
+
+如果要创建命令行钱包作为挖矿 coinbase，并启动内置矿工或外部 pool/miner，请直接按完整教程执行：
+
+- [CLI_WALLET_MINING_TUTORIAL.md](CLI_WALLET_MINING_TUTORIAL.md)
 
 ## 提交 Compute 操作
 
