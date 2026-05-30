@@ -11,9 +11,19 @@ LOG_DIR="${REPORT_DIR}/logs"
 RPC_AUTH_TOKEN="${RPC_AUTH_TOKEN:-mainnet-strict-smoke-token}"
 COINBASE="${COINBASE:-ZER0x526Dc404e751C7d52F6fFF75d563d8D0857C94E9}"
 
-BOOTNODE_RPC_URL="${BOOTNODE_RPC_URL:-http://127.0.0.1:8545}"
-FOLLOWER_RPC_URL="${FOLLOWER_RPC_URL:-http://127.0.0.1:29645}"
-OBSERVER_RPC_URL="${OBSERVER_RPC_URL:-http://127.0.0.1:39745}"
+BOOTNODE_HTTP_PORT="${BOOTNODE_HTTP_PORT:-8545}"
+BOOTNODE_WS_PORT="${BOOTNODE_WS_PORT:-8546}"
+BOOTNODE_P2P_PORT="${BOOTNODE_P2P_PORT:-30303}"
+FOLLOWER_HTTP_PORT="${FOLLOWER_HTTP_PORT:-29645}"
+FOLLOWER_WS_PORT="${FOLLOWER_WS_PORT:-29646}"
+FOLLOWER_P2P_PORT="${FOLLOWER_P2P_PORT:-31303}"
+OBSERVER_HTTP_PORT="${OBSERVER_HTTP_PORT:-39745}"
+OBSERVER_WS_PORT="${OBSERVER_WS_PORT:-39746}"
+OBSERVER_P2P_PORT="${OBSERVER_P2P_PORT:-32303}"
+
+BOOTNODE_RPC_URL="${BOOTNODE_RPC_URL:-http://127.0.0.1:${BOOTNODE_HTTP_PORT}}"
+FOLLOWER_RPC_URL="${FOLLOWER_RPC_URL:-http://127.0.0.1:${FOLLOWER_HTTP_PORT}}"
+OBSERVER_RPC_URL="${OBSERVER_RPC_URL:-http://127.0.0.1:${OBSERVER_HTTP_PORT}}"
 
 RPC_TIMEOUT_SECS="${RPC_TIMEOUT_SECS:-8}"
 EXPECTED_NET_VERSION="${EXPECTED_NET_VERSION:-10086}"
@@ -102,13 +112,17 @@ cd "${ROOT_DIR}"
 ./scripts/mainnet.sh stop bootnode >/dev/null 2>&1 || true
 
 echo "==> start strict mainnet bootnode"
-./scripts/mainnet.sh start bootnode \
+bootnode_start_output="$(./scripts/mainnet.sh start bootnode \
   --mine \
   --coinbase "${COINBASE}" \
   --rpc-auth-token "${RPC_AUTH_TOKEN}" \
-  --p2p-listen-addr 127.0.0.1 | tee "${LOG_DIR}/bootnode-start.log"
+  --http-port "${BOOTNODE_HTTP_PORT}" \
+  --ws-port "${BOOTNODE_WS_PORT}" \
+  --p2p-port "${BOOTNODE_P2P_PORT}" \
+  --p2p-listen-addr 127.0.0.1)"
+printf '%s\n' "${bootnode_start_output}" | tee "${LOG_DIR}/bootnode-start.log"
 
-BOOTNODE_ENODE="$(grep -m1 'bootnode enode hint:' "${HOME}/.zerochain/mainnet/bootnode/bootnode.log" 2>/dev/null | sed 's/.*hint: //')"
+BOOTNODE_ENODE="$(printf '%s\n' "${bootnode_start_output}" | sed -n 's/^bootnode_enode_hint=//p' | head -1)"
 if [[ -z "${BOOTNODE_ENODE}" ]]; then
   echo "failed to discover bootnode enode hint" >&2
   exit 1
@@ -117,11 +131,17 @@ fi
 echo "==> start strict mainnet follower"
 ./scripts/mainnet.sh start follower \
   --bootnode "${BOOTNODE_ENODE}" \
+  --http-port "${FOLLOWER_HTTP_PORT}" \
+  --ws-port "${FOLLOWER_WS_PORT}" \
+  --p2p-port "${FOLLOWER_P2P_PORT}" \
   --p2p-listen-addr 127.0.0.1 | tee "${LOG_DIR}/follower-start.log"
 
 echo "==> start strict mainnet observer"
 ./scripts/mainnet.sh start observer \
   --bootnode "${BOOTNODE_ENODE}" \
+  --http-port "${OBSERVER_HTTP_PORT}" \
+  --ws-port "${OBSERVER_WS_PORT}" \
+  --p2p-port "${OBSERVER_P2P_PORT}" \
   --p2p-listen-addr 127.0.0.1 | tee "${LOG_DIR}/observer-start.log"
 
 echo "==> wait for height progression"
