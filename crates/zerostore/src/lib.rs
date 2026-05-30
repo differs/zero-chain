@@ -9,13 +9,18 @@
 #![allow(rustdoc::missing_crate_level_docs)]
 #![allow(unused)]
 
+pub mod archive;
 pub mod compute;
 pub mod db;
 pub mod index;
 pub mod trie;
 
+pub use archive::{
+    read_archive_segment, ArchiveSegment, ArchiveSegmentWriter, ArchivedBlock,
+    ArchivedComputeTxResult,
+};
 pub use compute::ComputeStore;
-pub use db::{KeyValueDB, RedbDatabase, RocksDb};
+pub use db::{KeyValueDB, RedbDatabase, RocksDb, RocksDbCompression};
 pub use index::{BlockIndex, IndexDB, TxIndex};
 pub use trie::{MerklePatriciaTrie, TrieDB, TrieNode, TrieProof};
 

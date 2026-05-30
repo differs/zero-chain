@@ -1,7 +1,8 @@
 //! Persistent storage for UTXO Compute objects and tx results.
 
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
+use serde::{Deserialize, Serialize};
 use zerocore::compute::{
     execution::ObjectStore,
     primitives::{ObjectId, OutputId, TxId},
@@ -14,6 +15,14 @@ const OUTPUT_PREFIX: &[u8] = b"compute:output:";
 const LATEST_PREFIX: &[u8] = b"compute:latest:";
 const TX_RESULT_PREFIX: &[u8] = b"compute:txresult:";
 const OUTPUT_BINARY_MAGIC: &[u8; 4] = b"ZCO1";
+const TX_RESULT_BINARY_MAGIC: &[u8; 4] = b"ZCR1";
+
+/// Binary envelope for persisted compute transaction results.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ComputeResultEnvelope {
+    /// Canonical JSON result returned by the RPC layer.
+    pub result_json: String,
+}
 
 /// Statistics returned by compute store rebuilds.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -30,6 +39,44 @@ pub struct ComputeRebuildStats {
     pub copied_entries: u64,
     /// Entries whose value changed in the rebuilt target database.
     pub rewritten_entries: u64,
+    /// Entries under the compute tx-result namespace.
+    pub tx_result_entries: u64,
+    /// Legacy JSON tx-result entries decoded and rewritten to binary.
+    pub legacy_json_tx_results: u64,
+    /// Already-binary tx-result entries encountered.
+    pub binary_tx_results: u64,
+}
+
+/// Retention policy for explicit compute store pruning.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ComputePruneConfig {
+    /// Keep all history. Used by archive and explorer nodes.
+    pub retain_all: bool,
+    /// Current unix timestamp used to evaluate retention windows.
+    pub now_unix_secs: u64,
+    /// Minimum age before spent outputs and tx results can be pruned.
+    pub retention_window_secs: u64,
+    /// Scan and report candidates without deleting entries.
+    pub dry_run: bool,
+}
+
+/// Statistics returned by compute pruning.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ComputePruneStats {
+    /// Total key-value entries visited.
+    pub total_entries: u64,
+    /// Compute output entries visited.
+    pub output_entries: u64,
+    /// Compute tx-result entries visited.
+    pub tx_result_entries: u64,
+    /// Old spent output entries eligible for pruning.
+    pub spent_output_candidates: u64,
+    /// Old compute tx-result entries eligible for pruning.
+    pub tx_result_candidates: u64,
+    /// Stale latest-output pointers removed with pruned spent outputs.
+    pub latest_entries_deleted: u64,
+    /// Entries actually deleted. This is zero in dry-run or retain-all mode.
+    pub deleted_entries: u64,
 }
 
 /// Durable backend for compute object outputs and tx results.
@@ -45,7 +92,8 @@ impl ComputeStore {
 
     /// Saves execution result JSON by tx id.
     pub fn put_tx_result(&self, tx_id: TxId, result_json: &str) -> Result<()> {
-        self.db.put(&tx_result_key(tx_id), result_json.as_bytes())
+        let encoded = encode_tx_result(result_json)?;
+        self.db.put(&tx_result_key(tx_id), &encoded)
     }
 
     /// Loads execution result JSON by tx id.
@@ -53,9 +101,7 @@ impl ComputeStore {
         let Some(bytes) = self.db.get(&tx_result_key(tx_id))? else {
             return Ok(None);
         };
-        String::from_utf8(bytes)
-            .map(Some)
-            .map_err(|e| StorageError::Serialization(e.to_string()))
+        decode_tx_result(&bytes).map(Some)
     }
 }
 
@@ -150,6 +196,21 @@ pub fn rebuild_compute_store(
                 stats.rewritten_entries += 1;
             }
             target.put(key, &encoded)?;
+        } else if key.starts_with(TX_RESULT_PREFIX) {
+            stats.tx_result_entries += 1;
+            let was_binary = value.starts_with(TX_RESULT_BINARY_MAGIC);
+            if was_binary {
+                stats.binary_tx_results += 1;
+            } else {
+                stats.legacy_json_tx_results += 1;
+            }
+
+            let result_json = decode_tx_result(value)?;
+            let encoded = encode_tx_result(&result_json)?;
+            if encoded != value {
+                stats.rewritten_entries += 1;
+            }
+            target.put(key, &encoded)?;
         } else {
             stats.copied_entries += 1;
             target.put(key, value)?;
@@ -157,6 +218,80 @@ pub fn rebuild_compute_store(
 
         Ok(())
     })?;
+
+    Ok(stats)
+}
+
+/// Prunes old non-live compute hot-state entries according to an explicit retention policy.
+///
+/// This never deletes unspent outputs. Archive/explorer nodes should pass `retain_all=true`.
+pub fn prune_compute_store(
+    db: &dyn KeyValueDB,
+    config: ComputePruneConfig,
+) -> Result<ComputePruneStats> {
+    let mut stats = ComputePruneStats::default();
+    let mut delete_keys = Vec::new();
+    let mut latest_delete_keys = BTreeSet::new();
+
+    db.for_each_prefix(b"", &mut |key, value| {
+        stats.total_entries += 1;
+
+        if key.starts_with(OUTPUT_PREFIX) {
+            stats.output_entries += 1;
+            let output = decode_output(value)?;
+            if output.spent
+                && is_past_retention(
+                    output.created_at,
+                    config.now_unix_secs,
+                    config.retention_window_secs,
+                )
+            {
+                stats.spent_output_candidates += 1;
+                if !config.retain_all {
+                    delete_keys.push(key.to_vec());
+                    let latest = latest_key(output.object_id);
+                    if db.get(&latest)?.as_deref() == Some(output.output_id.0.as_bytes()) {
+                        latest_delete_keys.insert(latest);
+                    }
+                }
+            }
+        } else if key.starts_with(TX_RESULT_PREFIX) {
+            stats.tx_result_entries += 1;
+            let result_json = decode_tx_result(value)?;
+            if tx_result_submitted_at_unix(&result_json)
+                .map(|submitted_at| {
+                    is_past_retention(
+                        submitted_at,
+                        config.now_unix_secs,
+                        config.retention_window_secs,
+                    )
+                })
+                .unwrap_or(false)
+            {
+                stats.tx_result_candidates += 1;
+                if !config.retain_all {
+                    delete_keys.push(key.to_vec());
+                }
+            }
+        }
+
+        Ok(())
+    })?;
+
+    let latest_entries_to_delete = latest_delete_keys.len() as u64;
+    delete_keys.extend(latest_delete_keys);
+    delete_keys.sort();
+    delete_keys.dedup();
+
+    if !config.dry_run && !config.retain_all && !delete_keys.is_empty() {
+        let mut batch = db.batch();
+        for key in &delete_keys {
+            batch.delete(key);
+        }
+        db.write_batch(batch)?;
+        stats.deleted_entries = delete_keys.len() as u64;
+        stats.latest_entries_deleted = latest_entries_to_delete;
+    }
 
     Ok(stats)
 }
@@ -198,6 +333,46 @@ fn decode_output(bytes: &[u8]) -> Result<ObjectOutput> {
         .map_err(|e| StorageError::Serialization(format!("decode legacy json output failed: {e}")))
 }
 
+fn encode_tx_result(result_json: &str) -> Result<Vec<u8>> {
+    let result = serde_json::from_str::<serde_json::Value>(result_json).map_err(|e| {
+        StorageError::Serialization(format!("decode tx result json before encode failed: {e}"))
+    })?;
+    let envelope = ComputeResultEnvelope {
+        result_json: serde_json::to_string(&result).map_err(|e| {
+            StorageError::Serialization(format!("canonicalize tx result json failed: {e}"))
+        })?,
+    };
+    let encoded = bincode::serialize(&envelope)
+        .map_err(|e| StorageError::Serialization(format!("encode tx result failed: {e}")))?;
+    let mut value = Vec::with_capacity(TX_RESULT_BINARY_MAGIC.len() + encoded.len());
+    value.extend_from_slice(TX_RESULT_BINARY_MAGIC);
+    value.extend_from_slice(&encoded);
+    Ok(value)
+}
+
+fn decode_tx_result(bytes: &[u8]) -> Result<String> {
+    if let Some(payload) = bytes.strip_prefix(TX_RESULT_BINARY_MAGIC) {
+        let envelope = bincode::deserialize::<ComputeResultEnvelope>(payload).map_err(|e| {
+            StorageError::Serialization(format!("decode binary tx result failed: {e}"))
+        })?;
+        return Ok(envelope.result_json);
+    }
+
+    String::from_utf8(bytes.to_vec())
+        .map_err(|e| StorageError::Serialization(format!("decode legacy tx result failed: {e}")))
+}
+
+fn tx_result_submitted_at_unix(result_json: &str) -> Option<u64> {
+    serde_json::from_str::<serde_json::Value>(result_json)
+        .ok()?
+        .get("submitted_at_unix")?
+        .as_u64()
+}
+
+fn is_past_retention(created_or_submitted_at: u64, now: u64, retention_window_secs: u64) -> bool {
+    created_or_submitted_at.saturating_add(retention_window_secs) <= now
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -212,8 +387,9 @@ mod tests {
     use crate::db::{KeyValueDB, MemDatabase};
 
     use super::{
-        decode_output, encode_output, latest_key, output_key, rebuild_compute_store, tx_result_key,
-        ComputeStore, OUTPUT_BINARY_MAGIC,
+        decode_output, decode_tx_result, encode_output, encode_tx_result, latest_key, output_key,
+        prune_compute_store, rebuild_compute_store, tx_result_key, ComputePruneConfig,
+        ComputeStore, OUTPUT_BINARY_MAGIC, TX_RESULT_BINARY_MAGIC,
     };
 
     fn sample_output() -> zerocore::compute::ObjectOutput {
@@ -260,6 +436,8 @@ mod tests {
 
         let tx_id = TxId(Hash::from_bytes([3; 32]));
         store.put_tx_result(tx_id, "{\"ok\":true}").unwrap();
+        let raw_tx = db.get(&tx_result_key(tx_id)).unwrap().unwrap();
+        assert!(raw_tx.starts_with(TX_RESULT_BINARY_MAGIC));
         assert_eq!(
             store.get_tx_result(tx_id).unwrap(),
             Some("{\"ok\":true}".to_string())
@@ -288,6 +466,31 @@ mod tests {
     }
 
     #[test]
+    fn compute_store_reads_legacy_json_tx_result() {
+        let db = Arc::new(MemDatabase::new());
+        let store = ComputeStore::new(db.clone());
+        let tx_id = TxId(Hash::from_bytes([5; 32]));
+
+        db.put(&tx_result_key(tx_id), br#"{"ok":true}"#).unwrap();
+
+        assert_eq!(
+            store.get_tx_result(tx_id).unwrap(),
+            Some("{\"ok\":true}".to_string())
+        );
+    }
+
+    #[test]
+    fn tx_result_binary_codec_roundtrip() {
+        let encoded = encode_tx_result(r#"{"ok":true,"items":[1,2]}"#).unwrap();
+        assert!(encoded.starts_with(TX_RESULT_BINARY_MAGIC));
+        let decoded = decode_tx_result(&encoded).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&decoded).unwrap(),
+            serde_json::json!({"ok": true, "items": [1, 2]})
+        );
+    }
+
+    #[test]
     fn rebuild_compute_store_rewrites_legacy_outputs_and_copies_other_entries() {
         let source = MemDatabase::new();
         let target = MemDatabase::new();
@@ -308,8 +511,11 @@ mod tests {
         assert_eq!(stats.output_entries, 1);
         assert_eq!(stats.legacy_json_outputs, 1);
         assert_eq!(stats.binary_outputs, 0);
-        assert_eq!(stats.copied_entries, 2);
-        assert_eq!(stats.rewritten_entries, 1);
+        assert_eq!(stats.tx_result_entries, 1);
+        assert_eq!(stats.legacy_json_tx_results, 1);
+        assert_eq!(stats.binary_tx_results, 0);
+        assert_eq!(stats.copied_entries, 1);
+        assert_eq!(stats.rewritten_entries, 2);
 
         let raw_output = target.get(&output_key(output.output_id)).unwrap().unwrap();
         assert!(raw_output.starts_with(OUTPUT_BINARY_MAGIC));
@@ -320,7 +526,116 @@ mod tests {
         );
         assert_eq!(
             target.get(&tx_result_key(tx_id)).unwrap(),
-            Some(br#"{"ok":true}"#.to_vec())
+            Some(encode_tx_result(r#"{"ok":true}"#).unwrap())
         );
+    }
+
+    #[test]
+    fn prune_compute_store_deletes_only_old_spent_outputs_and_old_tx_results() {
+        let db = MemDatabase::new();
+        let mut old_spent = sample_output();
+        old_spent.created_at = 10;
+        old_spent.spent = true;
+        let mut recent_spent = sample_output();
+        recent_spent.output_id = OutputId(Hash::from_bytes([8; 32]));
+        recent_spent.object_id = ObjectId(Hash::from_bytes([9; 32]));
+        recent_spent.created_at = 105;
+        recent_spent.spent = true;
+        let mut old_unspent = sample_output();
+        old_unspent.output_id = OutputId(Hash::from_bytes([10; 32]));
+        old_unspent.object_id = ObjectId(Hash::from_bytes([11; 32]));
+        old_unspent.created_at = 10;
+
+        db.put(
+            &output_key(old_spent.output_id),
+            &encode_output(&old_spent).unwrap(),
+        )
+        .unwrap();
+        db.put(
+            &latest_key(old_spent.object_id),
+            old_spent.output_id.0.as_bytes(),
+        )
+        .unwrap();
+        db.put(
+            &output_key(recent_spent.output_id),
+            &encode_output(&recent_spent).unwrap(),
+        )
+        .unwrap();
+        db.put(
+            &output_key(old_unspent.output_id),
+            &encode_output(&old_unspent).unwrap(),
+        )
+        .unwrap();
+
+        let old_tx = TxId(Hash::from_bytes([12; 32]));
+        let recent_tx = TxId(Hash::from_bytes([13; 32]));
+        db.put(
+            &tx_result_key(old_tx),
+            &encode_tx_result(r#"{"ok":true,"submitted_at_unix":10}"#).unwrap(),
+        )
+        .unwrap();
+        db.put(
+            &tx_result_key(recent_tx),
+            &encode_tx_result(r#"{"ok":true,"submitted_at_unix":105}"#).unwrap(),
+        )
+        .unwrap();
+
+        let stats = prune_compute_store(
+            &db,
+            ComputePruneConfig {
+                retain_all: false,
+                now_unix_secs: 120,
+                retention_window_secs: 20,
+                dry_run: false,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(stats.spent_output_candidates, 1);
+        assert_eq!(stats.tx_result_candidates, 1);
+        assert_eq!(stats.latest_entries_deleted, 1);
+        assert_eq!(stats.deleted_entries, 3);
+        assert_eq!(db.get(&output_key(old_spent.output_id)).unwrap(), None);
+        assert_eq!(db.get(&latest_key(old_spent.object_id)).unwrap(), None);
+        assert!(db
+            .get(&output_key(recent_spent.output_id))
+            .unwrap()
+            .is_some());
+        assert!(db
+            .get(&output_key(old_unspent.output_id))
+            .unwrap()
+            .is_some());
+        assert_eq!(db.get(&tx_result_key(old_tx)).unwrap(), None);
+        assert!(db.get(&tx_result_key(recent_tx)).unwrap().is_some());
+    }
+
+    #[test]
+    fn prune_compute_store_dry_run_and_retain_all_do_not_delete() {
+        for retain_all in [false, true] {
+            let db = MemDatabase::new();
+            let mut output = sample_output();
+            output.created_at = 10;
+            output.spent = true;
+            db.put(
+                &output_key(output.output_id),
+                &encode_output(&output).unwrap(),
+            )
+            .unwrap();
+
+            let stats = prune_compute_store(
+                &db,
+                ComputePruneConfig {
+                    retain_all,
+                    now_unix_secs: 120,
+                    retention_window_secs: 20,
+                    dry_run: true,
+                },
+            )
+            .unwrap();
+
+            assert_eq!(stats.spent_output_candidates, 1);
+            assert_eq!(stats.deleted_entries, 0);
+            assert!(db.get(&output_key(output.output_id)).unwrap().is_some());
+        }
     }
 }

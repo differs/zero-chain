@@ -76,8 +76,30 @@ pub struct RocksDb {
     db: rocksdb::DB,
 }
 
+/// Compression profile used when opening RocksDB.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RocksDbCompression {
+    /// LZ4, retained for legacy footprint comparisons.
+    Lz4,
+    /// ZSTD, the production default.
+    Zstd,
+}
+
+impl RocksDbCompression {
+    fn as_rocksdb(self) -> rocksdb::DBCompressionType {
+        match self {
+            Self::Lz4 => rocksdb::DBCompressionType::Lz4,
+            Self::Zstd => rocksdb::DBCompressionType::Zstd,
+        }
+    }
+}
+
 impl RocksDb {
     pub fn open(path: &str) -> Result<Self> {
+        Self::open_with_compression(path, RocksDbCompression::Zstd)
+    }
+
+    pub fn open_with_compression(path: &str, compression: RocksDbCompression) -> Result<Self> {
         let mut opts = rocksdb::Options::default();
         opts.create_if_missing(true);
         // Use std::thread::available_parallelism instead of num_cpus
@@ -91,7 +113,7 @@ impl RocksDb {
         opts.set_target_file_size_base(128 * 1024 * 1024); // 128MB
 
         // Favor disk footprint for production node state. Hot values are already compact binary.
-        opts.set_compression_type(rocksdb::DBCompressionType::Zstd);
+        opts.set_compression_type(compression.as_rocksdb());
 
         // Bloom filter
         let mut block_opts = rocksdb::BlockBasedOptions::default();
@@ -107,6 +129,16 @@ impl RocksDb {
 
     pub fn inner(&self) -> &rocksdb::DB {
         &self.db
+    }
+
+    pub fn flush(&self) -> Result<()> {
+        self.db
+            .flush()
+            .map_err(|e| StorageError::Database(e.to_string()))
+    }
+
+    pub fn compact_all(&self) {
+        self.db.compact_range::<&[u8], &[u8]>(None, None);
     }
 }
 

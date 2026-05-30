@@ -373,6 +373,48 @@ enum StorageAction {
         /// Remove the old database backup after a successful rebuild
         #[arg(long, default_value_t = false)]
         discard_backup: bool,
+        /// Build and verify a temporary database without replacing the original
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+    },
+    /// Prune old compute hot-state entries outside the retention window
+    PruneComputeDb {
+        /// Compute persistent backend override: rocksdb|redb
+        #[arg(long)]
+        compute_backend: Option<String>,
+        /// Compute database path override
+        #[arg(long)]
+        compute_db_path: Option<String>,
+        /// Retention profile: full|validator|mainnet prunes; archive|explorer|retain-all keeps all
+        #[arg(long, default_value = "full")]
+        retention_profile: String,
+        /// Reorg/rollback retention window in seconds
+        #[arg(long, default_value_t = 604_800)]
+        retention_window_secs: u64,
+        /// Override current unix timestamp for deterministic tests or maintenance windows
+        #[arg(long)]
+        now_unix_secs: Option<u64>,
+        /// Scan and report candidates without deleting entries
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+    },
+    /// Generate a fixed workload disk-footprint report for compute storage formats
+    BenchmarkComputeDb {
+        /// Working directory for generated temporary databases
+        #[arg(long, default_value = "artifacts/storage-savings-workload")]
+        work_dir: String,
+        /// Markdown report output path
+        #[arg(long, default_value = "docs/STORAGE_SAVINGS_REPORT.md")]
+        report: String,
+        /// Number of compute outputs and tx results to generate
+        #[arg(long, default_value_t = 10_000)]
+        outputs: u64,
+        /// Number of point lookups used for query latency measurement
+        #[arg(long, default_value_t = 2_000)]
+        queries: u64,
+        /// Remove an existing work directory before running
+        #[arg(long, default_value_t = false)]
+        overwrite: bool,
     },
 }
 
@@ -622,6 +664,7 @@ async fn main() -> Result<()> {
                     compute_backend,
                     compute_db_path,
                     discard_backup,
+                    dry_run,
                 } => {
                     let backend = match compute_backend {
                         Some(value) => parse_compute_backend(&value)?,
@@ -629,7 +672,41 @@ async fn main() -> Result<()> {
                     };
                     let path = compute_db_path
                         .unwrap_or_else(|| api_config.http_rpc.compute_db_path.clone());
-                    commands::storage::rebuild_compute_db(backend, &path, discard_backup)?;
+                    commands::storage::rebuild_compute_db(backend, &path, discard_backup, dry_run)?;
+                }
+                StorageAction::PruneComputeDb {
+                    compute_backend,
+                    compute_db_path,
+                    retention_profile,
+                    retention_window_secs,
+                    now_unix_secs,
+                    dry_run,
+                } => {
+                    let backend = match compute_backend {
+                        Some(value) => parse_compute_backend(&value)?,
+                        None => api_config.http_rpc.compute_backend,
+                    };
+                    let path = compute_db_path
+                        .unwrap_or_else(|| api_config.http_rpc.compute_db_path.clone());
+                    commands::storage::prune_compute_db(
+                        backend,
+                        &path,
+                        &retention_profile,
+                        retention_window_secs,
+                        now_unix_secs,
+                        dry_run,
+                    )?;
+                }
+                StorageAction::BenchmarkComputeDb {
+                    work_dir,
+                    report,
+                    outputs,
+                    queries,
+                    overwrite,
+                } => {
+                    commands::storage::benchmark_compute_storage(
+                        &work_dir, &report, outputs, queries, overwrite,
+                    )?;
                 }
             }
         }

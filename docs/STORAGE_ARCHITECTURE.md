@@ -30,7 +30,7 @@ and atomic updates. Columnar files are optimized for scans, not UTXO point reads
 Historical archive data is not needed for immediate validation after finalization.
 
 - Data: old blocks, spent outputs, old compute results, historical receipts, explorer operation rows.
-- Format: segment files by height range, then compressed with ZSTD.
+- Format: `archive-<from>-<to>.zst` segment files by height range.
 - Access pattern: append by segment, fetch by height/hash, rare reindex.
 - Retention: configurable per node profile.
 
@@ -49,30 +49,26 @@ This tier is rebuildable from archive/hot data. It must not be a source of conse
 
 ## Current Implementation Step
 
-The first code step changes compute outputs from JSON values to versioned binary values:
+The first code step changes compute outputs and compute tx results from JSON values to versioned
+binary values:
 
 ```text
 key   = "compute:output:" || output_id
 value = "ZCO1" || bincode(ObjectOutput)
+
+key   = "compute:txresult:" || tx_id
+value = "ZCR1" || bincode(ComputeResultEnvelope)
 ```
 
 Readers keep JSON fallback support so existing development databases remain readable. New writes use
 binary. This removes repeated JSON field names and decimal byte-array formatting, which are the
 largest avoidable overhead in the current compute store.
 
-Compute tx results remain JSON for now because the RPC result is still dynamic and mostly used as
-API-facing metadata. They should be converted later to a typed result envelope:
-
-```text
-key   = "compute:txresult:" || tx_id
-value = "ZCR1" || bincode(ComputeResultEnvelope)
-```
-
 ## Expected Savings
 
 The practical savings are workload-dependent:
 
-- JSON compute outputs to binary values: roughly 30-50% smaller for output-heavy workloads.
+- JSON compute outputs and tx results to binary values: roughly 30-50% smaller for output-heavy workloads.
 - RocksDB LZ4 to ZSTD: usually lower disk usage, with higher CPU cost.
 - Hot state plus pruning/snapshots: 70-95% smaller than archive-style full history nodes.
 - Columnar analytics: strong savings for scans and repeated fields, but not for hashes/signatures.
@@ -87,7 +83,7 @@ analytics data from validation data.
 
 - Keeps hot state and recent rollback window.
 - Uses RocksDB ZSTD and binary compute output values.
-- Prunes finalized historical compute outputs unless configured otherwise.
+- Prunes old spent compute outputs and old compute tx results outside the configured rollback window.
 
 ### Archive Node
 
@@ -113,6 +109,7 @@ codec and recreate file-based backends with the active backend options, includin
 
 ```bash
 zerochain --network mainnet storage rebuild-compute-db
+zerochain --network mainnet storage rebuild-compute-db --dry-run
 zerochain storage rebuild-compute-db \
   --compute-backend rocksdb \
   --compute-db-path ./data/compute-db
@@ -126,9 +123,48 @@ The command writes a new database at `<path>.rebuild-<timestamp>`, moves the old
 until the node has restarted and caught up successfully; pass `--discard-backup` only for disposable
 development databases.
 
+`--dry-run` scans the source, builds and verifies a temporary rebuilt database, then deletes the
+temporary database without replacing the original path. The command checks source scan count,
+rebuilt target count, and installed count during real rebuilds. If an error interrupts the rebuild,
+the error message names any temporary or backup path that needs inspection or cleanup before retrying.
+
+Compute hot-state pruning is also explicit:
+
+```bash
+zerochain --network mainnet storage prune-compute-db --dry-run
+zerochain --network mainnet storage prune-compute-db \
+  --retention-profile full \
+  --retention-window-secs 604800
+zerochain storage prune-compute-db \
+  --compute-backend rocksdb \
+  --compute-db-path ./data/compute-db \
+  --retention-profile archive
+```
+
+`full`, `validator`, and `mainnet` profiles prune old spent outputs and old tx results outside the
+window. `archive`, `explorer`, and `retain-all` scan but keep all entries. Pruning never deletes
+unspent outputs. If a pruned spent output is still referenced by `compute:latest`, the stale latest
+pointer is removed with it.
+
+Archive segments are consensus-external files. The storage layer writes `ZAS1` segment envelopes
+compressed with ZSTD. A segment contains finalized block wrappers, historical compute outputs, and
+historical compute tx results for an inclusive height range. The wrapper stores canonical block hash
+and height separately because `BlockHeader.hash` is skipped by normal block serialization.
+
+Disk savings reports are generated from a fixed synthetic workload:
+
+```bash
+zerochain storage benchmark-compute-db \
+  --outputs 10000 \
+  --queries 2000 \
+  --overwrite
+```
+
+The report compares legacy JSON with RocksDB LZ4, current binary RocksDB ZSTD, binary ZSTD after
+pruning, and ZSTD archive segments. It writes Markdown to `docs/STORAGE_SAVINGS_REPORT.md` by
+default and uses `artifacts/storage-savings-workload` for generated databases.
+
 ## Next Steps
 
-- Add typed binary codec for tx results.
-- Add optional pruning policy for spent outputs and old tx results.
-- Add archive segment writer for finalized block ranges.
+- Wire finalized block/compute export from node execution into `ArchiveSegmentWriter`.
 - Add rebuildable Parquet/Arrow export for explorer analytics.
