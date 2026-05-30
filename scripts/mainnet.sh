@@ -36,8 +36,13 @@ Options:
   --mine
   --coinbase ZER0x...
   --clean-data
-  --bootnode enode://...        repeatable
+  --bootnode enode://...|wss://... repeatable
   --p2p-listen-addr ADDR
+  --disable-p2p-tcp
+  --disable-p2p-ws
+  --p2p-ws-listen-addr ADDR
+  --p2p-ws-listen-port PORT
+  --p2p-ws-external-url URL
   --disable-local-miner
   --rpc-rate-limit-per-minute N
   --rpc-auth-token TOKEN
@@ -49,6 +54,7 @@ Examples:
   scripts/mainnet.sh start bootnode --mine --coinbase ZER0x0000000000000000000000000000000000000001
   scripts/mainnet.sh start bootnode --p2p-listen-addr 127.0.0.1
   scripts/mainnet.sh start follower --bootnode enode://bootnode-1@1.2.3.4:30303
+  scripts/mainnet.sh start follower --disable-p2p-tcp --bootnode wss://boot1.zerochain.org/p2p
   scripts/mainnet.sh start observer --bootnode enode://bootnode-1@1.2.3.4:30303
   scripts/mainnet.sh status bootnode
   scripts/mainnet.sh logs follower
@@ -173,7 +179,12 @@ start_node() {
     local http_port="$9"
     local ws_port="${10}"
     local p2p_port="${11}"
-    shift 11
+    local p2p_ws_listen_addr="${12}"
+    local p2p_ws_listen_port="${13}"
+    local p2p_ws_external_url="${14}"
+    local disable_p2p_tcp="${15}"
+    local disable_p2p_ws="${16}"
+    shift 16
     local bootnodes=("$@")
 
     ensure_binary
@@ -205,6 +216,21 @@ start_node() {
         --p2p-listen-addr "${p2p_listen_addr}"
         --p2p-listen-port "${p2p_port}"
     )
+    if [[ "${disable_p2p_tcp}" == "true" ]]; then
+        args+=(--disable-p2p-tcp)
+    fi
+    if [[ "${disable_p2p_ws}" == "true" ]]; then
+        args+=(--disable-p2p-ws)
+    fi
+    if [[ -n "${p2p_ws_listen_port}" ]]; then
+        args+=(--p2p-ws-listen-port "${p2p_ws_listen_port}")
+        if [[ -n "${p2p_ws_listen_addr}" ]]; then
+            args+=(--p2p-ws-listen-addr "${p2p_ws_listen_addr}")
+        fi
+    fi
+    if [[ -n "${p2p_ws_external_url}" ]]; then
+        args+=(--p2p-ws-external-url "${p2p_ws_external_url}")
+    fi
 
     if [[ "${mine}" == "true" ]]; then
         args+=(--mine)
@@ -235,9 +261,21 @@ start_node() {
 
     if is_running_pid "${pid}" && wait_rpc_ready "${http_port}" 20 "${rpc_auth_token}"; then
         echo "started ${role} node pid=${pid}"
-        echo "rpc=http://127.0.0.1:${http_port} ws=ws://127.0.0.1:${ws_port} p2p=${p2p_listen_addr}:${p2p_port}"
+        if [[ "${disable_p2p_tcp}" == "true" ]]; then
+            echo "rpc=http://127.0.0.1:${http_port} ws=ws://127.0.0.1:${ws_port} p2p_tcp=disabled"
+        else
+            echo "rpc=http://127.0.0.1:${http_port} ws=ws://127.0.0.1:${ws_port} p2p_tcp=${p2p_listen_addr}:${p2p_port}"
+        fi
+        if [[ "${disable_p2p_ws}" == "true" ]]; then
+            echo "p2p_ws=disabled"
+        elif [[ -n "${p2p_ws_listen_port}" ]]; then
+            echo "p2p_ws=${p2p_ws_listen_addr:-127.0.0.1}:${p2p_ws_listen_port}"
+        fi
+        if [[ "${disable_p2p_ws}" != "true" && -n "${p2p_ws_external_url}" ]]; then
+            echo "p2p_ws_external_url=${p2p_ws_external_url}"
+        fi
         echo "mine=${mine} disable_local_miner=${disable_local_miner} rpc_rate_limit_per_minute=${rpc_rate_limit_per_minute:-default}"
-        if [[ "${role}" == "bootnode" ]]; then
+        if [[ "${role}" == "bootnode" && "${disable_p2p_tcp}" != "true" ]]; then
             echo "bootnode_enode_hint=enode://BOOTNODE_PEER_ID@${p2p_listen_addr}:${p2p_port}"
         fi
         if [[ ${#bootnodes[@]} -gt 0 ]]; then
@@ -334,6 +372,11 @@ case "${cmd}" in
         http_port="${DEFAULT_HTTP_PORT}"
         ws_port="${DEFAULT_WS_PORT}"
         p2p_port="${DEFAULT_P2P_PORT}"
+        p2p_ws_listen_addr=""
+        p2p_ws_listen_port=""
+        p2p_ws_external_url=""
+        disable_p2p_tcp="false"
+        disable_p2p_ws="false"
         bootnodes=()
         while [[ $# -gt 0 ]]; do
             case "$1" in
@@ -355,6 +398,26 @@ case "${cmd}" in
                     ;;
                 --p2p-listen-addr)
                     p2p_listen_addr="${2:-}"
+                    shift 2
+                    ;;
+                --disable-p2p-tcp)
+                    disable_p2p_tcp="true"
+                    shift
+                    ;;
+                --disable-p2p-ws)
+                    disable_p2p_ws="true"
+                    shift
+                    ;;
+                --p2p-ws-listen-addr)
+                    p2p_ws_listen_addr="${2:-}"
+                    shift 2
+                    ;;
+                --p2p-ws-listen-port)
+                    p2p_ws_listen_port="${2:-}"
+                    shift 2
+                    ;;
+                --p2p-ws-external-url)
+                    p2p_ws_external_url="${2:-}"
                     shift 2
                     ;;
                 --disable-local-miner)
@@ -388,7 +451,7 @@ case "${cmd}" in
                     ;;
             esac
         done
-        start_node "${role}" "${mine}" "${coinbase}" "${clean_data}" "${disable_local_miner}" "${rpc_rate_limit_per_minute}" "${rpc_auth_token}" "${p2p_listen_addr}" "${http_port}" "${ws_port}" "${p2p_port}" "${bootnodes[@]}"
+        start_node "${role}" "${mine}" "${coinbase}" "${clean_data}" "${disable_local_miner}" "${rpc_rate_limit_per_minute}" "${rpc_auth_token}" "${p2p_listen_addr}" "${http_port}" "${ws_port}" "${p2p_port}" "${p2p_ws_listen_addr}" "${p2p_ws_listen_port}" "${p2p_ws_external_url}" "${disable_p2p_tcp}" "${disable_p2p_ws}" "${bootnodes[@]}"
         ;;
     stop)
         stop_node "${role}"

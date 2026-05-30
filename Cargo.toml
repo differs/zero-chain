@@ -41,6 +41,8 @@ futures = "0.3"
 bytes = "1.5"
 socket2 = "0.5"
 dns-parser = "0.8"
+tokio-tungstenite = { version = "0.23", features = ["rustls-tls-webpki-roots"] }
+url = "2.5"
 
 # Database
 rocksdb = "0.21"

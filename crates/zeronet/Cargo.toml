@@ -19,6 +19,8 @@ async-trait.workspace = true
 # Networking
 bytes.workspace = true
 socket2.workspace = true
+tokio-tungstenite.workspace = true
+url.workspace = true
 
 # Serialization
 serde.workspace = true

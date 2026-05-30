@@ -205,6 +205,21 @@ impl PeerManager {
         node_record: crate::discovery::NodeRecord,
         tx: mpsc::Sender<ProtocolMessage>,
     ) -> Result<bool> {
+        let remote_addr: SocketAddr = format!("{}:{}", node_record.ip, node_record.tcp_port)
+            .parse()
+            .map_err(|e| {
+                NetworkError::ConnectionError(format!("Invalid peer address format: {e}"))
+            })?;
+        self.add_peer_with_sender_at(node_record, remote_addr, tx)
+    }
+
+    /// Add peer using an explicit socket address for non-IP transports such as WebSocket/CDN.
+    pub fn add_peer_with_sender_at(
+        &self,
+        node_record: crate::discovery::NodeRecord,
+        remote_addr: SocketAddr,
+        tx: mpsc::Sender<ProtocolMessage>,
+    ) -> Result<bool> {
         self.cleanup_expired_bans();
 
         if self.peers.read().len() >= self.max_peers as usize {
@@ -230,11 +245,6 @@ impl PeerManager {
             return Ok(false);
         }
 
-        let remote_addr: SocketAddr = format!("{}:{}", node_record.ip, node_record.tcp_port)
-            .parse()
-            .map_err(|e| {
-                NetworkError::ConnectionError(format!("Invalid peer address format: {e}"))
-            })?;
         let local_addr = SocketAddr::from(([0, 0, 0, 0], 0));
 
         let info = PeerInfo::new(

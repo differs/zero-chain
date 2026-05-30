@@ -20,6 +20,11 @@ pub struct RunNodeConfig {
     pub rpc_config: Option<RpcConfig>,
     pub p2p_listen_addr: String,
     pub p2p_listen_port: u16,
+    pub p2p_tcp_enabled: bool,
+    pub p2p_ws_enabled: bool,
+    pub p2p_ws_listen_addr: Option<String>,
+    pub p2p_ws_listen_port: Option<u16>,
+    pub p2p_ws_external_url: Option<String>,
     pub bootnodes: Vec<String>,
     pub max_peers: u32,
     pub enable_discovery: bool,
@@ -43,6 +48,11 @@ pub async fn run_node(cfg: RunNodeConfig) -> Result<()> {
         rpc_config,
         p2p_listen_addr,
         p2p_listen_port,
+        p2p_tcp_enabled,
+        p2p_ws_enabled,
+        p2p_ws_listen_addr,
+        p2p_ws_listen_port,
+        p2p_ws_external_url,
         bootnodes,
         max_peers,
         enable_discovery,
@@ -60,7 +70,32 @@ pub async fn run_node(cfg: RunNodeConfig) -> Result<()> {
     println!("   HTTP RPC port: {}", http_port);
     println!("   WebSocket port: {}", ws_port);
     println!("   Mining: {}", if mine { "enabled" } else { "disabled" });
-    println!("   P2P listen: {}:{}", p2p_listen_addr, p2p_listen_port);
+    if p2p_tcp_enabled {
+        println!("   P2P TCP listen: {}:{}", p2p_listen_addr, p2p_listen_port);
+    } else {
+        println!("   P2P TCP: disabled");
+    }
+    println!(
+        "   P2P WebSocket transport: {}",
+        if p2p_ws_enabled {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
+    if p2p_ws_enabled && p2p_ws_listen_port.is_some() {
+        let port = p2p_ws_listen_port.unwrap_or_default();
+        println!(
+            "   P2P WebSocket listen: {}:{}",
+            p2p_ws_listen_addr.as_deref().unwrap_or("127.0.0.1"),
+            port
+        );
+    }
+    if p2p_ws_enabled {
+        if let Some(url) = &p2p_ws_external_url {
+            println!("   P2P WebSocket external URL: {}", url);
+        }
+    }
     println!("   P2P max peers: {}", max_peers);
     println!(
         "   Discovery: {}",
@@ -160,6 +195,11 @@ pub async fn run_node(cfg: RunNodeConfig) -> Result<()> {
         network_id,
         listen_addr: p2p_listen_addr,
         listen_port: p2p_listen_port,
+        enable_tcp_transport: p2p_tcp_enabled,
+        enable_ws_transport: p2p_ws_enabled,
+        ws_listen_addr: p2p_ws_listen_addr,
+        ws_listen_port: p2p_ws_listen_port,
+        ws_external_url: p2p_ws_external_url,
         max_peers,
         min_peers: max_peers.min(25),
         bootnodes,
@@ -177,7 +217,10 @@ pub async fn run_node(cfg: RunNodeConfig) -> Result<()> {
     };
     let network_service = NetworkService::new(network_cfg)?;
     network_service.start().await?;
-    println!("   P2P service started on port {}", p2p_listen_port);
+    println!(
+        "   P2P service started (tcp={}, websocket={})",
+        p2p_tcp_enabled, p2p_ws_enabled
+    );
 
     // Keep running
     loop {

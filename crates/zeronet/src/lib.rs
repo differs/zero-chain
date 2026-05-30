@@ -23,19 +23,26 @@ pub use protocol::{
 };
 pub use sync::{SyncManager, SyncState};
 
+use async_trait::async_trait;
+use futures::{SinkExt, StreamExt};
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 use serde::de::DeserializeOwned;
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::io;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::{interval, timeout, MissedTickBehavior};
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::{accept_async, connect_async, MaybeTlsStream, WebSocketStream};
+use url::Url;
 use uuid::Uuid;
 use zerocore::account::Account;
 use zerocore::crypto::Hash;
@@ -59,8 +66,6 @@ static SEEN_BLOCK_HASHES: Lazy<RwLock<HashMap<String, u64>>> =
 const HANDSHAKE_PREFIX: &str = "ZERO/1";
 const HANDSHAKE_MAX_LEN: usize = 512;
 const HANDSHAKE_TIMEOUT_SECS: u64 = 5;
-const HEARTBEAT_PING: &[u8] = b"ZERO/PING\n";
-const HEARTBEAT_PONG: &[u8] = b"ZERO/PONG\n";
 const CONTROL_FRAME_MAX_LEN: usize = 16 * 1024 * 1024;
 const HEARTBEAT_INTERVAL_SECS: u64 = 15;
 const PEER_IDLE_TIMEOUT_SECS: u64 = 45;
@@ -71,6 +76,127 @@ const MAX_GLOBAL_BLOCKS: usize = 8192;
 const MAX_GLOBAL_SYNC_TX_INDEX: usize = 100_000;
 const DISCOVERY_DIAL_INTERVAL_SECS: u64 = 5;
 const SYNC_HEAD_ANNOUNCE_INTERVAL_SECS: u64 = 10;
+
+#[async_trait]
+trait PeerWire: Send + Unpin {
+    async fn read_line(&mut self, max_len: usize) -> io::Result<Option<String>>;
+    async fn write_line(&mut self, line: &str) -> io::Result<()>;
+}
+
+struct TcpPeerWire {
+    stream: TcpStream,
+}
+
+impl TcpPeerWire {
+    fn new(stream: TcpStream) -> Self {
+        Self { stream }
+    }
+}
+
+#[async_trait]
+impl PeerWire for TcpPeerWire {
+    async fn read_line(&mut self, max_len: usize) -> io::Result<Option<String>> {
+        let mut line = Vec::with_capacity(64);
+        loop {
+            let mut b = [0u8; 1];
+            let read = self.stream.read(&mut b).await?;
+            if read == 0 {
+                return if line.is_empty() {
+                    Ok(None)
+                } else {
+                    Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "peer closed mid-frame",
+                    ))
+                };
+            }
+            if b[0] == b'\n' {
+                break;
+            }
+            line.push(b[0]);
+            if line.len() > max_len {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "line frame too long",
+                ));
+            }
+        }
+
+        String::from_utf8(line)
+            .map(Some)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
+    }
+
+    async fn write_line(&mut self, line: &str) -> io::Result<()> {
+        self.stream.write_all(line.as_bytes()).await
+    }
+}
+
+struct WsPeerWire<S> {
+    stream: WebSocketStream<S>,
+}
+
+impl<S> WsPeerWire<S> {
+    fn new(stream: WebSocketStream<S>) -> Self {
+        Self { stream }
+    }
+}
+
+#[async_trait]
+impl<S> PeerWire for WsPeerWire<S>
+where
+    S: AsyncRead + AsyncWrite + Send + Unpin,
+{
+    async fn read_line(&mut self, max_len: usize) -> io::Result<Option<String>> {
+        while let Some(message) = self.stream.next().await {
+            let message =
+                message.map_err(|err| io::Error::new(io::ErrorKind::ConnectionAborted, err))?;
+            match message {
+                Message::Text(text) => {
+                    if text.len() > max_len {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "websocket text frame too long",
+                        ));
+                    }
+                    return Ok(Some(text.trim_end_matches(['\r', '\n']).to_string()));
+                }
+                Message::Binary(bytes) => {
+                    if bytes.len() > max_len {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "websocket binary frame too long",
+                        ));
+                    }
+                    let text = String::from_utf8(bytes)
+                        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+                    return Ok(Some(text.trim_end_matches(['\r', '\n']).to_string()));
+                }
+                Message::Ping(payload) => {
+                    self.stream
+                        .send(Message::Pong(payload))
+                        .await
+                        .map_err(|err| io::Error::new(io::ErrorKind::BrokenPipe, err))?;
+                }
+                Message::Pong(_) => {}
+                Message::Close(_) => return Ok(None),
+                Message::Frame(_) => {}
+            }
+        }
+        Ok(None)
+    }
+
+    async fn write_line(&mut self, line: &str) -> io::Result<()> {
+        self.stream
+            .send(Message::Text(
+                line.trim_end_matches(['\r', '\n']).to_string(),
+            ))
+            .await
+            .map_err(|err| io::Error::new(io::ErrorKind::BrokenPipe, err))
+    }
+}
+
+type BoxedPeerWire = Box<dyn PeerWire>;
 
 /// Returns the current process-level peer count.
 pub fn global_peer_count() -> usize {
@@ -243,6 +369,16 @@ pub struct NetworkConfig {
     pub listen_addr: String,
     /// Listen port
     pub listen_port: u16,
+    /// Enable direct TCP P2P transport for enode bootnodes and TCP listener.
+    pub enable_tcp_transport: bool,
+    /// Enable WebSocket P2P transport for ws/wss bootnodes and WebSocket listener.
+    pub enable_ws_transport: bool,
+    /// Optional WebSocket P2P listen address for CDN-compatible transport.
+    pub ws_listen_addr: Option<String>,
+    /// Optional WebSocket P2P listen port for CDN-compatible transport.
+    pub ws_listen_port: Option<u16>,
+    /// Optional public WebSocket URL advertised in logs, e.g. wss://boot.zerochain.org/p2p.
+    pub ws_external_url: Option<String>,
     /// External address (optional)
     pub external_addr: Option<String>,
     /// Maximum peers
@@ -281,6 +417,11 @@ impl Default for NetworkConfig {
             network_id: 10086,
             listen_addr: "0.0.0.0".to_string(),
             listen_port: 30303,
+            enable_tcp_transport: true,
+            enable_ws_transport: true,
+            ws_listen_addr: None,
+            ws_listen_port: None,
+            ws_external_url: None,
             external_addr: None,
             max_peers: 50,
             min_peers: 25,
@@ -309,6 +450,7 @@ pub struct NetworkService {
     sync_manager: Option<Arc<SyncManager>>,
     is_running: RwLock<bool>,
     listener_task: RwLock<Option<JoinHandle<()>>>,
+    ws_listener_task: RwLock<Option<JoinHandle<()>>>,
     bootnode_task: RwLock<Option<JoinHandle<()>>>,
     discovery_dial_task: RwLock<Option<JoinHandle<()>>>,
     sync_head_task: RwLock<Option<JoinHandle<()>>>,
@@ -324,7 +466,7 @@ impl NetworkService {
             config.ban_duration_secs,
         ));
 
-        let discovery = if config.enable_discovery {
+        let discovery = if config.enable_discovery && config.enable_tcp_transport {
             Some(Arc::new(Discovery::new(&config)?))
         } else {
             None
@@ -344,6 +486,7 @@ impl NetworkService {
             sync_manager,
             is_running: RwLock::new(false),
             listener_task: RwLock::new(None),
+            ws_listener_task: RwLock::new(None),
             bootnode_task: RwLock::new(None),
             discovery_dial_task: RwLock::new(None),
             sync_head_task: RwLock::new(None),
@@ -357,12 +500,23 @@ impl NetworkService {
         }
 
         tracing::info!(
-            "Starting network service on port {}",
-            self.config.listen_port
+            "Starting network service transports: tcp={}, websocket={}",
+            self.config.enable_tcp_transport,
+            self.config.enable_ws_transport
         );
 
         // Start listening
-        self.start_listening().await?;
+        if self.config.enable_tcp_transport {
+            self.start_listening().await?;
+        } else if self.config.enable_discovery {
+            tracing::warn!("P2P discovery disabled because direct TCP transport is disabled");
+        }
+        if let Err(err) = self.start_ws_listening().await {
+            if let Some(task) = self.listener_task.write().take() {
+                task.abort();
+            }
+            return Err(err);
+        }
 
         // Connect to bootnodes immediately
         if !self.config.bootnodes.is_empty() {
@@ -381,6 +535,9 @@ impl NetworkService {
             );
             if let Some(local_enr) = discovery.local_enr_base64() {
                 tracing::info!("discovery local ENR: {}", local_enr);
+            }
+            if let Some(ws_hint) = self.websocket_bootnode_hint() {
+                tracing::info!("bootnode websocket hint: {}", ws_hint);
             }
             self.start_discovery_dialer(discovery.clone());
         }
@@ -421,6 +578,9 @@ impl NetworkService {
         }
 
         if let Some(task) = self.listener_task.write().take() {
+            task.abort();
+        }
+        if let Some(task) = self.ws_listener_task.write().take() {
             task.abort();
         }
         if let Some(task) = self.bootnode_task.write().take() {
@@ -465,6 +625,23 @@ impl NetworkService {
     /// Get all connected peers
     pub fn get_peers(&self) -> Vec<PeerInfo> {
         self.peer_manager.get_active_peer_infos()
+    }
+
+    fn websocket_bootnode_hint(&self) -> Option<String> {
+        if !self.config.enable_ws_transport {
+            return None;
+        }
+        if let Some(url) = &self.config.ws_external_url {
+            return Some(url.clone());
+        }
+        let port = self.config.ws_listen_port?;
+        let host = self
+            .config
+            .ws_listen_addr
+            .as_deref()
+            .filter(|addr| *addr != "0.0.0.0" && *addr != "::")
+            .unwrap_or("127.0.0.1");
+        Some(format!("ws://{host}:{port}/p2p"))
     }
 
     /// Add peer
@@ -527,7 +704,7 @@ impl NetworkService {
             tracing::info!("P2P listener started on {}", bind_addr);
             loop {
                 match listener.accept().await {
-                    Ok((mut stream, remote_addr)) => {
+                    Ok((stream, remote_addr)) => {
                         peer_manager.cleanup_expired_bans();
                         let remote_ip = remote_addr.ip().to_string();
 
@@ -563,8 +740,9 @@ impl NetworkService {
                             continue;
                         }
 
+                        let mut wire: BoxedPeerWire = Box::new(TcpPeerWire::new(stream));
                         let (remote_network_id, remote_peer_id) = match inbound_handshake(
-                            &mut stream,
+                            wire.as_mut(),
                             expected_network_id,
                             &local_peer_id,
                         )
@@ -616,7 +794,7 @@ impl NetworkService {
                         tokio::spawn(monitor_peer_socket(
                             peer_manager.clone(),
                             remote_peer_id,
-                            stream,
+                            wire,
                             rx,
                             ban_duration_secs,
                             max_gossip_per_peer_per_minute,
@@ -635,6 +813,160 @@ impl NetworkService {
         Ok(())
     }
 
+    async fn start_ws_listening(&self) -> Result<()> {
+        if !self.config.enable_ws_transport {
+            if self.config.ws_listen_port.is_some() {
+                tracing::info!("P2P websocket listener disabled by transport config");
+            }
+            return Ok(());
+        }
+        let Some(ws_port) = self.config.ws_listen_port else {
+            return Ok(());
+        };
+        let ws_addr = self
+            .config
+            .ws_listen_addr
+            .clone()
+            .unwrap_or_else(|| "127.0.0.1".to_string());
+        let bind_addr = format!("{ws_addr}:{ws_port}");
+        let listener = TcpListener::bind(&bind_addr).await.map_err(|e| {
+            NetworkError::ConnectionError(format!("bind websocket {bind_addr} failed: {e}"))
+        })?;
+
+        let expected_network_id = self.config.network_id;
+        let local_peer_id = self.local_peer_id.clone();
+        let peer_manager = self.peer_manager.clone();
+        let max_inbound_per_ip = self.config.max_inbound_per_ip.max(1);
+        let max_inbound_rate_per_minute = self.config.max_inbound_rate_per_minute.max(1);
+        let max_gossip_per_peer_per_minute = self.config.max_gossip_per_peer_per_minute.max(1);
+        let ban_duration_secs = self.config.ban_duration_secs;
+        let sync_manager = self.sync_manager.clone();
+
+        let task = tokio::spawn(async move {
+            let mut inbound_windows: HashMap<String, VecDeque<u64>> = HashMap::new();
+            tracing::info!("P2P websocket listener started on {}", bind_addr);
+            loop {
+                match listener.accept().await {
+                    Ok((stream, remote_addr)) => {
+                        peer_manager.cleanup_expired_bans();
+                        let remote_ip = remote_addr.ip().to_string();
+
+                        if peer_manager.is_ip_banned(&remote_ip) {
+                            tracing::warn!("drop websocket inbound from banned ip {}", remote_addr);
+                            continue;
+                        }
+
+                        if peer_manager.connected_peers_for_ip(&remote_ip)
+                            >= max_inbound_per_ip as usize
+                        {
+                            tracing::warn!(
+                                "ip {} exceeded websocket max inbound peers ({})",
+                                remote_ip,
+                                max_inbound_per_ip
+                            );
+                            peer_manager.ban_ip(&remote_ip, ban_duration_secs.min(300));
+                            continue;
+                        }
+
+                        if !allow_ip_rate(
+                            &mut inbound_windows,
+                            &remote_ip,
+                            max_inbound_rate_per_minute,
+                            current_timestamp(),
+                        ) {
+                            tracing::warn!(
+                                "ip {} exceeded websocket inbound connection rate ({} / min)",
+                                remote_ip,
+                                max_inbound_rate_per_minute
+                            );
+                            peer_manager.ban_ip(&remote_ip, ban_duration_secs.min(180));
+                            continue;
+                        }
+
+                        let ws_stream = match accept_async(stream).await {
+                            Ok(ws_stream) => ws_stream,
+                            Err(err) => {
+                                tracing::warn!(
+                                    "websocket accept failed from {}: {}",
+                                    remote_addr,
+                                    err
+                                );
+                                continue;
+                            }
+                        };
+                        let mut wire: BoxedPeerWire = Box::new(WsPeerWire::new(ws_stream));
+                        let (remote_network_id, remote_peer_id) = match inbound_handshake(
+                            wire.as_mut(),
+                            expected_network_id,
+                            &local_peer_id,
+                        )
+                        .await
+                        {
+                            Ok(v) => v,
+                            Err(err) => {
+                                tracing::warn!(
+                                    "websocket inbound handshake failed from {}: {}",
+                                    remote_addr,
+                                    err
+                                );
+                                continue;
+                            }
+                        };
+
+                        let node_record = NodeRecord {
+                            peer_id: remote_peer_id.clone(),
+                            ip: remote_ip,
+                            tcp_port: remote_addr.port(),
+                            udp_port: remote_addr.port(),
+                            network_id: remote_network_id,
+                        };
+
+                        let (tx, rx) = mpsc::channel(PEER_SEND_BUFFER);
+                        match peer_manager.add_peer_with_sender_at(node_record, remote_addr, tx) {
+                            Ok(inserted) => {
+                                if !inserted {
+                                    tracing::debug!(
+                                        "skipping duplicate websocket peer {} from {}",
+                                        remote_peer_id,
+                                        remote_addr
+                                    );
+                                    continue;
+                                }
+                            }
+                            Err(err) => {
+                                tracing::warn!(
+                                    "failed to register websocket peer {}: {}",
+                                    remote_addr,
+                                    err
+                                );
+                                continue;
+                            }
+                        }
+
+                        set_global_peer_count(peer_manager.peer_count());
+                        set_global_peers(peer_manager.get_active_peer_infos());
+                        tokio::spawn(monitor_peer_socket(
+                            peer_manager.clone(),
+                            remote_peer_id,
+                            wire,
+                            rx,
+                            ban_duration_secs,
+                            max_gossip_per_peer_per_minute,
+                            sync_manager.clone(),
+                        ));
+                    }
+                    Err(err) => {
+                        tracing::warn!("P2P websocket accept error: {}", err);
+                        break;
+                    }
+                }
+            }
+        });
+
+        *self.ws_listener_task.write() = Some(task);
+        Ok(())
+    }
+
     fn start_bootnode_reconnector(&self) {
         if self.config.bootnodes.is_empty() {
             return;
@@ -647,6 +979,8 @@ impl NetworkService {
         let peer_manager = self.peer_manager.clone();
         let ban_duration_secs = self.config.ban_duration_secs;
         let max_gossip_per_peer_per_minute = self.config.max_gossip_per_peer_per_minute.max(1);
+        let enable_tcp_transport = self.config.enable_tcp_transport;
+        let enable_ws_transport = self.config.enable_ws_transport;
         let sync_manager = self.sync_manager.clone();
 
         let task = tokio::spawn(async move {
@@ -663,6 +997,8 @@ impl NetworkService {
                         peer_manager.clone(),
                         ban_duration_secs,
                         max_gossip_per_peer_per_minute,
+                        enable_tcp_transport,
+                        enable_ws_transport,
                         sync_manager.clone(),
                     )
                     .await
@@ -685,6 +1021,8 @@ impl NetworkService {
                 self.peer_manager.clone(),
                 self.config.ban_duration_secs,
                 self.config.max_gossip_per_peer_per_minute.max(1),
+                self.config.enable_tcp_transport,
+                self.config.enable_ws_transport,
                 self.sync_manager.clone(),
             )
             .await
@@ -753,19 +1091,175 @@ async fn connect_single_bootnode(
     peer_manager: Arc<PeerManager>,
     ban_duration_secs: u64,
     max_gossip_per_peer_per_minute: u32,
+    enable_tcp_transport: bool,
+    enable_ws_transport: bool,
     sync_manager: Option<Arc<SyncManager>>,
 ) -> Result<()> {
-    let record = NodeRecord::from_bootnode(bootnode, expected_network_id)?;
-    connect_node_record(
-        record,
-        expected_network_id,
-        local_peer_id,
+    match BootnodeEndpoint::parse(bootnode, expected_network_id)? {
+        BootnodeEndpoint::Tcp(record) => {
+            if !enable_tcp_transport {
+                return Err(NetworkError::ConnectionError(
+                    "direct TCP P2P transport is disabled".to_string(),
+                ));
+            }
+            connect_node_record(
+                record,
+                expected_network_id,
+                local_peer_id,
+                peer_manager,
+                ban_duration_secs,
+                max_gossip_per_peer_per_minute,
+                sync_manager,
+            )
+            .await
+        }
+        BootnodeEndpoint::WebSocket(endpoint) => {
+            if !enable_ws_transport {
+                return Err(NetworkError::ConnectionError(
+                    "websocket P2P transport is disabled".to_string(),
+                ));
+            }
+            connect_websocket_bootnode(
+                endpoint,
+                expected_network_id,
+                local_peer_id,
+                peer_manager,
+                ban_duration_secs,
+                max_gossip_per_peer_per_minute,
+                sync_manager,
+            )
+            .await
+        }
+    }
+}
+
+enum BootnodeEndpoint {
+    Tcp(NodeRecord),
+    WebSocket(WebSocketBootnode),
+}
+
+struct WebSocketBootnode {
+    url: String,
+    host: String,
+    port: u16,
+}
+
+impl BootnodeEndpoint {
+    fn parse(raw: &str, network_id: u64) -> Result<Self> {
+        if raw.starts_with("ws://") || raw.starts_with("wss://") {
+            return Ok(Self::WebSocket(WebSocketBootnode::parse(raw)?));
+        }
+        Ok(Self::Tcp(NodeRecord::from_bootnode(raw, network_id)?))
+    }
+}
+
+impl WebSocketBootnode {
+    fn parse(raw: &str) -> Result<Self> {
+        let url = Url::parse(raw).map_err(|err| {
+            NetworkError::ProtocolError(format!("invalid websocket bootnode url: {err}"))
+        })?;
+        match url.scheme() {
+            "ws" | "wss" => {}
+            scheme => {
+                return Err(NetworkError::ProtocolError(format!(
+                    "unsupported websocket bootnode scheme: {scheme}"
+                )));
+            }
+        }
+        let host = url
+            .host_str()
+            .ok_or_else(|| NetworkError::ProtocolError("websocket bootnode missing host".into()))?
+            .to_string();
+        let port = url
+            .port_or_known_default()
+            .ok_or_else(|| NetworkError::ProtocolError("websocket bootnode missing port".into()))?;
+        Ok(Self {
+            url: raw.to_string(),
+            host,
+            port,
+        })
+    }
+
+    fn remote_addr_hint(&self) -> SocketAddr {
+        if let Ok(ip) = self.host.parse::<IpAddr>() {
+            return SocketAddr::new(ip, self.port);
+        }
+        SocketAddr::from(([0, 0, 0, 0], self.port))
+    }
+}
+
+async fn connect_websocket_bootnode(
+    endpoint: WebSocketBootnode,
+    expected_network_id: u64,
+    local_peer_id: &str,
+    peer_manager: Arc<PeerManager>,
+    ban_duration_secs: u64,
+    max_gossip_per_peer_per_minute: u32,
+    sync_manager: Option<Arc<SyncManager>>,
+) -> Result<()> {
+    if peer_manager.is_ip_banned(&endpoint.host) {
+        return Err(NetworkError::ConnectionError(format!(
+            "websocket bootnode host {} is banned",
+            endpoint.host
+        )));
+    }
+
+    let (ws_stream, _) = timeout(
+        std::time::Duration::from_secs(10),
+        connect_async(&endpoint.url),
+    )
+    .await
+    .map_err(|_| {
+        NetworkError::ConnectionError(format!("websocket connect timeout: {}", endpoint.url))
+    })?
+    .map_err(|err| {
+        NetworkError::ConnectionError(format!("websocket connect failed {}: {err}", endpoint.url))
+    })?;
+
+    let remote_addr = endpoint.remote_addr_hint();
+    let mut wire: BoxedPeerWire = Box::new(WsPeerWire::<MaybeTlsStream<TcpStream>>::new(ws_stream));
+    let (remote_network_id, remote_peer_id) =
+        outbound_handshake(wire.as_mut(), expected_network_id, local_peer_id).await?;
+
+    if peer_manager.get_peer(&remote_peer_id).is_some() {
+        tracing::debug!(
+            "skipping duplicate websocket outbound peer {}",
+            remote_peer_id
+        );
+        return Ok(());
+    }
+
+    let node_record = NodeRecord {
+        peer_id: remote_peer_id.clone(),
+        ip: endpoint.host,
+        tcp_port: endpoint.port,
+        udp_port: endpoint.port,
+        network_id: remote_network_id,
+    };
+
+    let (tx, rx) = mpsc::channel(PEER_SEND_BUFFER);
+    let inserted = peer_manager.add_peer_with_sender_at(node_record, remote_addr, tx)?;
+    if !inserted {
+        tracing::debug!(
+            "skipping duplicate websocket outbound registration {}",
+            remote_peer_id
+        );
+        return Ok(());
+    }
+    set_global_peer_count(peer_manager.peer_count());
+    set_global_peers(peer_manager.get_active_peer_infos());
+
+    tokio::spawn(monitor_peer_socket(
         peer_manager,
+        remote_peer_id,
+        wire,
+        rx,
         ban_duration_secs,
         max_gossip_per_peer_per_minute,
         sync_manager,
-    )
-    .await
+    ));
+
+    Ok(())
 }
 
 async fn connect_node_record(
@@ -794,24 +1288,29 @@ async fn connect_node_record(
     }
 
     let addr = format!("{}:{}", record.ip, record.tcp_port);
-    let mut stream =
-        tokio::time::timeout(std::time::Duration::from_secs(5), TcpStream::connect(&addr))
-            .await
-            .map_err(|_| {
-                NetworkError::ConnectionError(format!(
-                    "connect timeout: {}:{}",
-                    record.ip, record.tcp_port
-                ))
-            })?
-            .map_err(|e| {
-                NetworkError::ConnectionError(format!(
-                    "connect failed {}:{}: {e}",
-                    record.ip, record.tcp_port
-                ))
-            })?;
+    let stream = tokio::time::timeout(std::time::Duration::from_secs(5), TcpStream::connect(&addr))
+        .await
+        .map_err(|_| {
+            NetworkError::ConnectionError(format!(
+                "connect timeout: {}:{}",
+                record.ip, record.tcp_port
+            ))
+        })?
+        .map_err(|e| {
+            NetworkError::ConnectionError(format!(
+                "connect failed {}:{}: {e}",
+                record.ip, record.tcp_port
+            ))
+        })?;
 
+    let remote_addr = stream.peer_addr().unwrap_or_else(|_| {
+        format!("{}:{}", record.ip, record.tcp_port)
+            .parse()
+            .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], record.tcp_port)))
+    });
+    let mut wire: BoxedPeerWire = Box::new(TcpPeerWire::new(stream));
     let (remote_network_id, remote_peer_id) =
-        outbound_handshake(&mut stream, expected_network_id, local_peer_id).await?;
+        outbound_handshake(wire.as_mut(), expected_network_id, local_peer_id).await?;
 
     let node_record = NodeRecord {
         peer_id: remote_peer_id.clone(),
@@ -827,7 +1326,7 @@ async fn connect_node_record(
     }
 
     let (tx, rx) = mpsc::channel(PEER_SEND_BUFFER);
-    let inserted = peer_manager.add_peer_with_sender(node_record, tx)?;
+    let inserted = peer_manager.add_peer_with_sender_at(node_record, remote_addr, tx)?;
     if !inserted {
         tracing::debug!(
             "skipping duplicate outbound registration {}",
@@ -841,7 +1340,7 @@ async fn connect_node_record(
     tokio::spawn(monitor_peer_socket(
         peer_manager,
         remote_peer_id,
-        stream,
+        wire,
         rx,
         ban_duration_secs,
         max_gossip_per_peer_per_minute,
@@ -854,7 +1353,7 @@ async fn connect_node_record(
 async fn monitor_peer_socket(
     peer_manager: Arc<PeerManager>,
     peer_id: String,
-    mut stream: TcpStream,
+    mut stream: BoxedPeerWire,
     mut outbound_rx: mpsc::Receiver<ProtocolMessage>,
     ban_duration_secs: u64,
     max_gossip_per_peer_per_minute: u32,
@@ -872,7 +1371,7 @@ async fn monitor_peer_socket(
     loop {
         tokio::select! {
             _ = heartbeat.tick() => {
-                if let Err(err) = stream.write_all(HEARTBEAT_PING).await {
+                if let Err(err) = stream.write_line("ZERO/PING\n").await {
                     tracing::debug!("heartbeat write failed for {}: {}", peer_id, err);
                     break;
                 }
@@ -888,7 +1387,7 @@ async fn monitor_peer_socket(
             _ = sync_head_announce.tick() => {
                 if let Some(sync) = &sync_manager {
                     if let Err(err) = write_protocol_message(
-                        &mut stream,
+                        stream.as_mut(),
                         ProtocolMessage::AnnounceHead(sync.local_height()),
                     )
                     .await
@@ -898,11 +1397,11 @@ async fn monitor_peer_socket(
                     }
                 }
             }
-            frame = read_control_frame(&mut stream) => {
+            frame = read_control_frame(stream.as_mut()) => {
                 match frame {
                     Ok(ControlFrame::Ping) => {
                         let _ = peer_manager.touch_peer(&peer_id);
-                        if let Err(err) = stream.write_all(HEARTBEAT_PONG).await {
+                        if let Err(err) = stream.write_line("ZERO/PONG\n").await {
                             tracing::debug!("heartbeat pong write failed for {}: {}", peer_id, err);
                             break;
                         }
@@ -945,7 +1444,7 @@ async fn monitor_peer_socket(
                         let _ = peer_manager.touch_peer(&peer_id);
                         if let Some(sync) = &sync_manager {
                             let headers = sync.build_headers_response(start, limit);
-                            let _ = write_protocol_message(&mut stream, ProtocolMessage::SyncHeaders(headers)).await;
+                            let _ = write_protocol_message(stream.as_mut(), ProtocolMessage::SyncHeaders(headers)).await;
                         }
                     }
                     Ok(ControlFrame::SyncHeaders(headers)) => {
@@ -958,7 +1457,7 @@ async fn monitor_peer_socket(
                         let _ = peer_manager.touch_peer(&peer_id);
                         if let Some(sync) = &sync_manager {
                             if let Some(body) = sync.build_block_body_response(&block_hash) {
-                                let _ = write_protocol_message(&mut stream, ProtocolMessage::SyncBlockBody(body)).await;
+                                let _ = write_protocol_message(stream.as_mut(), ProtocolMessage::SyncBlockBody(body)).await;
                             }
                         }
                     }
@@ -973,7 +1472,7 @@ async fn monitor_peer_socket(
                         if let Some(sync) = &sync_manager {
                             if let Some(snapshot) = sync.build_state_snapshot_response(block_number) {
                                 let _ = write_protocol_message(
-                                    &mut stream,
+                                    stream.as_mut(),
                                     ProtocolMessage::SyncStateSnapshot(snapshot),
                                 )
                                 .await;
@@ -1004,7 +1503,7 @@ async fn monitor_peer_socket(
             outbound = outbound_rx.recv() => {
                 match outbound {
                     Some(message) => {
-                        if let Err(err) = write_protocol_message(&mut stream, message).await {
+                        if let Err(err) = write_protocol_message(stream.as_mut(), message).await {
                             tracing::debug!("write protocol message to {} failed: {}", peer_id, err);
                             break;
                         }
@@ -1037,33 +1536,10 @@ enum ControlFrame {
     Eof,
 }
 
-async fn read_control_frame(stream: &mut TcpStream) -> std::io::Result<ControlFrame> {
-    let mut line = Vec::with_capacity(64);
-    loop {
-        let mut b = [0u8; 1];
-        let read = stream.read(&mut b).await?;
-        if read == 0 {
-            return Ok(ControlFrame::Eof);
-        }
-        if b[0] == b'\n' {
-            break;
-        }
-        line.push(b[0]);
-        if line.len() > CONTROL_FRAME_MAX_LEN {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "control frame line too long",
-            ));
-        }
-    }
-
-    let line = String::from_utf8(line).map_err(|err| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("control frame is not utf8: {err}"),
-        )
-    })?;
-
+async fn read_control_frame(stream: &mut dyn PeerWire) -> std::io::Result<ControlFrame> {
+    let Some(line) = stream.read_line(CONTROL_FRAME_MAX_LEN).await? else {
+        return Ok(ControlFrame::Eof);
+    };
     let normalized = line.trim();
     if normalized == "ZERO/PING" {
         return Ok(ControlFrame::Ping);
@@ -1177,7 +1653,7 @@ async fn read_control_frame(stream: &mut TcpStream) -> std::io::Result<ControlFr
 }
 
 async fn write_protocol_message(
-    stream: &mut TcpStream,
+    stream: &mut dyn PeerWire,
     message: ProtocolMessage,
 ) -> std::io::Result<()> {
     let maybe_line = match message {
@@ -1222,7 +1698,7 @@ async fn write_protocol_message(
     };
 
     if let Some(line) = maybe_line {
-        stream.write_all(line.as_bytes()).await?;
+        stream.write_line(&line).await?;
     }
     Ok(())
 }
@@ -1428,7 +1904,7 @@ fn mark_seen_hash(seen: &Lazy<RwLock<HashMap<String, u64>>>, key: String, now: u
 }
 
 async fn inbound_handshake(
-    stream: &mut TcpStream,
+    stream: &mut dyn PeerWire,
     expected_network_id: u64,
     local_peer_id: &str,
 ) -> Result<(u64, String)> {
@@ -1444,7 +1920,7 @@ async fn inbound_handshake(
 }
 
 async fn outbound_handshake(
-    stream: &mut TcpStream,
+    stream: &mut dyn PeerWire,
     expected_network_id: u64,
     local_peer_id: &str,
 ) -> Result<(u64, String)> {
@@ -1459,7 +1935,7 @@ async fn outbound_handshake(
     Ok((remote_network_id, remote_peer_id))
 }
 
-async fn send_handshake(stream: &mut TcpStream, network_id: u64, peer_id: &str) -> Result<()> {
+async fn send_handshake(stream: &mut dyn PeerWire, network_id: u64, peer_id: &str) -> Result<()> {
     if peer_id.trim().is_empty() {
         return Err(NetworkError::ProtocolError(
             "empty peer id in handshake".to_string(),
@@ -1473,7 +1949,7 @@ async fn send_handshake(stream: &mut TcpStream, network_id: u64, peer_id: &str) 
     }
     timeout(
         std::time::Duration::from_secs(HANDSHAKE_TIMEOUT_SECS),
-        stream.write_all(line.as_bytes()),
+        stream.write_line(&line),
     )
     .await
     .map_err(|_| NetworkError::ConnectionError("handshake write timeout".to_string()))?
@@ -1481,40 +1957,15 @@ async fn send_handshake(stream: &mut TcpStream, network_id: u64, peer_id: &str) 
     Ok(())
 }
 
-async fn read_handshake(stream: &mut TcpStream) -> Result<(u64, String)> {
-    let mut line = Vec::with_capacity(128);
-    let read_result = timeout(
+async fn read_handshake(stream: &mut dyn PeerWire) -> Result<(u64, String)> {
+    let line = timeout(
         std::time::Duration::from_secs(HANDSHAKE_TIMEOUT_SECS),
-        async {
-            loop {
-                let mut b = [0u8; 1];
-                let n = stream.read(&mut b).await?;
-                if n == 0 {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::UnexpectedEof,
-                        "peer closed during handshake",
-                    ));
-                }
-                if b[0] == b'\n' {
-                    break;
-                }
-                line.push(b[0]);
-                if line.len() > HANDSHAKE_MAX_LEN {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "handshake line too long",
-                    ));
-                }
-            }
-            Ok::<(), std::io::Error>(())
-        },
+        stream.read_line(HANDSHAKE_MAX_LEN),
     )
     .await
-    .map_err(|_| NetworkError::ConnectionError("handshake read timeout".to_string()))?;
-    read_result.map_err(NetworkError::IO)?;
-
-    let line = String::from_utf8(line)
-        .map_err(|e| NetworkError::ProtocolError(format!("invalid handshake utf8: {e}")))?;
+    .map_err(|_| NetworkError::ConnectionError("handshake read timeout".to_string()))?
+    .map_err(NetworkError::IO)?
+    .ok_or_else(|| NetworkError::ConnectionError("peer closed during handshake".to_string()))?;
     let mut parts = line.split_whitespace();
     let prefix = parts.next().unwrap_or_default();
     let network_id_str = parts.next().unwrap_or_default();
@@ -1547,10 +1998,32 @@ fn current_timestamp() -> u64 {
 mod tests {
     use super::*;
 
+    fn unused_tcp_port() -> u16 {
+        std::net::TcpListener::bind(("127.0.0.1", 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
+
+    async fn wait_for_peer_count(network: &NetworkService, expected: usize) {
+        for _ in 0..50 {
+            if network.peer_count() >= expected {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        panic!(
+            "expected at least {expected} peers, got {}",
+            network.peer_count()
+        );
+    }
+
     #[tokio::test]
     async fn test_network_service() {
         let config = NetworkConfig {
-            listen_port: 30304, // Use different port for tests
+            listen_addr: "127.0.0.1".to_string(),
+            listen_port: unused_tcp_port(),
             enable_discovery: false,
             enable_sync: false,
             ..Default::default()
@@ -1566,5 +2039,148 @@ mod tests {
 
         network.stop().await.unwrap();
         assert!(!*network.is_running.read());
+    }
+
+    #[tokio::test]
+    async fn test_websocket_bootnode_connects_peer() {
+        let network_id = 4242;
+        let boot_tcp_port = unused_tcp_port();
+        let boot_ws_port = unused_tcp_port();
+        let bootnode = NetworkService::new(NetworkConfig {
+            network_id,
+            listen_addr: "127.0.0.1".to_string(),
+            listen_port: boot_tcp_port,
+            enable_tcp_transport: false,
+            enable_ws_transport: true,
+            ws_listen_addr: Some("127.0.0.1".to_string()),
+            ws_listen_port: Some(boot_ws_port),
+            max_peers: 5,
+            min_peers: 0,
+            enable_discovery: false,
+            enable_sync: false,
+            ..Default::default()
+        })
+        .unwrap();
+        bootnode.start().await.unwrap();
+        assert!(TcpStream::connect(("127.0.0.1", boot_tcp_port))
+            .await
+            .is_err());
+
+        let peer = NetworkService::new(NetworkConfig {
+            network_id,
+            listen_addr: "127.0.0.1".to_string(),
+            listen_port: unused_tcp_port(),
+            enable_tcp_transport: false,
+            enable_ws_transport: true,
+            max_peers: 5,
+            min_peers: 0,
+            bootnodes: vec![format!("ws://127.0.0.1:{boot_ws_port}/p2p")],
+            enable_discovery: false,
+            enable_sync: false,
+            ..Default::default()
+        })
+        .unwrap();
+        peer.start().await.unwrap();
+
+        wait_for_peer_count(&bootnode, 1).await;
+        wait_for_peer_count(&peer, 1).await;
+
+        peer.stop().await.unwrap();
+        bootnode.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_disabled_transport_rejects_matching_bootnode() {
+        let peer_manager = Arc::new(PeerManager::new(5));
+        let tcp_err = connect_single_bootnode(
+            "enode://peer123@127.0.0.1:30303",
+            10086,
+            "local-peer",
+            peer_manager.clone(),
+            60,
+            60,
+            false,
+            true,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(tcp_err.to_string().contains("TCP P2P transport"));
+
+        let ws_err = connect_single_bootnode(
+            "wss://boot1.zerochain.org/p2p",
+            10086,
+            "local-peer",
+            peer_manager,
+            60,
+            60,
+            true,
+            false,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(ws_err.to_string().contains("websocket P2P transport"));
+    }
+
+    #[test]
+    fn test_discovery_is_disabled_when_tcp_transport_is_disabled() {
+        let network = NetworkService::new(NetworkConfig {
+            listen_addr: "127.0.0.1".to_string(),
+            listen_port: unused_tcp_port(),
+            enable_tcp_transport: false,
+            enable_discovery: true,
+            enable_sync: false,
+            ..Default::default()
+        })
+        .unwrap();
+
+        assert!(network.discovery.is_none());
+    }
+
+    #[test]
+    fn test_bootnode_endpoint_parses_tcp_enode() {
+        let endpoint = BootnodeEndpoint::parse("enode://peer123@127.0.0.1:30303", 10086).unwrap();
+        match endpoint {
+            BootnodeEndpoint::Tcp(record) => {
+                assert_eq!(record.peer_id, "peer123");
+                assert_eq!(record.ip, "127.0.0.1");
+                assert_eq!(record.tcp_port, 30303);
+            }
+            BootnodeEndpoint::WebSocket(_) => panic!("expected tcp endpoint"),
+        }
+    }
+
+    #[test]
+    fn test_bootnode_endpoint_parses_websocket_url() {
+        let endpoint =
+            BootnodeEndpoint::parse("wss://boot1.zerochain.org/p2p/mainnet", 10086).unwrap();
+        match endpoint {
+            BootnodeEndpoint::WebSocket(ws) => {
+                assert_eq!(ws.url, "wss://boot1.zerochain.org/p2p/mainnet");
+                assert_eq!(ws.host, "boot1.zerochain.org");
+                assert_eq!(ws.port, 443);
+            }
+            BootnodeEndpoint::Tcp(_) => panic!("expected websocket endpoint"),
+        }
+    }
+
+    #[test]
+    fn test_websocket_bootnode_hint_prefers_external_url() {
+        let network = NetworkService::new(NetworkConfig {
+            listen_port: 30305,
+            ws_listen_addr: Some("127.0.0.1".to_string()),
+            ws_listen_port: Some(30306),
+            ws_external_url: Some("wss://boot1.zerochain.org/p2p".to_string()),
+            enable_discovery: false,
+            enable_sync: false,
+            ..Default::default()
+        })
+        .unwrap();
+
+        assert_eq!(
+            network.websocket_bootnode_hint().as_deref(),
+            Some("wss://boot1.zerochain.org/p2p")
+        );
     }
 }

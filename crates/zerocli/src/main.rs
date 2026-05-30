@@ -121,7 +121,27 @@ enum Commands {
         #[arg(long, default_value = "30303")]
         p2p_listen_port: u16,
 
-        /// Bootnode enode, repeatable.
+        /// Disable direct TCP P2P transport, including enode bootnodes and TCP listener
+        #[arg(long, default_value_t = false)]
+        disable_p2p_tcp: bool,
+
+        /// Disable WebSocket P2P transport, including ws/wss bootnodes and WebSocket listener
+        #[arg(long, default_value_t = false)]
+        disable_p2p_ws: bool,
+
+        /// Optional P2P WebSocket listen address for Cloudflare/CDN proxying
+        #[arg(long)]
+        p2p_ws_listen_addr: Option<String>,
+
+        /// Optional P2P WebSocket listen port; when omitted, WebSocket listener is disabled
+        #[arg(long)]
+        p2p_ws_listen_port: Option<u16>,
+
+        /// Optional public WebSocket bootnode URL to print in logs, e.g. wss://boot.example.org/p2p
+        #[arg(long)]
+        p2p_ws_external_url: Option<String>,
+
+        /// Bootnode endpoint, repeatable: enode://... for TCP or ws(s)://... for WebSocket
         #[arg(long = "bootnode")]
         bootnodes: Vec<String>,
 
@@ -391,6 +411,11 @@ async fn main() -> Result<()> {
             mining_work_target_leading_zero_bytes,
             p2p_listen_addr,
             p2p_listen_port,
+            disable_p2p_tcp,
+            disable_p2p_ws,
+            p2p_ws_listen_addr,
+            p2p_ws_listen_port,
+            p2p_ws_external_url,
             bootnodes,
             max_peers,
             disable_discovery,
@@ -444,6 +469,9 @@ async fn main() -> Result<()> {
                 ..api_config.http_rpc
             };
             api_config.ws.port = ws_port;
+            let enable_p2p_tcp = !disable_p2p_tcp;
+            let enable_p2p_ws = !disable_p2p_ws;
+            let enable_discovery = !disable_discovery && enable_p2p_tcp;
 
             println!("🌐 Network profile: {}", profile.as_str());
             println!("   chain_id: {}", api_config.http_rpc.chain_id);
@@ -465,7 +493,32 @@ async fn main() -> Result<()> {
                 "   rpc rate limit: {} req/min",
                 api_config.http_rpc.rate_limit_per_minute
             );
-            println!("   p2p: {}:{}", p2p_listen_addr, p2p_listen_port);
+            if enable_p2p_tcp {
+                println!("   p2p tcp: {}:{}", p2p_listen_addr, p2p_listen_port);
+            } else {
+                println!("   p2p tcp: disabled");
+            }
+            if enable_p2p_ws {
+                println!("   p2p websocket transport: enabled");
+            } else {
+                println!("   p2p websocket transport: disabled");
+            }
+            if enable_p2p_ws && p2p_ws_listen_port.is_some() {
+                let port = p2p_ws_listen_port.unwrap_or_default();
+                println!(
+                    "   p2p websocket: {}:{}",
+                    p2p_ws_listen_addr.as_deref().unwrap_or("127.0.0.1"),
+                    port
+                );
+            }
+            if enable_p2p_ws {
+                if let Some(url) = &p2p_ws_external_url {
+                    println!("   p2p websocket external: {}", url);
+                }
+            }
+            if !enable_p2p_tcp && !disable_discovery {
+                println!("   discovery: disabled (requires direct TCP P2P)");
+            }
             if !bootnodes.is_empty() {
                 println!("   bootnodes: {}", bootnodes.join(", "));
             }
@@ -480,9 +533,14 @@ async fn main() -> Result<()> {
                 rpc_config: Some(api_config.http_rpc.clone()),
                 p2p_listen_addr,
                 p2p_listen_port,
+                p2p_tcp_enabled: enable_p2p_tcp,
+                p2p_ws_enabled: enable_p2p_ws,
+                p2p_ws_listen_addr,
+                p2p_ws_listen_port,
+                p2p_ws_external_url,
                 bootnodes,
                 max_peers,
-                enable_discovery: !disable_discovery,
+                enable_discovery,
                 enable_sync: !disable_sync,
                 p2p_banlist_path,
                 p2p_ban_duration_secs,

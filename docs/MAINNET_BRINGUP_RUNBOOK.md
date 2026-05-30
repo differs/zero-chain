@@ -123,7 +123,8 @@ scripts/mainnet.sh start observer \
 
 说明：
 
-- observer 的 `--bootnode` 口径与 follower 相同，使用 `enode://peer@ip:port`
+- observer 的 `--bootnode` 口径与 follower 相同，可使用 `enode://peer@ip:port` 或 `wss://...`
+- 如果 bootnode 要放在 Cloudflare CDN 后面，可使用 `wss://...` WebSocket P2P bootnode，并关闭 discovery；见 [P2P_WEBSOCKET_CDN.md](P2P_WEBSOCKET_CDN.md)。
 
 ### 步骤 5：启动矿池与矿工
 
