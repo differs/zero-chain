@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 zerocore.workspace = true
 zeronet.workspace = true
+zerostore.workspace = true
 zeroapi.workspace = true
 
 tokio.workspace = true

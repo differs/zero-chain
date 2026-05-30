@@ -25,6 +25,17 @@ pub trait KeyValueDB: Send + Sync {
     fn batch(&self) -> Batch;
     /// Iterate over prefix
     fn iter_prefix(&self, prefix: &[u8]) -> Result<PrefixIterator<'_>>;
+    /// Visit every item under a prefix without requiring callers to materialize all entries.
+    fn for_each_prefix(
+        &self,
+        prefix: &[u8],
+        visitor: &mut dyn FnMut(&[u8], &[u8]) -> Result<()>,
+    ) -> Result<()> {
+        for (key, value) in self.iter_prefix(prefix)? {
+            visitor(&key, &value)?;
+        }
+        Ok(())
+    }
 }
 
 /// Batch write operation
@@ -79,8 +90,8 @@ impl RocksDb {
         opts.set_max_write_buffer_number(4);
         opts.set_target_file_size_base(128 * 1024 * 1024); // 128MB
 
-        // Compression
-        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        // Favor disk footprint for production node state. Hot values are already compact binary.
+        opts.set_compression_type(rocksdb::DBCompressionType::Zstd);
 
         // Bloom filter
         let mut block_opts = rocksdb::BlockBasedOptions::default();
@@ -155,10 +166,28 @@ impl KeyValueDB for RocksDb {
 
         for item in iter {
             let (k, v) = item.map_err(|e| StorageError::Database(e.to_string()))?;
+            if !k.starts_with(prefix) {
+                break;
+            }
             items.push((k.to_vec(), v.to_vec()));
         }
 
         Ok(Box::new(items.into_iter()))
+    }
+
+    fn for_each_prefix(
+        &self,
+        prefix: &[u8],
+        visitor: &mut dyn FnMut(&[u8], &[u8]) -> Result<()>,
+    ) -> Result<()> {
+        for item in self.db.prefix_iterator(prefix) {
+            let (key, value) = item.map_err(|e| StorageError::Database(e.to_string()))?;
+            if !key.starts_with(prefix) {
+                break;
+            }
+            visitor(&key, &value)?;
+        }
+        Ok(())
     }
 }
 
@@ -291,6 +320,30 @@ impl KeyValueDB for RedbDatabase {
             }
         }
         Ok(Box::new(items.into_iter()))
+    }
+
+    fn for_each_prefix(
+        &self,
+        prefix: &[u8],
+        visitor: &mut dyn FnMut(&[u8], &[u8]) -> Result<()>,
+    ) -> Result<()> {
+        let tx = self
+            .db
+            .begin_read()
+            .map_err(|e| StorageError::Database(e.to_string()))?;
+        let table = tx
+            .open_table(REDB_KV_TABLE)
+            .map_err(|e| StorageError::Database(e.to_string()))?;
+        let mut iter = table
+            .iter()
+            .map_err(|e| StorageError::Database(e.to_string()))?;
+        for entry in iter {
+            let (key, value) = entry.map_err(|e| StorageError::Database(e.to_string()))?;
+            if key.value().starts_with(prefix) {
+                visitor(key.value(), value.value())?;
+            }
+        }
+        Ok(())
     }
 }
 

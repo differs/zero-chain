@@ -13,6 +13,24 @@ use crate::{db::KeyValueDB, Result, StorageError};
 const OUTPUT_PREFIX: &[u8] = b"compute:output:";
 const LATEST_PREFIX: &[u8] = b"compute:latest:";
 const TX_RESULT_PREFIX: &[u8] = b"compute:txresult:";
+const OUTPUT_BINARY_MAGIC: &[u8; 4] = b"ZCO1";
+
+/// Statistics returned by compute store rebuilds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ComputeRebuildStats {
+    /// Total key-value entries visited from the source database.
+    pub total_entries: u64,
+    /// Entries under the compute output namespace.
+    pub output_entries: u64,
+    /// Legacy JSON output entries decoded and rewritten to binary.
+    pub legacy_json_outputs: u64,
+    /// Already-binary output entries encountered.
+    pub binary_outputs: u64,
+    /// Non-output entries copied without codec changes.
+    pub copied_entries: u64,
+    /// Entries whose value changed in the rebuilt target database.
+    pub rewritten_entries: u64,
+}
 
 /// Durable backend for compute object outputs and tx results.
 pub struct ComputeStore {
@@ -45,7 +63,7 @@ impl ObjectStore for ComputeStore {
     fn get_output(&self, output_id: OutputId) -> Option<ObjectOutput> {
         let key = output_key(output_id);
         let bytes = self.db.get(&key).ok().flatten()?;
-        serde_json::from_slice::<ObjectOutput>(&bytes).ok()
+        decode_output(&bytes).ok()
     }
 
     fn get_latest_output_by_object(&self, object_id: ObjectId) -> Option<ObjectOutput> {
@@ -70,7 +88,7 @@ impl ObjectStore for ComputeStore {
             return Err(zerocore::compute::ComputeError::DuplicateOutputId);
         }
 
-        let serialized = serde_json::to_vec(&output)
+        let serialized = encode_output(&output)
             .map_err(|e| zerocore::compute::ComputeError::InvalidOperation(e.to_string()))?;
 
         self.db
@@ -94,13 +112,53 @@ impl ObjectStore for ComputeStore {
             ));
         }
         output.spent = true;
-        let serialized = serde_json::to_vec(&output)
+        let serialized = encode_output(&output)
             .map_err(|e| zerocore::compute::ComputeError::InvalidOperation(e.to_string()))?;
         self.db
             .put(&output_key(output_id), &serialized)
             .map_err(|e| zerocore::compute::ComputeError::InvalidOperation(e.to_string()))?;
         Ok(())
     }
+}
+
+/// Rebuilds a compute key-value database into the current on-disk format.
+///
+/// The target database must be distinct from the source database. Output values are decoded through
+/// the backward-compatible reader and encoded with the current binary codec; all other entries are
+/// copied byte-for-byte.
+pub fn rebuild_compute_store(
+    source: &dyn KeyValueDB,
+    target: &dyn KeyValueDB,
+) -> Result<ComputeRebuildStats> {
+    let mut stats = ComputeRebuildStats::default();
+
+    source.for_each_prefix(b"", &mut |key, value| {
+        stats.total_entries += 1;
+
+        if key.starts_with(OUTPUT_PREFIX) {
+            stats.output_entries += 1;
+            let was_binary = value.starts_with(OUTPUT_BINARY_MAGIC);
+            if was_binary {
+                stats.binary_outputs += 1;
+            } else {
+                stats.legacy_json_outputs += 1;
+            }
+
+            let output = decode_output(value)?;
+            let encoded = encode_output(&output)?;
+            if encoded != value {
+                stats.rewritten_entries += 1;
+            }
+            target.put(key, &encoded)?;
+        } else {
+            stats.copied_entries += 1;
+            target.put(key, value)?;
+        }
+
+        Ok(())
+    })?;
+
+    Ok(stats)
 }
 
 fn output_key(output_id: OutputId) -> Vec<u8> {
@@ -121,6 +179,25 @@ fn tx_result_key(tx_id: TxId) -> Vec<u8> {
     key
 }
 
+fn encode_output(output: &ObjectOutput) -> Result<Vec<u8>> {
+    let encoded = bincode::serialize(output)
+        .map_err(|e| StorageError::Serialization(format!("encode output failed: {e}")))?;
+    let mut value = Vec::with_capacity(OUTPUT_BINARY_MAGIC.len() + encoded.len());
+    value.extend_from_slice(OUTPUT_BINARY_MAGIC);
+    value.extend_from_slice(&encoded);
+    Ok(value)
+}
+
+fn decode_output(bytes: &[u8]) -> Result<ObjectOutput> {
+    if let Some(payload) = bytes.strip_prefix(OUTPUT_BINARY_MAGIC) {
+        return bincode::deserialize::<ObjectOutput>(payload)
+            .map_err(|e| StorageError::Serialization(format!("decode binary output failed: {e}")));
+    }
+
+    serde_json::from_slice::<ObjectOutput>(bytes)
+        .map_err(|e| StorageError::Serialization(format!("decode legacy json output failed: {e}")))
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -132,16 +209,15 @@ mod tests {
     };
     use zerocore::crypto::Hash;
 
-    use crate::db::MemDatabase;
+    use crate::db::{KeyValueDB, MemDatabase};
 
-    use super::ComputeStore;
+    use super::{
+        decode_output, encode_output, latest_key, output_key, rebuild_compute_store, tx_result_key,
+        ComputeStore, OUTPUT_BINARY_MAGIC,
+    };
 
-    #[test]
-    fn compute_store_roundtrip() {
-        let db = Arc::new(MemDatabase::new());
-        let store = ComputeStore::new(db);
-
-        let output = zerocore::compute::ObjectOutput {
+    fn sample_output() -> zerocore::compute::ObjectOutput {
+        zerocore::compute::ObjectOutput {
             output_id: OutputId(Hash::from_bytes([1; 32])),
             object_id: ObjectId(Hash::from_bytes([2; 32])),
             version: Version(1),
@@ -160,11 +236,21 @@ mod tests {
             flags: 0,
             extensions: vec![],
             spent: false,
-        };
+        }
+    }
+
+    #[test]
+    fn compute_store_roundtrip() {
+        let db = Arc::new(MemDatabase::new());
+        let store = ComputeStore::new(db.clone());
+
+        let output = sample_output();
 
         store.insert_output(output.clone()).unwrap();
         let got = store.get_output(output.output_id).unwrap();
         assert_eq!(got.object_id, output.object_id);
+        let raw = db.get(&output_key(output.output_id)).unwrap().unwrap();
+        assert!(raw.starts_with(OUTPUT_BINARY_MAGIC));
 
         let latest = store.get_latest_output_by_object(output.object_id).unwrap();
         assert_eq!(latest.output_id, output.output_id);
@@ -177,6 +263,64 @@ mod tests {
         assert_eq!(
             store.get_tx_result(tx_id).unwrap(),
             Some("{\"ok\":true}".to_string())
+        );
+    }
+
+    #[test]
+    fn compute_store_reads_legacy_json_output() {
+        let db = Arc::new(MemDatabase::new());
+        let store = ComputeStore::new(db.clone());
+        let output = sample_output();
+        let legacy = serde_json::to_vec(&output).unwrap();
+
+        db.put(&output_key(output.output_id), &legacy).unwrap();
+
+        let got = store.get_output(output.output_id).unwrap();
+        assert_eq!(got, output);
+    }
+
+    #[test]
+    fn output_binary_codec_roundtrip() {
+        let output = sample_output();
+        let encoded = encode_output(&output).unwrap();
+        assert!(encoded.starts_with(OUTPUT_BINARY_MAGIC));
+        assert_eq!(decode_output(&encoded).unwrap(), output);
+    }
+
+    #[test]
+    fn rebuild_compute_store_rewrites_legacy_outputs_and_copies_other_entries() {
+        let source = MemDatabase::new();
+        let target = MemDatabase::new();
+        let output = sample_output();
+        let legacy = serde_json::to_vec(&output).unwrap();
+        let tx_id = TxId(Hash::from_bytes([4; 32]));
+
+        source.put(&output_key(output.output_id), &legacy).unwrap();
+        source
+            .put(&latest_key(output.object_id), output.output_id.0.as_bytes())
+            .unwrap();
+        source
+            .put(&tx_result_key(tx_id), br#"{"ok":true}"#)
+            .unwrap();
+
+        let stats = rebuild_compute_store(&source, &target).unwrap();
+        assert_eq!(stats.total_entries, 3);
+        assert_eq!(stats.output_entries, 1);
+        assert_eq!(stats.legacy_json_outputs, 1);
+        assert_eq!(stats.binary_outputs, 0);
+        assert_eq!(stats.copied_entries, 2);
+        assert_eq!(stats.rewritten_entries, 1);
+
+        let raw_output = target.get(&output_key(output.output_id)).unwrap().unwrap();
+        assert!(raw_output.starts_with(OUTPUT_BINARY_MAGIC));
+        assert_eq!(decode_output(&raw_output).unwrap(), output);
+        assert_eq!(
+            target.get(&latest_key(output.object_id)).unwrap(),
+            Some(output.output_id.0.as_bytes().to_vec())
+        );
+        assert_eq!(
+            target.get(&tx_result_key(tx_id)).unwrap(),
+            Some(br#"{"ok":true}"#.to_vec())
         );
     }
 }

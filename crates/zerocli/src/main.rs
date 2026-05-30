@@ -203,6 +203,12 @@ enum Commands {
         action: BlockAction,
     },
 
+    /// Storage maintenance commands
+    Storage {
+        #[command(subcommand)]
+        action: StorageAction,
+    },
+
     /// Console placeholder (not implemented)
     Console,
 
@@ -351,6 +357,22 @@ enum BlockAction {
         /// Block height in decimal
         #[arg(short, long)]
         number: u64,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum StorageAction {
+    /// Rebuild compute DB into the current codec and backend compression format
+    RebuildComputeDb {
+        /// Compute persistent backend override: rocksdb|redb
+        #[arg(long)]
+        compute_backend: Option<String>,
+        /// Compute database path override
+        #[arg(long)]
+        compute_db_path: Option<String>,
+        /// Remove the old database backup after a successful rebuild
+        #[arg(long, default_value_t = false)]
+        discard_backup: bool,
     },
 }
 
@@ -584,6 +606,32 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Block { action }) => {
             commands::block::handle_block(action, &rpc_url, rpc_token.as_deref()).await?;
+        }
+        Some(Commands::Storage { action }) => {
+            let node_data_dir = resolve_node_data_dir(data_dir.as_deref(), profile);
+            let api_config = if let Some(path) = &config {
+                let mut cfg = commands::init::load_api_config(path)?;
+                profile.apply_defaults(&mut cfg, &node_data_dir);
+                cfg
+            } else {
+                profile.default_api_config(&node_data_dir)
+            };
+
+            match action {
+                StorageAction::RebuildComputeDb {
+                    compute_backend,
+                    compute_db_path,
+                    discard_backup,
+                } => {
+                    let backend = match compute_backend {
+                        Some(value) => parse_compute_backend(&value)?,
+                        None => api_config.http_rpc.compute_backend,
+                    };
+                    let path = compute_db_path
+                        .unwrap_or_else(|| api_config.http_rpc.compute_db_path.clone());
+                    commands::storage::rebuild_compute_db(backend, &path, discard_backup)?;
+                }
+            }
         }
         Some(Commands::Console) => {
             commands::console::start_console().await?;
