@@ -73,6 +73,10 @@ enum Commands {
         #[arg(long)]
         coinbase: Option<String>,
 
+        /// File containing one mining coinbase address per line
+        #[arg(long)]
+        coinbase_file: Option<String>,
+
         /// HTTP RPC port override (default follows --network)
         #[arg(long)]
         http_port: Option<u16>,
@@ -247,6 +251,24 @@ enum WalletAction {
         /// Passphrase for encrypting private key; prompts securely if omitted
         #[arg(long)]
         passphrase: Option<String>,
+    },
+    /// Create many wallet accounts in one operation
+    BatchNew {
+        /// Wallet account name prefix, resulting names look like `<prefix>-1`
+        #[arg(long, default_value = "miner")]
+        name_prefix: String,
+        /// Number of wallet accounts to create
+        #[arg(long)]
+        count: usize,
+        /// Signature scheme: ed25519
+        #[arg(long, default_value = "ed25519")]
+        scheme: String,
+        /// Passphrase for encrypting private keys; prompts securely if omitted
+        #[arg(long)]
+        passphrase: Option<String>,
+        /// Optional output path for writing newly created addresses, one per line
+        #[arg(long)]
+        addresses_out: Option<String>,
     },
     /// List wallet accounts
     List,
@@ -475,6 +497,7 @@ async fn main() -> Result<()> {
             mine,
             disable_local_miner,
             coinbase,
+            coinbase_file,
             http_port,
             ws_port,
             compute_backend,
@@ -529,8 +552,13 @@ async fn main() -> Result<()> {
                 None => api_config.http_rpc.chain_id,
             };
             let network_id = network_id.unwrap_or(api_config.http_rpc.network_id);
+            let coinbase_addresses = match coinbase_file.as_deref() {
+                Some(path) => read_coinbase_file(path)?,
+                None => api_config.http_rpc.coinbase_addresses.clone(),
+            };
             let rpc_coinbase = rpc_coinbase
                 .or_else(|| coinbase.clone())
+                .or_else(|| coinbase_addresses.first().cloned())
                 .unwrap_or_else(|| api_config.http_rpc.coinbase.clone());
 
             api_config.http_rpc = RpcConfig {
@@ -541,6 +569,7 @@ async fn main() -> Result<()> {
                 chain_id,
                 network_id,
                 coinbase: rpc_coinbase,
+                coinbase_addresses,
                 mining_enabled: mine,
                 auth_token: rpc_auth_token,
                 rate_limit_per_minute: rpc_rate_limit_per_minute,
@@ -556,6 +585,12 @@ async fn main() -> Result<()> {
             println!("   chain_id: {}", api_config.http_rpc.chain_id);
             println!("   network_id: {}", api_config.http_rpc.network_id);
             println!("   coinbase: {}", api_config.http_rpc.coinbase);
+            if !api_config.http_rpc.coinbase_addresses.is_empty() {
+                println!(
+                    "   mining coinbase rotation: {} addresses",
+                    api_config.http_rpc.coinbase_addresses.len()
+                );
+            }
             println!(
                 "   rpc: {}:{}",
                 api_config.http_rpc.address, api_config.http_rpc.port
@@ -615,6 +650,7 @@ async fn main() -> Result<()> {
                 mine,
                 disable_local_miner,
                 coinbase,
+                coinbase_count: api_config.http_rpc.coinbase_addresses.len(),
                 http_port,
                 ws_port,
                 data_dir: data_dir.clone(),
@@ -815,6 +851,19 @@ fn map_wallet_action(action: WalletAction) -> Result<WalletCommand> {
             scheme: parse_wallet_scheme(&scheme)?,
             passphrase,
         },
+        WalletAction::BatchNew {
+            name_prefix,
+            count,
+            scheme,
+            passphrase,
+            addresses_out,
+        } => WalletCommand::BatchNew {
+            name_prefix,
+            count,
+            scheme: parse_wallet_scheme(&scheme)?,
+            passphrase,
+            addresses_out,
+        },
         WalletAction::List => WalletCommand::List,
         WalletAction::Show { name } => WalletCommand::Show { name },
         WalletAction::Sign {
@@ -964,4 +1013,20 @@ fn parse_u64_decimal_or_hex(value: &str) -> Result<u64> {
         v.parse::<u64>()
             .map_err(|e| anyhow::anyhow!("invalid integer '{value}': {e}"))
     }
+}
+
+fn read_coinbase_file(path: &str) -> Result<Vec<String>> {
+    let path = expand_data_dir(path);
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| anyhow::anyhow!("failed to read coinbase file {}: {}", path, e))?;
+    let addresses: Vec<String> = content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(ToOwned::to_owned)
+        .collect();
+    if addresses.is_empty() {
+        anyhow::bail!("coinbase file {} contains no usable addresses", path);
+    }
+    Ok(addresses)
 }

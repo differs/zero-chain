@@ -21,6 +21,7 @@ pub struct RunNodeConfig {
     pub mine: bool,
     pub disable_local_miner: bool,
     pub coinbase: Option<String>,
+    pub coinbase_count: usize,
     pub http_port: u16,
     pub ws_port: u16,
     pub data_dir: String,
@@ -52,6 +53,7 @@ pub async fn run_node(cfg: RunNodeConfig) -> Result<()> {
         mine,
         disable_local_miner,
         coinbase,
+        coinbase_count,
         http_port,
         ws_port,
         data_dir,
@@ -151,6 +153,12 @@ pub async fn run_node(cfg: RunNodeConfig) -> Result<()> {
             .clone()
             .unwrap_or_else(|| "ZER0x0000000000000000000000000000000000000000".to_string());
         println!("   🎯 Mining worker coinbase: {}", display_coinbase);
+        if coinbase_count > 0 {
+            println!(
+                "   🎯 Mining worker coinbase rotation: {} addresses",
+                coinbase_count
+            );
+        }
         println!(
             "   Local mining worker: {}",
             if disable_local_miner {

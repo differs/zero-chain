@@ -29,6 +29,13 @@ pub enum WalletCommand {
         scheme: WalletScheme,
         passphrase: Option<String>,
     },
+    BatchNew {
+        name_prefix: String,
+        count: usize,
+        scheme: WalletScheme,
+        passphrase: Option<String>,
+        addresses_out: Option<String>,
+    },
     List,
     Show {
         name: String,
@@ -175,6 +182,66 @@ pub async fn handle_wallet(data_dir: &str, cmd: WalletCommand) -> Result<()> {
             wallet.accounts.push(account);
             save_wallet_file(&path, &wallet)?;
             println!("✅ wallet saved: {}", path.display());
+        }
+        WalletCommand::BatchNew {
+            name_prefix,
+            count,
+            scheme,
+            passphrase,
+            addresses_out,
+        } => {
+            if count == 0 {
+                anyhow::bail!("count must be greater than 0");
+            }
+            let passphrase = resolve_new_passphrase(passphrase, "Wallet passphrase")?;
+            let mut existing_names: std::collections::HashSet<String> =
+                wallet.accounts.iter().map(|a| a.name.clone()).collect();
+            let mut next_suffix = 1usize;
+            let mut new_accounts = Vec::with_capacity(count);
+
+            while new_accounts.len() < count {
+                let candidate = format!("{name_prefix}-{next_suffix}");
+                next_suffix = next_suffix.saturating_add(1);
+                if !existing_names.insert(candidate.clone()) {
+                    continue;
+                }
+
+                let account = match scheme {
+                    WalletScheme::Ed25519 => new_ed25519_account(candidate, &passphrase)?,
+                };
+                new_accounts.push(account);
+            }
+
+            if wallet.default.is_none() {
+                wallet.default = new_accounts.first().map(|a| a.name.clone());
+            }
+            let new_addresses: Vec<String> = new_accounts
+                .iter()
+                .filter_map(|account| account.address.clone())
+                .collect();
+            wallet.accounts.extend(new_accounts);
+            save_wallet_file(&path, &wallet)?;
+
+            if let Some(addresses_out) = addresses_out {
+                let addresses_path = PathBuf::from(addresses_out);
+                let mut content = new_addresses.join("\n");
+                content.push('\n');
+                write_secret_file(&addresses_path, content.as_bytes()).map_err(|e| {
+                    anyhow::anyhow!(
+                        "failed to write addresses file {}: {}",
+                        addresses_path.display(),
+                        e
+                    )
+                })?;
+                println!("✅ address list saved: {}", addresses_path.display());
+            }
+
+            println!(
+                "✅ created {} wallet accounts with prefix '{}' in {}",
+                count,
+                name_prefix,
+                path.display()
+            );
         }
         WalletCommand::List => {
             if wallet.accounts.is_empty() {
@@ -755,6 +822,7 @@ fn wallet_command_mutates_wallet_file(cmd: &WalletCommand) -> bool {
     matches!(
         cmd,
         WalletCommand::New { .. }
+            | WalletCommand::BatchNew { .. }
             | WalletCommand::Delete { .. }
             | WalletCommand::RotatePassphrase { .. }
             | WalletCommand::MigrateV1 { .. }
@@ -1070,6 +1138,37 @@ mod tests {
         assert!(err.to_string().contains("wallet account already exists"));
         let after = fs::read_to_string(&path).expect("read after duplicate");
         assert_eq!(before, after);
+    }
+
+    #[tokio::test]
+    async fn wallet_batch_new_writes_addresses_file() {
+        let temp = TempDir::new().expect("create tempdir");
+        let data_dir = temp.path().to_string_lossy().to_string();
+        let addresses_path = temp.path().join("coinbases.txt");
+
+        handle_wallet(
+            &data_dir,
+            WalletCommand::BatchNew {
+                name_prefix: "miner".to_string(),
+                count: 3,
+                scheme: WalletScheme::Ed25519,
+                passphrase: Some("StrongPassphrase123!".to_string()),
+                addresses_out: Some(addresses_path.to_string_lossy().to_string()),
+            },
+        )
+        .await
+        .expect("batch create accounts");
+
+        let wallet = load_wallet_file(&wallet_file_path(&data_dir)).expect("load wallet");
+        assert_eq!(wallet.accounts.len(), 3);
+        assert!(wallet.accounts.iter().any(|a| a.name == "miner-1"));
+        assert!(wallet.accounts.iter().any(|a| a.name == "miner-2"));
+        assert!(wallet.accounts.iter().any(|a| a.name == "miner-3"));
+
+        let addresses = fs::read_to_string(&addresses_path).expect("read addresses");
+        let lines: Vec<_> = addresses.lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert!(lines.iter().all(|line| line.starts_with("ZER0x")));
     }
 
     #[test]

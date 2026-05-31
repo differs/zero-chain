@@ -12,6 +12,7 @@ use prometheus::{Encoder, IntCounterVec, IntGauge, Registry, TextEncoder};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::oneshot;
 use tower_http::cors::{Any, CorsLayer};
@@ -162,6 +163,10 @@ pub struct RpcConfig {
     pub network_id: u64,
     /// Mining reward address.
     pub coinbase: String,
+    /// Optional rotation set of mining reward addresses. When populated, each
+    /// work template is bound to one address from this set in round-robin order.
+    #[serde(default)]
+    pub coinbase_addresses: Vec<String>,
     /// Whether mining RPC methods are enabled (`zero_getWork` / `zero_submitWork`).
     pub mining_enabled: bool,
     /// Optional legacy override for the mining work target as whole leading-zero bytes.
@@ -209,6 +214,7 @@ impl Default for RpcConfig {
             chain_id: 10086,
             network_id: 10086,
             coinbase: "ZER0x0000000000000000000000000000000000000000".to_string(),
+            coinbase_addresses: Vec::new(),
             mining_enabled: false,
             mining_work_target_leading_zero_bytes: None,
             auth_token: None,
@@ -228,6 +234,14 @@ impl RpcConfig {
         }
         if parse_address(&self.coinbase).is_err() {
             return Err("coinbase must be a valid 20-byte address with ZER0x prefix".to_string());
+        }
+        for address in &self.coinbase_addresses {
+            if parse_address(address).is_err() {
+                return Err(format!(
+                    "coinbase_addresses contains invalid address: {}",
+                    address
+                ));
+            }
         }
         if let Some(target) = self.mining_work_target_leading_zero_bytes {
             if target > 32 {
@@ -352,6 +366,7 @@ pub struct RpcApi {
     mining_seen_submissions: RwLock<HashSet<SeenShareKey>>,
     mining_seen_submission_order: RwLock<VecDeque<SeenShareKey>>,
     hashrate_counter: RwLock<u64>,
+    next_coinbase_index: AtomicUsize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -362,6 +377,7 @@ struct MiningWork {
     target: U256,
     difficulty: U256,
     created_at_secs: u64,
+    coinbase: Address,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -416,6 +432,7 @@ impl RpcApi {
             mining_seen_submissions: RwLock::new(HashSet::new()),
             mining_seen_submission_order: RwLock::new(VecDeque::new()),
             hashrate_counter: RwLock::new(0),
+            next_coinbase_index: AtomicUsize::new(0),
         }
     }
 
@@ -441,6 +458,7 @@ impl RpcApi {
             mining_seen_submissions: RwLock::new(HashSet::new()),
             mining_seen_submission_order: RwLock::new(VecDeque::new()),
             hashrate_counter: RwLock::new(0),
+            next_coinbase_index: AtomicUsize::new(0),
         }
     }
 
@@ -466,6 +484,7 @@ impl RpcApi {
             mining_seen_submissions: RwLock::new(HashSet::new()),
             mining_seen_submission_order: RwLock::new(VecDeque::new()),
             hashrate_counter: RwLock::new(0),
+            next_coinbase_index: AtomicUsize::new(0),
         }
     }
 
@@ -1163,6 +1182,7 @@ impl RpcApi {
         );
         let prev_hash = latest.header.hash;
         let height = latest.header.number.as_u64().saturating_add(1);
+        let coinbase = self.select_coinbase_for_work()?;
 
         let work_id = format!("work-{}-{}", height, now);
         let work = MiningWork {
@@ -1172,6 +1192,7 @@ impl RpcApi {
             target,
             difficulty: latest.header.difficulty,
             created_at_secs: now,
+            coinbase,
         };
         {
             let mut jobs = self.mining_jobs.write();
@@ -1209,10 +1230,7 @@ impl RpcApi {
             "difficulty": format!("0x{:x}", work.difficulty.as_u128()),
             "target": pow_target_to_hex(work.target),
             "target_leading_zero_bytes": leading_zero_bytes_for_target(work.target),
-            "coinbase": format_zero_address(
-                parse_address(&self.config.coinbase)
-                    .map_err(|e| RpcErrorObject::internal_error(format!("invalid coinbase: {e}")))?,
-            ),
+            "coinbase": format_zero_address(work.coinbase),
         }))
     }
 
@@ -1368,8 +1386,7 @@ impl RpcApi {
             version: POW_TARGET_HEADER_VERSION,
             parent_hash,
             uncle_hashes: Vec::new(),
-            coinbase: parse_address(&self.config.coinbase)
-                .map_err(|e| RpcErrorObject::internal_error(format!("invalid coinbase: {e}")))?,
+            coinbase: work.coinbase,
             state_root: Hash::zero(),
             transactions_root: Hash::zero(),
             receipts_root: Hash::zero(),
@@ -1405,6 +1422,24 @@ impl RpcApi {
             "block_hash": format!("0x{}", hex::encode(header.hash.as_bytes())),
             "height": header.number.as_u64(),
         }))
+    }
+
+    fn configured_coinbases(&self) -> Result<Vec<Address>, RpcErrorObject> {
+        if self.config.coinbase_addresses.is_empty() {
+            return Ok(vec![parse_address(&self.config.coinbase)?]);
+        }
+
+        self.config
+            .coinbase_addresses
+            .iter()
+            .map(|address| parse_address(address))
+            .collect()
+    }
+
+    fn select_coinbase_for_work(&self) -> Result<Address, RpcErrorObject> {
+        let coinbases = self.configured_coinbases()?;
+        let idx = self.next_coinbase_index.fetch_add(1, Ordering::Relaxed) % coinbases.len();
+        Ok(coinbases[idx])
     }
 
     fn zero_get_metrics(
@@ -3529,6 +3564,28 @@ mod tests {
     }
 
     #[test]
+    fn test_zero_get_work_rotates_configured_coinbases() {
+        let mut api = build_test_api_with_persistent_compute();
+        api.config.coinbase = "ZER0x1111111111111111111111111111111111111111".to_string();
+        api.config.coinbase_addresses = vec![
+            "ZER0x2222222222222222222222222222222222222222".to_string(),
+            "ZER0x3333333333333333333333333333333333333333".to_string(),
+        ];
+
+        let first = get_work(&api);
+        let second = get_work(&api);
+
+        assert_eq!(
+            first.get("coinbase").and_then(|v| v.as_str()),
+            Some("ZER0x2222222222222222222222222222222222222222")
+        );
+        assert_eq!(
+            second.get("coinbase").and_then(|v| v.as_str()),
+            Some("ZER0x3333333333333333333333333333333333333333")
+        );
+    }
+
+    #[test]
     fn test_zero_get_work_uses_higher_p2p_synced_head() {
         let api = build_test_api_with_persistent_compute();
         install_easy_pow_head_if_needed(&api);
@@ -3636,6 +3693,54 @@ mod tests {
         let expected = format!("0x{:x}", zerocore::INITIAL_BLOCK_REWARD);
 
         assert_eq!(balance, expected);
+    }
+
+    #[test]
+    fn test_zero_submit_work_uses_bound_work_coinbase() {
+        let mut api = build_test_api_with_persistent_compute();
+        install_easy_pow_head_if_needed(&api);
+        api.config.coinbase = "ZER0x1111111111111111111111111111111111111111".to_string();
+        api.config.coinbase_addresses =
+            vec!["ZER0x2222222222222222222222222222222222222222".to_string()];
+
+        let work = get_work(&api);
+        assert_eq!(
+            work.get("coinbase").and_then(|v| v.as_str()),
+            Some("ZER0x2222222222222222222222222222222222222222")
+        );
+        let work_id = work
+            .get("work_id")
+            .and_then(|v| v.as_str())
+            .expect("work_id missing")
+            .to_string();
+        let prev_hash = work
+            .get("prev_hash")
+            .and_then(|v| v.as_str())
+            .expect("prev_hash missing")
+            .to_string();
+        let height = work
+            .get("height")
+            .and_then(|v| v.as_u64())
+            .expect("height missing");
+        let target = work_target(&work);
+        let prev_hash_bytes =
+            hex::decode(prev_hash.strip_prefix("0x").unwrap_or(&prev_hash)).expect("prev hash hex");
+        let (nonce, digest) = solve_work_digest(&prev_hash_bytes, height, 321, target);
+        let submit = api
+            .zero_submit_work(Some(vec![serde_json::json!({
+                "work_id": work_id,
+                "nonce": nonce,
+                "hash_hex": format!("0x{}", hex::encode(digest)),
+                "miner": "bound-coinbase-test"
+            })]))
+            .expect("submit should succeed");
+        assert_eq!(submit.get("accepted").and_then(|v| v.as_bool()), Some(true));
+
+        let latest = api.zero_get_latest_block(None).expect("latest block");
+        assert_eq!(
+            latest.get("coinbase").and_then(|v| v.as_str()),
+            Some("ZER0x2222222222222222222222222222222222222222")
+        );
     }
 
     #[test]
