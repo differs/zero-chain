@@ -45,6 +45,8 @@ const MAX_MINER_EXTRA_DATA_BYTES: usize = 64;
 const MAX_SEEN_MINING_SUBMISSIONS: usize = 16_384;
 const MAX_BLOCK_HISTORY: usize = 50_000;
 const MAX_SUBMITTED_COMPUTE_RESULTS: usize = 50_000;
+const MAX_GET_WORK_WAIT_SECS: u64 = 15;
+const GET_WORK_WAIT_POLL_MILLIS: u64 = 100;
 const TARGET_BLOCK_INTERVAL_SECS: u64 = 10;
 const MIN_MINING_DIFFICULTY: u128 = 250_000;
 const BASE_MINING_DIFFICULTY: u128 = 1_000_000;
@@ -377,6 +379,18 @@ struct SubmitWorkRequest {
     miner: Option<String>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize)]
+struct GetWorkRequest {
+    #[serde(default)]
+    known_prev_hash: Option<String>,
+    #[serde(default)]
+    known_height: Option<u64>,
+    #[serde(default)]
+    wait: bool,
+    #[serde(default)]
+    timeout_secs: Option<u64>,
+}
+
 impl RpcApi {
     pub fn new(config: RpcConfig, state_db: Arc<StateDb>) -> Self {
         let domain_registry = Arc::new(InMemoryDomainRegistry::new());
@@ -525,7 +539,7 @@ impl RpcApi {
             "zero_getOperationByHash" => self.zero_get_operation_by_hash(params),
             "zero_listOperations" => self.zero_list_operations(params),
             "zero_getOperationsByAddress" => self.zero_get_operations_by_address(params),
-            "zero_getWork" => self.zero_get_work(params),
+            "zero_getWork" => self.zero_get_work(params).await,
             "zero_submitWork" => self.zero_submit_work(params),
             "zero_getLatestBlock" => self.zero_get_latest_block(params),
             "zero_syncStatus" => self.zero_sync_status(params),
@@ -1131,17 +1145,18 @@ impl RpcApi {
         }))
     }
 
-    fn zero_get_work(
+    async fn zero_get_work(
         &self,
-        _params: Option<Vec<serde_json::Value>>,
+        params: Option<Vec<serde_json::Value>>,
     ) -> Result<serde_json::Value, RpcErrorObject> {
         if !self.config.mining_enabled {
             return Err(RpcErrorObject::invalid_params(
                 "mining rpc disabled on this node".to_string(),
             ));
         }
+        let req = parse_get_work_request(params)?;
+        let latest = self.wait_for_work_change(&req).await?;
         let now = current_unix_secs();
-        let latest = self.current_head_block();
         let target = mining_target_for_difficulty(
             latest.header.difficulty,
             self.config.mining_work_target_leading_zero_bytes,
@@ -1531,6 +1546,28 @@ impl RpcApi {
             (Some(local), None) => local,
             (None, Some(global)) => global,
             (None, None) => create_genesis_block(),
+        }
+    }
+
+    async fn wait_for_work_change(&self, req: &GetWorkRequest) -> Result<Block, RpcErrorObject> {
+        let mut latest = self.current_head_block();
+        if !req.wait || !work_matches_known_head(&latest, req)? {
+            return Ok(latest);
+        }
+
+        let timeout_secs = req.timeout_secs.unwrap_or(MAX_GET_WORK_WAIT_SECS);
+        let timeout_secs = timeout_secs.clamp(1, MAX_GET_WORK_WAIT_SECS);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+
+        loop {
+            if std::time::Instant::now() >= deadline {
+                return Ok(self.current_head_block());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(GET_WORK_WAIT_POLL_MILLIS)).await;
+            latest = self.current_head_block();
+            if !work_matches_known_head(&latest, req)? {
+                return Ok(latest);
+            }
         }
     }
 
@@ -2820,6 +2857,38 @@ fn parse_u32_field(
     u32::try_from(v).map_err(|_| RpcErrorObject::invalid_params(format!("{key} overflow")))
 }
 
+fn parse_get_work_request(
+    params: Option<Vec<serde_json::Value>>,
+) -> Result<GetWorkRequest, RpcErrorObject> {
+    let Some(params) = params else {
+        return Ok(GetWorkRequest::default());
+    };
+    let Some(first) = params.first() else {
+        return Ok(GetWorkRequest::default());
+    };
+    if first.is_null() {
+        return Ok(GetWorkRequest::default());
+    }
+    serde_json::from_value(first.clone())
+        .map_err(|e| RpcErrorObject::invalid_params(format!("invalid getWork payload: {e}")))
+}
+
+fn work_matches_known_head(latest: &Block, req: &GetWorkRequest) -> Result<bool, RpcErrorObject> {
+    let expected_height = latest.header.number.as_u64().saturating_add(1);
+    if let Some(known_height) = req.known_height {
+        if known_height != expected_height {
+            return Ok(false);
+        }
+    }
+    if let Some(known_prev_hash) = &req.known_prev_hash {
+        let parsed = parse_hash(known_prev_hash)?;
+        if parsed != latest.header.hash {
+            return Ok(false);
+        }
+    }
+    Ok(req.known_height.is_some() || req.known_prev_hash.is_some())
+}
+
 fn parse_u64_opt(v: Option<&serde_json::Value>) -> Result<Option<u64>, RpcErrorObject> {
     match v {
         None | Some(serde_json::Value::Null) => Ok(None),
@@ -3128,8 +3197,7 @@ mod tests {
         });
 
         let api = RpcApi::with_compute(RpcConfig::default(), state_db, store, domains);
-        let get_work_err = api
-            .zero_get_work(None)
+        let get_work_err = futures::executor::block_on(api.zero_get_work(None))
             .expect_err("zero_getWork should be disabled by default");
         assert_eq!(get_work_err.code, -32602);
         assert_eq!(
@@ -3183,7 +3251,7 @@ mod tests {
 
     fn mine_one_block(api: &RpcApi, nonce: u64, miner: &str) -> serde_json::Value {
         install_easy_pow_head_if_needed(api);
-        let work = api.zero_get_work(None).expect("work should be available");
+        let work = get_work(&api);
         let work_id = work["work_id"].as_str().unwrap().to_string();
         let prev_hash = work["prev_hash"].as_str().unwrap().to_string();
         let height = work["height"].as_u64().unwrap();
@@ -3248,6 +3316,10 @@ mod tests {
     fn set_work_target(api: &RpcApi, work_id: &str, target: U256) {
         let mut jobs = api.mining_jobs.write();
         jobs.get_mut(work_id).expect("work id should exist").target = target;
+    }
+
+    fn get_work(api: &RpcApi) -> serde_json::Value {
+        futures::executor::block_on(api.zero_get_work(None)).expect("work should be available")
     }
 
     fn install_easy_pow_head_if_needed(api: &RpcApi) {
@@ -3437,8 +3509,7 @@ mod tests {
     #[test]
     fn test_zero_get_work_returns_work_payload() {
         let api = build_test_api_with_persistent_compute();
-        let work = api
-            .zero_get_work(None)
+        let work = futures::executor::block_on(api.zero_get_work(None))
             .expect("zero_getWork should succeed");
         assert!(work.get("work_id").and_then(|v| v.as_str()).is_some());
         assert!(work.get("height").and_then(|v| v.as_u64()).is_some());
@@ -3466,7 +3537,7 @@ mod tests {
             zeronet::global_store_block(block).expect("store synced head");
         }
 
-        let work = api.zero_get_work(None).expect("work should be available");
+        let work = get_work(&api);
 
         let expected_prev_hash = format!("0x{}", hex::encode(synced_hash.as_bytes()));
         assert_eq!(work["height"].as_u64(), Some(8));
@@ -3480,7 +3551,7 @@ mod tests {
     fn test_zero_submit_work_accepts_valid_share() {
         let api = build_test_api_with_persistent_compute();
         install_easy_pow_head_if_needed(&api);
-        let work = api.zero_get_work(None).expect("work should be available");
+        let work = get_work(&api);
         let work_id = work
             .get("work_id")
             .and_then(|v| v.as_str())
@@ -3518,7 +3589,7 @@ mod tests {
     fn test_zero_submit_work_credits_coinbase_balance() {
         let api = build_test_api_with_persistent_compute();
         install_easy_pow_head_if_needed(&api);
-        let work = api.zero_get_work(None).expect("work should be available");
+        let work = get_work(&api);
         let work_id = work
             .get("work_id")
             .and_then(|v| v.as_str())
@@ -3566,7 +3637,7 @@ mod tests {
     #[test]
     fn test_zero_submit_work_rejects_low_difficulty_share() {
         let api = build_test_api_with_persistent_compute();
-        let work = api.zero_get_work(None).expect("work should be available");
+        let work = get_work(&api);
         let work_id = work
             .get("work_id")
             .and_then(|v| v.as_str())
@@ -3609,7 +3680,7 @@ mod tests {
         let api = build_test_api_with_persistent_compute();
         install_easy_pow_head_if_needed(&api);
 
-        let first = api.zero_get_work(None).expect("get work");
+        let first = futures::executor::block_on(api.zero_get_work(None)).expect("get work");
         let work_id = first["work_id"].as_str().unwrap().to_string();
         let prev_hash = first["prev_hash"].as_str().unwrap().to_string();
         let height = first["height"].as_u64().unwrap();
@@ -4229,7 +4300,7 @@ mod tests {
     fn test_zero_submit_work_replay_is_rejected_after_accept() {
         let api = build_test_api_with_persistent_compute();
         install_easy_pow_head_if_needed(&api);
-        let work = api.zero_get_work(None).expect("work should be available");
+        let work = get_work(&api);
         let work_id = work["work_id"].as_str().unwrap().to_string();
         let prev_hash = work["prev_hash"].as_str().unwrap().to_string();
         let height = work["height"].as_u64().unwrap();
@@ -4260,7 +4331,7 @@ mod tests {
     fn test_zero_submit_work_rejects_stale_template_after_head_advances() {
         let api = build_test_api_with_persistent_compute();
         install_easy_pow_head_if_needed(&api);
-        let stale_work = api.zero_get_work(None).expect("work should be available");
+        let stale_work = get_work(&api);
         let work_id = stale_work["work_id"].as_str().unwrap().to_string();
         let prev_hash = stale_work["prev_hash"].as_str().unwrap().to_string();
         let height = stale_work["height"].as_u64().unwrap();
@@ -4289,7 +4360,7 @@ mod tests {
     #[test]
     fn test_zero_submit_work_rejects_oversized_miner_label() {
         let api = build_test_api_with_persistent_compute();
-        let work = api.zero_get_work(None).expect("work should be available");
+        let work = get_work(&api);
         let work_id = work["work_id"].as_str().unwrap().to_string();
         let prev_hash = work["prev_hash"].as_str().unwrap().to_string();
         let height = work["height"].as_u64().unwrap();
@@ -4330,7 +4401,7 @@ mod tests {
         install_easy_pow_head_if_needed(&api);
 
         // Mine one block first.
-        let first = api.zero_get_work(None).expect("get work");
+        let first = futures::executor::block_on(api.zero_get_work(None)).expect("get work");
         let work_id = first["work_id"].as_str().unwrap().to_string();
         let prev_hash = first["prev_hash"].as_str().unwrap().to_string();
         let height = first["height"].as_u64().unwrap();

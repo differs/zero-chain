@@ -14,6 +14,9 @@ use zerocore::block::{
 use zerocore::crypto::keccak256;
 use zeronet::{configure_global_block_persistence, NetworkConfig, NetworkService};
 
+const LOCAL_MINER_MAX_HASHES_PER_JOB_ATTEMPT: u64 = 2_000_000;
+const LOCAL_MINER_MAX_JOB_AGE_SECS: u64 = 2;
+
 pub struct RunNodeConfig {
     pub mine: bool,
     pub disable_local_miner: bool,
@@ -366,21 +369,20 @@ async fn run_rpc_backed_miner(rpc_url: String, rpc_token: Option<String>, miner_
         }
     };
 
+    let mut next_work: Option<WorkPayload> = None;
     loop {
-        let work = match rpc_call::<WorkPayload>(
-            &client,
-            &rpc_url,
-            rpc_token.as_deref(),
-            "zero_getWork",
-            serde_json::json!([]),
-        )
-        .await
-        {
-            Ok(work) => work,
-            Err(err) => {
-                println!("   ⚠️ Failed to fetch mining work: {}", err);
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                continue;
+        let work = if let Some(work) = next_work.take() {
+            work
+        } else {
+            match fetch_mining_work(&client, &rpc_url, rpc_token.as_deref(), None, None, false)
+                .await
+            {
+                Ok(work) => work,
+                Err(err) => {
+                    println!("   ⚠️ Failed to fetch mining work: {}", err);
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    continue;
+                }
             }
         };
 
@@ -417,6 +419,16 @@ async fn run_rpc_backed_miner(rpc_url: String, rpc_token: Option<String>, miner_
         };
 
         let mut nonce = 0u64;
+        let (watch_tx, mut watch_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut watch_handle = spawn_work_watch(
+            client.clone(),
+            rpc_url.clone(),
+            rpc_token.clone(),
+            work.prev_hash.clone(),
+            work.height,
+            watch_tx.clone(),
+        );
+        let job_started = std::time::Instant::now();
         loop {
             let hash = compute_pow_hash(&prev_hash, work.height, nonce);
 
@@ -486,6 +498,100 @@ async fn run_rpc_backed_miner(rpc_url: String, rpc_token: Option<String>, miner_
                 // Keep RPC/network tasks responsive while this CPU-heavy loop runs.
                 tokio::task::yield_now().await;
             }
+            if let Ok(result) = watch_rx.try_recv() {
+                match result {
+                    Ok(pushed_work)
+                        if pushed_work.prev_hash != work.prev_hash
+                            || pushed_work.height != work.height =>
+                    {
+                        println!(
+                            "   ↻ Switching to pushed work at height {} -> {}",
+                            work.height, pushed_work.height
+                        );
+                        next_work = Some(pushed_work);
+                        break;
+                    }
+                    Ok(_) => {
+                        watch_handle = spawn_work_watch(
+                            client.clone(),
+                            rpc_url.clone(),
+                            rpc_token.clone(),
+                            work.prev_hash.clone(),
+                            work.height,
+                            watch_tx.clone(),
+                        );
+                    }
+                    Err(err) => {
+                        println!("   ⚠️ Mining work watch ended: {}", err);
+                        watch_handle = spawn_work_watch(
+                            client.clone(),
+                            rpc_url.clone(),
+                            rpc_token.clone(),
+                            work.prev_hash.clone(),
+                            work.height,
+                            watch_tx.clone(),
+                        );
+                    }
+                }
+            }
+            if nonce >= LOCAL_MINER_MAX_HASHES_PER_JOB_ATTEMPT
+                || job_started.elapsed().as_secs() >= LOCAL_MINER_MAX_JOB_AGE_SECS
+            {
+                println!(
+                    "   ↻ Refreshing mining work at height {} after {} nonces / {}s",
+                    work.height,
+                    nonce,
+                    job_started.elapsed().as_secs()
+                );
+                break;
+            }
+        }
+        if !watch_handle.is_finished() {
+            watch_handle.abort();
         }
     }
+}
+
+async fn fetch_mining_work(
+    client: &reqwest::Client,
+    rpc_url: &str,
+    rpc_token: Option<&str>,
+    known_prev_hash: Option<&str>,
+    known_height: Option<u64>,
+    wait: bool,
+) -> anyhow::Result<WorkPayload> {
+    let params = if wait || known_prev_hash.is_some() || known_height.is_some() {
+        serde_json::json!([{
+            "known_prev_hash": known_prev_hash,
+            "known_height": known_height,
+            "wait": wait,
+            "timeout_secs": LOCAL_MINER_MAX_JOB_AGE_SECS,
+        }])
+    } else {
+        serde_json::json!([])
+    };
+    rpc_call::<WorkPayload>(client, rpc_url, rpc_token, "zero_getWork", params).await
+}
+
+fn spawn_work_watch(
+    client: reqwest::Client,
+    rpc_url: String,
+    rpc_token: Option<String>,
+    known_prev_hash: String,
+    known_height: u64,
+    tx: tokio::sync::mpsc::UnboundedSender<std::result::Result<WorkPayload, String>>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let result = fetch_mining_work(
+            &client,
+            &rpc_url,
+            rpc_token.as_deref(),
+            Some(known_prev_hash.as_str()),
+            Some(known_height),
+            true,
+        )
+        .await
+        .map_err(|err| err.to_string());
+        let _ = tx.send(result);
+    })
 }
