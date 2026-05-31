@@ -2056,7 +2056,8 @@ fn format_sync_headers(headers: &[SyncHeader]) -> String {
         .iter()
         .map(|header| {
             format!(
-                "{}@{}@{}@{}@0x{:x}@{}@0x{}@{}@{}",
+                "{}@{}@{}@{}@{}@0x{:x}@{}@0x{}@{}@{}",
+                header.version,
                 header.number,
                 hash_to_hex(&header.hash),
                 hash_to_hex(&header.parent_hash),
@@ -2081,58 +2082,47 @@ fn parse_sync_headers(raw: &str) -> std::result::Result<Vec<SyncHeader>, String>
     trimmed
         .split(',')
         .map(|item| {
-            let mut parts = item.split('@');
-            let number = parts
-                .next()
-                .ok_or_else(|| "missing header number".to_string())?
+            let parts = item.split('@').collect::<Vec<_>>();
+            let (version, offset) = match parts.len() {
+                9 => (1u32, 0usize),
+                10 => (
+                    parts[0]
+                        .parse::<u32>()
+                        .map_err(|e| format!("invalid header version: {e}"))?,
+                    1usize,
+                ),
+                len => {
+                    return Err(format!("invalid sync header field count: {len}"));
+                }
+            };
+            let number = parts[offset]
                 .parse::<u64>()
                 .map_err(|e| format!("invalid header number: {e}"))?;
-            let hash = parse_hash(
-                parts
-                    .next()
-                    .ok_or_else(|| "missing header hash".to_string())?,
-            )
-            .ok_or_else(|| "invalid header hash".to_string())?;
-            let parent_hash = parse_hash(
-                parts
-                    .next()
-                    .ok_or_else(|| "missing header parent hash".to_string())?,
-            )
-            .ok_or_else(|| "invalid header parent hash".to_string())?;
-            let timestamp = parts
-                .next()
-                .ok_or_else(|| "missing header timestamp".to_string())?
+            let hash =
+                parse_hash(parts[offset + 1]).ok_or_else(|| "invalid header hash".to_string())?;
+            let parent_hash = parse_hash(parts[offset + 2])
+                .ok_or_else(|| "invalid header parent hash".to_string())?;
+            let timestamp = parts[offset + 3]
                 .parse::<u64>()
                 .map_err(|e| format!("invalid header timestamp: {e}"))?;
-            let difficulty = parse_u64_decimal_or_hex(
-                parts
-                    .next()
-                    .ok_or_else(|| "missing difficulty".to_string())?,
-            )
-            .ok_or_else(|| "invalid difficulty".to_string())?;
-            let nonce = parts
-                .next()
-                .ok_or_else(|| "missing header nonce".to_string())?
+            let difficulty = parse_u64_decimal_or_hex(parts[offset + 4])
+                .ok_or_else(|| "invalid difficulty".to_string())?;
+            let nonce = parts[offset + 5]
                 .parse::<u64>()
                 .map_err(|e| format!("invalid header nonce: {e}"))?;
-            let coinbase_raw = parts
-                .next()
-                .ok_or_else(|| "missing header coinbase".to_string())?;
+            let coinbase_raw = parts[offset + 6];
             let coinbase = zerocore::crypto::Address::from_hex(coinbase_raw)
                 .map_err(|_| "invalid header coinbase".to_string())?;
-            let mix_hash = parse_hash(
-                parts
-                    .next()
-                    .ok_or_else(|| "missing header mix hash".to_string())?,
-            )
-            .ok_or_else(|| "invalid header mix hash".to_string())?;
-            let extra_data = match parts.next() {
-                Some(raw_extra) if !raw_extra.is_empty() => {
+            let mix_hash = parse_hash(parts[offset + 7])
+                .ok_or_else(|| "invalid header mix hash".to_string())?;
+            let extra_data = match parts[offset + 8] {
+                raw_extra if !raw_extra.is_empty() => {
                     hex::decode(raw_extra).map_err(|e| format!("invalid header extra data: {e}"))?
                 }
                 _ => Vec::new(),
             };
             Ok(SyncHeader {
+                version,
                 number,
                 hash,
                 parent_hash,

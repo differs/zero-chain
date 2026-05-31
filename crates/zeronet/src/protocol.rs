@@ -13,6 +13,7 @@ pub struct SyncComputeTxRecord {
 /// Canonical sync header payload used by header-first sync.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SyncHeader {
+    pub version: u32,
     pub number: u64,
     pub hash: Hash,
     pub parent_hash: Hash,

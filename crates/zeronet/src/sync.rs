@@ -545,6 +545,7 @@ fn headers_from_local_chain(start: u64, limit: u64) -> Vec<SyncHeader> {
 
 fn sync_header_from_block(block: &Block) -> SyncHeader {
     SyncHeader {
+        version: block.header.version,
         number: block.header.number.as_u64(),
         hash: block.header.hash,
         parent_hash: block.header.parent_hash,
@@ -559,7 +560,7 @@ fn sync_header_from_block(block: &Block) -> SyncHeader {
 
 fn block_from_sync_header(header: &SyncHeader) -> Block {
     let block_header = BlockHeader {
-        version: 1,
+        version: header.version,
         parent_hash: header.parent_hash,
         uncle_hashes: Vec::new(),
         coinbase: header.coinbase,
