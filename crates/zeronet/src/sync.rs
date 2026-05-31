@@ -26,6 +26,7 @@ use zerocore::crypto::Hash;
 const SYNC_TICK_SECS: u64 = 2;
 const SYNC_RESPONSE_TIMEOUT_SECS: u64 = 3;
 const SYNC_BATCH_LIMIT: u64 = 8;
+const SYNC_REORG_BATCH_LIMIT: u64 = 512;
 const TARGET_BLOCK_INTERVAL_SECS: u64 = 10;
 const MIN_MINING_DIFFICULTY: u128 = 250_000;
 const BASE_MINING_DIFFICULTY: u128 = 1_000_000;
@@ -231,7 +232,7 @@ impl SyncManager {
             let mut ticker = interval(Duration::from_secs(SYNC_TICK_SECS));
             ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
-            while running.load(Ordering::Relaxed) {
+            'sync_loop: while running.load(Ordering::Relaxed) {
                 ticker.tick().await;
 
                 let peer_count = peer_manager.peer_count();
@@ -295,60 +296,112 @@ impl SyncManager {
                 };
                 let peer_id = peer.info.peer_id.clone();
 
-                let request_start = local.saturating_sub(SYNC_REORG_LOOKBACK_BLOCKS).max(1);
-                let request_limit = (target_head.saturating_sub(request_start).saturating_add(1))
-                    .clamp(1, SYNC_BATCH_LIMIT);
-                if peer
-                    .send(ProtocolMessage::SyncGetHeaders {
-                        start: request_start,
-                        limit: request_limit,
-                    })
-                    .is_err()
-                {
-                    retries = retries.saturating_add(1);
-                    *state.write() = SyncState::Recovering {
-                        reason: "headers_request_failed".to_string(),
-                        retries,
+                let mut probe_lookback = 0u64;
+                let (request_start, headers) = loop {
+                    let request_start = if probe_lookback == 0 {
+                        local.saturating_add(1)
+                    } else {
+                        local.saturating_sub(probe_lookback).max(1)
                     };
-                    peer_manager.update_score(&peer_id, -8);
-                    continue;
-                }
-
-                let headers = match wait_for_headers(
-                    &mut inbound_rx,
-                    &peer_id,
-                    request_start,
-                    Duration::from_secs(SYNC_RESPONSE_TIMEOUT_SECS),
-                )
-                .await
-                {
-                    Ok(headers) => headers,
-                    Err(err) => {
+                    let request_limit = if request_start <= local {
+                        local
+                            .saturating_sub(request_start)
+                            .saturating_add(1)
+                            .clamp(1, SYNC_REORG_BATCH_LIMIT)
+                    } else {
+                        target_head
+                            .saturating_sub(request_start)
+                            .saturating_add(1)
+                            .clamp(1, SYNC_BATCH_LIMIT)
+                    };
+                    if peer
+                        .send(ProtocolMessage::SyncGetHeaders {
+                            start: request_start,
+                            limit: request_limit,
+                        })
+                        .is_err()
+                    {
                         retries = retries.saturating_add(1);
                         *state.write() = SyncState::Recovering {
-                            reason: format!("headers_timeout:{err}"),
+                            reason: "headers_request_failed".to_string(),
                             retries,
                         };
                         peer_manager.update_score(&peer_id, -8);
-                        continue;
+                        continue 'sync_loop;
+                    }
+
+                    let headers = match wait_for_headers(
+                        &mut inbound_rx,
+                        &peer_id,
+                        request_start,
+                        Duration::from_secs(SYNC_RESPONSE_TIMEOUT_SECS),
+                    )
+                    .await
+                    {
+                        Ok(headers) => headers,
+                        Err(err) => {
+                            retries = retries.saturating_add(1);
+                            *state.write() = SyncState::Recovering {
+                                reason: format!("headers_timeout:{err}"),
+                                retries,
+                            };
+                            peer_manager.update_score(&peer_id, -8);
+                            continue 'sync_loop;
+                        }
+                    };
+
+                    match validate_headers_against_local_chain(request_start, &headers) {
+                        Ok(()) => break (request_start, headers),
+                        Err(err)
+                            if err.contains("first_header_parent_or_pow_invalid")
+                                || err.contains("missing local parent for header start") =>
+                        {
+                            if probe_lookback == 0 {
+                                probe_lookback = SYNC_REORG_LOOKBACK_BLOCKS.max(1);
+                                tracing::info!(
+                                    "sync append from peer {} start {} failed: {}; switching to reorg probe",
+                                    peer_id,
+                                    request_start,
+                                    err
+                                );
+                                continue;
+                            }
+                            let next_probe = (probe_lookback.saturating_mul(2)).max(1);
+                            if next_probe == probe_lookback {
+                                retries = retries.saturating_add(1);
+                                *state.write() = SyncState::Recovering {
+                                    reason: format!("reorg_probe_exhausted:{err}"),
+                                    retries,
+                                };
+                                continue 'sync_loop;
+                            }
+                            probe_lookback = next_probe.min(local.max(1));
+                            tracing::info!(
+                                "sync reorg probe from peer {} start {} failed: {}; expanding lookback to {}",
+                                peer_id,
+                                request_start,
+                                err,
+                                probe_lookback
+                            );
+                            continue;
+                        }
+                        Err(err) => {
+                            retries = retries.saturating_add(1);
+                            tracing::warn!(
+                                "sync invalid headers from peer {} start {}: {}",
+                                peer_id,
+                                request_start,
+                                err
+                            );
+                            *state.write() = SyncState::Recovering {
+                                reason: format!("invalid_headers:{err}"),
+                                retries,
+                            };
+                            peer_manager.update_score(&peer_id, -20);
+                            continue 'sync_loop;
+                        }
                     }
                 };
-
-                if let Err(err) = validate_headers_against_local_chain(request_start, &headers) {
-                    retries = retries.saturating_add(1);
-                    tracing::warn!(
-                        "sync invalid headers from peer {} start {}: {}",
-                        peer_id,
-                        request_start,
-                        err
-                    );
-                    *state.write() = SyncState::Recovering {
-                        reason: format!("invalid_headers:{err}"),
-                        retries,
-                    };
-                    peer_manager.update_score(&peer_id, -20);
-                    continue;
-                }
 
                 let mut body_ok = true;
                 let mut bodies: HashMap<Hash, SyncBlockBody> = HashMap::new();
@@ -895,27 +948,31 @@ async fn wait_for_headers(
     expected_start: u64,
     deadline: Duration,
 ) -> std::result::Result<Vec<SyncHeader>, String> {
-    let recv = async {
+    timeout(deadline, async {
         loop {
             match rx.recv().await {
                 Some(SyncInbound::Headers {
                     peer_id: inbound_peer,
                     headers,
-                }) if inbound_peer == peer_id => return Ok(headers),
+                }) if inbound_peer == peer_id => {
+                    if headers.first().map(|h| h.number).unwrap_or_default() == expected_start {
+                        return Ok(headers);
+                    }
+                    tracing::debug!(
+                        "ignoring out-of-order sync headers from peer {}: expected start {}, got {}",
+                        peer_id,
+                        expected_start,
+                        headers.first().map(|h| h.number).unwrap_or_default()
+                    );
+                    continue;
+                }
                 Some(_) => continue,
                 None => return Err("sync channel closed".to_string()),
             }
         }
-    };
-
-    let headers = timeout(deadline, recv)
-        .await
-        .map_err(|_| "timeout".to_string())??;
-    if headers.first().map(|h| h.number).unwrap_or_default() != expected_start {
-        return Err("unexpected_headers_start".to_string());
-    }
-
-    Ok(headers)
+    })
+    .await
+    .map_err(|_| "timeout".to_string())?
 }
 
 async fn wait_for_block_body(
@@ -1259,6 +1316,52 @@ mod tests {
         sync.stop().await.unwrap();
         responder.abort();
         assert!(sync.local_height() >= 3);
+    }
+
+    #[tokio::test]
+    async fn wait_for_headers_ignores_stale_batches_for_same_peer() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let peer_id = "peer-sync-a".to_string();
+
+        tx.send(SyncInbound::Headers {
+            peer_id: peer_id.clone(),
+            headers: vec![SyncHeader {
+                version: 1,
+                number: 10,
+                hash: Hash::from_bytes([0x10; 32]),
+                parent_hash: Hash::from_bytes([0x09; 32]),
+                timestamp: 10,
+                difficulty: 1,
+                nonce: 1,
+                coinbase: Address::zero(),
+                mix_hash: Hash::from_bytes([0x11; 32]),
+                extra_data: Vec::new(),
+            }],
+        })
+        .await
+        .expect("send stale headers");
+        tx.send(SyncInbound::Headers {
+            peer_id: peer_id.clone(),
+            headers: vec![SyncHeader {
+                version: 1,
+                number: 20,
+                hash: Hash::from_bytes([0x20; 32]),
+                parent_hash: Hash::from_bytes([0x19; 32]),
+                timestamp: 20,
+                difficulty: 1,
+                nonce: 2,
+                coinbase: Address::zero(),
+                mix_hash: Hash::from_bytes([0x21; 32]),
+                extra_data: Vec::new(),
+            }],
+        })
+        .await
+        .expect("send expected headers");
+
+        let headers = wait_for_headers(&mut rx, &peer_id, 20, Duration::from_secs(1))
+            .await
+            .expect("wait for expected headers");
+        assert_eq!(headers[0].number, 20);
     }
 
     #[tokio::test]
