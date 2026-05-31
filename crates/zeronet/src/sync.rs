@@ -3,9 +3,9 @@
 use crate::protocol::{ProtocolMessage, SyncBlockBody, SyncHeader, SyncStateSnapshot};
 use crate::{
     global_block_by_number, global_latest_block, global_replace_accounts,
-    global_replace_compute_txs, global_store_block, global_synced_accounts,
-    global_synced_compute_txs, global_synced_height, set_global_synced_height, NetworkError,
-    Result,
+    global_replace_block_chain, global_replace_compute_txs, global_store_block,
+    global_synced_accounts, global_synced_compute_txs, global_synced_height,
+    set_global_synced_height, NetworkError, Result,
 };
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -32,6 +32,7 @@ const BASE_MINING_DIFFICULTY: u128 = 1_000_000;
 const MAX_MINING_DIFFICULTY: u128 = 1_000_000_000;
 const MAX_SYNC_EXTRA_DATA_BYTES: usize = 64;
 const POW_TARGET_HEADER_VERSION: u32 = 2;
+const SYNC_REORG_LOOKBACK_BLOCKS: u64 = 6;
 
 /// Serializable sync checkpoint for restart recovery.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -294,8 +295,9 @@ impl SyncManager {
                 };
                 let peer_id = peer.info.peer_id.clone();
 
-                let request_start = local.saturating_add(1);
-                let request_limit = (target_head.saturating_sub(local)).clamp(1, SYNC_BATCH_LIMIT);
+                let request_start = local.saturating_sub(SYNC_REORG_LOOKBACK_BLOCKS).max(1);
+                let request_limit = (target_head.saturating_sub(request_start).saturating_add(1))
+                    .clamp(1, SYNC_BATCH_LIMIT);
                 if peer
                     .send(ProtocolMessage::SyncGetHeaders {
                         start: request_start,
@@ -450,37 +452,66 @@ impl SyncManager {
                 global_replace_accounts(snapshot.accounts.clone());
                 global_replace_compute_txs(snapshot.compute_txs.clone());
 
+                if headers.iter().any(|header| {
+                    bodies
+                        .get(&header.hash)
+                        .is_some_and(|body| body.tx_count != 0)
+                }) {
+                    retries = retries.saturating_add(1);
+                    *state.write() = SyncState::Recovering {
+                        reason: "unexpected_legacy_transactions".to_string(),
+                        retries,
+                    };
+                    peer_manager.update_score(&peer_id, -20);
+                    continue;
+                }
+
                 let mut store_ok = true;
-                for header in &headers {
-                    if global_block_by_number(header.number)
-                        .map(|b| b.header.hash == header.hash)
-                        .unwrap_or(false)
-                    {
-                        continue;
+                let divergence_index = headers.iter().enumerate().find_map(|(idx, header)| {
+                    global_block_by_number(header.number).and_then(|local_block| {
+                        (local_block.header.hash != header.hash).then_some(idx)
+                    })
+                });
+
+                if let Some(conflict_index) = divergence_index {
+                    let replacement_blocks: Vec<Block> = headers[conflict_index..]
+                        .iter()
+                        .map(block_from_sync_header)
+                        .collect();
+                    if let Err(err) = global_replace_block_chain(replacement_blocks) {
+                        retries = retries.saturating_add(1);
+                        *state.write() = SyncState::Recovering {
+                            reason: format!("block_reorg_failed:{err}"),
+                            retries,
+                        };
+                        peer_manager.update_score(&peer_id, -20);
+                        store_ok = false;
+                    } else {
+                        tracing::info!(
+                            "synced peer {} reorged canonical chain from height {}",
+                            peer_id,
+                            headers[conflict_index].number
+                        );
                     }
-                    let mut block = block_from_sync_header(header);
-                    if let Some(body) = bodies.get(&header.hash) {
-                        if body.tx_count != 0 {
+                } else {
+                    for header in &headers {
+                        if global_block_by_number(header.number)
+                            .map(|b| b.header.hash == header.hash)
+                            .unwrap_or(false)
+                        {
+                            continue;
+                        }
+                        let mut block = block_from_sync_header(header);
+                        if let Err(err) = global_store_block(block) {
                             retries = retries.saturating_add(1);
                             *state.write() = SyncState::Recovering {
-                                reason: "unexpected_legacy_transactions".to_string(),
+                                reason: format!("block_store_failed:{err}"),
                                 retries,
                             };
                             peer_manager.update_score(&peer_id, -20);
                             store_ok = false;
                             break;
                         }
-                        block.header.transactions_root = Hash::zero();
-                    }
-                    if let Err(err) = global_store_block(block) {
-                        retries = retries.saturating_add(1);
-                        *state.write() = SyncState::Recovering {
-                            reason: format!("block_store_failed:{err}"),
-                            retries,
-                        };
-                        peer_manager.update_score(&peer_id, -20);
-                        store_ok = false;
-                        break;
                     }
                 }
                 if !store_ok {
@@ -1113,6 +1144,42 @@ mod tests {
         parent.difficulty = U256::one();
         let block = make_version2_pow_block(1, &parent, 30);
         validate_block_against_parent(&parent, &block.header).expect("version2 pow block");
+    }
+
+    #[tokio::test]
+    async fn test_global_replace_block_chain_overwrites_canonical_suffix() {
+        let _guard = TEST_LOCK.lock().await;
+        crate::global_reset_sync_cache();
+        seed_chain(3);
+
+        let parent = crate::global_block_by_number(1).expect("seeded parent");
+        let alt_two = make_block(2, &parent.header, 1_000);
+        let alt_three = make_block(3, &alt_two.header, 1_030);
+
+        crate::global_replace_block_chain(vec![alt_two.clone(), alt_three.clone()])
+            .expect("chain replacement should succeed");
+
+        assert_eq!(
+            crate::global_block_by_number(1)
+                .expect("height 1 remains canonical")
+                .header
+                .hash,
+            parent.header.hash
+        );
+        assert_eq!(
+            crate::global_block_by_number(2)
+                .expect("reorg height 2")
+                .header
+                .hash,
+            alt_two.header.hash
+        );
+        assert_eq!(
+            crate::global_block_by_number(3)
+                .expect("reorg height 3")
+                .header
+                .hash,
+            alt_three.header.hash
+        );
     }
 
     #[tokio::test]

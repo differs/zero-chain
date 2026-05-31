@@ -1537,7 +1537,7 @@ impl RpcApi {
     fn current_head_block(&self) -> Block {
         match (self.latest_block.read().clone(), global_latest_block()) {
             (Some(local), Some(global)) => {
-                if global.header.number > local.header.number {
+                if global.header.number >= local.header.number {
                     global
                 } else {
                     local
@@ -3362,6 +3362,10 @@ mod tests {
 
     fn make_rpc_test_block(number: u64, parent: &BlockHeader) -> Block {
         let timestamp = parent.timestamp.saturating_add(30);
+        make_rpc_test_block_at_time(number, parent, timestamp)
+    }
+
+    fn make_rpc_test_block_at_time(number: u64, parent: &BlockHeader, timestamp: u64) -> Block {
         let difficulty = adjust_mining_difficulty(parent.difficulty, parent.timestamp, timestamp);
         let mut nonce = 0u64;
         let mix_hash = loop {
@@ -4436,6 +4440,31 @@ mod tests {
             .expect("import call should return result");
         assert_eq!(bad_import["imported"].as_bool(), Some(false));
         assert_eq!(bad_import["reason"].as_str(), Some("parent_mismatch"));
+    }
+
+    #[test]
+    fn test_current_head_prefers_global_when_heights_match() {
+        let api = build_test_api_with_persistent_compute();
+        install_easy_pow_head_if_needed(&api);
+
+        let parent = api.current_head_block();
+        let local = make_rpc_test_block_at_time(
+            1,
+            &parent.header,
+            parent.header.timestamp.saturating_add(30),
+        );
+        let global = make_rpc_test_block_at_time(
+            1,
+            &parent.header,
+            parent.header.timestamp.saturating_add(31),
+        );
+
+        *api.latest_block.write() = Some(local);
+        zeronet::global_store_block(global.clone()).expect("store global head");
+
+        let current = api.current_head_block();
+        assert_eq!(current.header.hash, global.header.hash);
+        assert_eq!(current.header.number, global.header.number);
     }
 
     #[test]

@@ -252,6 +252,68 @@ pub fn global_store_block(block: zerocore::block::Block) -> Result<()> {
     Ok(())
 }
 
+/// Replace the canonical suffix starting at the first block's height.
+///
+/// This is used by sync when a peer presents a validated chain segment that
+/// diverges from the current canonical head. The replacement is intentionally
+/// suffix-based: blocks before the first provided height are preserved, while
+/// the incoming validated chain overwrites the canonical tail from that point.
+pub fn global_replace_block_chain(blocks: Vec<zerocore::block::Block>) -> Result<()> {
+    if blocks.is_empty() {
+        return Ok(());
+    }
+
+    validate_global_block_chain_replacement(&blocks)?;
+
+    let start_height = blocks[0].header.number.as_u64();
+    {
+        let mut canonical = GLOBAL_BLOCKS.write();
+        canonical.split_off(&start_height);
+    }
+
+    for block in blocks {
+        global_store_block(block)?;
+    }
+
+    Ok(())
+}
+
+fn validate_global_block_chain_replacement(blocks: &[Block]) -> Result<()> {
+    let Some(first) = blocks.first() else {
+        return Ok(());
+    };
+    let start_height = first.header.number.as_u64();
+    if start_height == 0 {
+        crate::sync::validate_persisted_block_chain(blocks).map_err(NetworkError::ProtocolError)?;
+        return Ok(());
+    }
+
+    if start_height == 1 {
+        crate::sync::validate_block_against_root(&first.header)
+            .map_err(NetworkError::ProtocolError)?;
+    } else {
+        let Some(parent) = GLOBAL_BLOCKS
+            .read()
+            .get(&start_height.saturating_sub(1))
+            .cloned()
+        else {
+            return Err(NetworkError::ProtocolError(format!(
+                "missing canonical parent for chain replacement at height {}",
+                start_height
+            )));
+        };
+        crate::sync::validate_block_against_parent(&parent.header, &first.header)
+            .map_err(NetworkError::ProtocolError)?;
+    }
+
+    for pair in blocks.windows(2) {
+        crate::sync::validate_block_against_parent(&pair[0].header, &pair[1].header)
+            .map_err(NetworkError::ProtocolError)?;
+    }
+
+    Ok(())
+}
+
 fn validate_global_block_insert(block: &Block) -> Result<()> {
     let height = block.header.number.as_u64();
     if let Some(existing) = GLOBAL_BLOCKS.read().get(&height).cloned() {
