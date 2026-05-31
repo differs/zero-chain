@@ -365,6 +365,8 @@ pub fn configure_global_block_persistence(path: Option<PathBuf>) -> Result<()> {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct PersistedBlockRecord {
     version: u32,
+    #[serde(default = "default_persisted_header_version")]
+    header_version: u32,
     number: u64,
     hash: Hash,
     parent_hash: Hash,
@@ -376,10 +378,15 @@ struct PersistedBlockRecord {
     extra_data: Vec<u8>,
 }
 
+fn default_persisted_header_version() -> u32 {
+    1
+}
+
 impl From<&Block> for PersistedBlockRecord {
     fn from(block: &Block) -> Self {
         Self {
             version: 1,
+            header_version: block.header.version,
             number: block.header.number.as_u64(),
             hash: block.header.hash,
             parent_hash: block.header.parent_hash,
@@ -397,7 +404,7 @@ impl PersistedBlockRecord {
     fn into_block(self) -> Block {
         Block {
             header: BlockHeader {
-                version: 1,
+                version: self.header_version,
                 parent_hash: self.parent_hash,
                 uncle_hashes: Vec::new(),
                 coinbase: self.coinbase,
@@ -2427,8 +2434,22 @@ mod tests {
 
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].header.number, block.header.number);
+        assert_eq!(loaded[0].header.version, block.header.version);
         assert_eq!(loaded[0].header.hash, block.header.hash);
         assert_eq!(loaded[0].header.compute_hash(), block.header.hash);
+    }
+
+    #[test]
+    fn test_persisted_block_record_preserves_header_version() {
+        let mut block = make_test_block_with_parent(1, &crate::sync::legacy_mining_root_header());
+        block.header.version = 2;
+        block.header.hash = block.header.compute_hash();
+
+        let record = PersistedBlockRecord::from(&block);
+        let restored = record.into_block();
+
+        assert_eq!(restored.header.version, 2);
+        assert_eq!(restored.header.hash, block.header.hash);
     }
 
     #[test]

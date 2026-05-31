@@ -109,7 +109,7 @@ enum Commands {
         #[arg(long, default_value = "600")]
         rpc_rate_limit_per_minute: u32,
 
-        /// Optional override for zero_getWork target leading zero bytes (0..=32)
+        /// Optional legacy override for zero_getWork target as whole leading-zero bytes (0..=32)
         #[arg(long)]
         mining_work_target_leading_zero_bytes: Option<usize>,
 

@@ -16,7 +16,10 @@ use std::sync::Arc;
 use tokio::sync::oneshot;
 use tower_http::cors::{Any, CorsLayer};
 use zerocore::account::{Account, AccountState, U256};
-use zerocore::block::{create_genesis_block, Block, BlockHeader};
+use zerocore::block::{
+    create_genesis_block, pow_hash_meets_target, pow_target_from_difficulty, pow_target_from_hex,
+    pow_target_to_hex, Block, BlockHeader,
+};
 use zerocore::compute::domain::DomainRegistry;
 use zerocore::compute::{
     BasicTxExecutor, Command, ComputeTx, DefaultAuthorizationPolicy, DomainConfig, DomainId,
@@ -45,7 +48,8 @@ const MAX_SUBMITTED_COMPUTE_RESULTS: usize = 50_000;
 const TARGET_BLOCK_INTERVAL_SECS: u64 = 10;
 const MIN_MINING_DIFFICULTY: u128 = 250_000;
 const BASE_MINING_DIFFICULTY: u128 = 1_000_000;
-const MAX_MINING_DIFFICULTY: u128 = 16_000_000;
+const MAX_MINING_DIFFICULTY: u128 = 1_000_000_000;
+const POW_TARGET_HEADER_VERSION: u32 = 2;
 
 struct RpcMetrics {
     registry: Registry,
@@ -158,7 +162,7 @@ pub struct RpcConfig {
     pub coinbase: String,
     /// Whether mining RPC methods are enabled (`zero_getWork` / `zero_submitWork`).
     pub mining_enabled: bool,
-    /// Optional override for `zero_getWork.target_leading_zero_bytes`.
+    /// Optional legacy override for the mining work target as whole leading-zero bytes.
     pub mining_work_target_leading_zero_bytes: Option<usize>,
     /// Optional static auth token for all JSON-RPC requests.
     pub auth_token: Option<String>,
@@ -353,7 +357,8 @@ struct MiningWork {
     work_id: String,
     prev_hash: Hash,
     height: u64,
-    target_leading_zero_bytes: usize,
+    target: U256,
+    difficulty: U256,
     created_at_secs: u64,
 }
 
@@ -1137,10 +1142,10 @@ impl RpcApi {
         }
         let now = current_unix_secs();
         let latest = self.current_head_block();
-        let target_leading_zero_bytes = self
-            .config
-            .mining_work_target_leading_zero_bytes
-            .unwrap_or_else(|| leading_zero_target_from_difficulty(latest.header.difficulty));
+        let target = mining_target_for_difficulty(
+            latest.header.difficulty,
+            self.config.mining_work_target_leading_zero_bytes,
+        );
         let prev_hash = latest.header.hash;
         let height = latest.header.number.as_u64().saturating_add(1);
 
@@ -1149,7 +1154,8 @@ impl RpcApi {
             work_id: work_id.clone(),
             prev_hash,
             height,
-            target_leading_zero_bytes,
+            target,
+            difficulty: latest.header.difficulty,
             created_at_secs: now,
         };
         {
@@ -1184,7 +1190,10 @@ impl RpcApi {
             "work_id": work.work_id,
             "prev_hash": format!("0x{}", hex::encode(work.prev_hash.as_bytes())),
             "height": work.height,
-            "target_leading_zero_bytes": work.target_leading_zero_bytes,
+            "version": POW_TARGET_HEADER_VERSION,
+            "difficulty": format!("0x{:x}", work.difficulty.as_u128()),
+            "target": pow_target_to_hex(work.target),
+            "target_leading_zero_bytes": leading_zero_bytes_for_target(work.target),
             "coinbase": format_zero_address(
                 parse_address(&self.config.coinbase)
                     .map_err(|e| RpcErrorObject::internal_error(format!("invalid coinbase: {e}")))?,
@@ -1229,17 +1238,6 @@ impl RpcApi {
         }
         let mut hash = [0u8; 32];
         hash.copy_from_slice(&hash_bytes);
-        let leading = hash_bytes.iter().take_while(|b| **b == 0).count();
-        if leading < work.target_leading_zero_bytes {
-            metrics
-                .mining_shares_rejected
-                .with_label_values(&["low_difficulty_share"])
-                .inc();
-            return Ok(serde_json::json!({
-                "accepted": false,
-                "reason": "low_difficulty_share"
-            }));
-        }
 
         // Minimal consistency check with node-side work template.
         let mut data = Vec::new();
@@ -1255,6 +1253,16 @@ impl RpcApi {
             return Ok(serde_json::json!({
                 "accepted": false,
                 "reason": "invalid_pow_hash"
+            }));
+        }
+        if !pow_hash_meets_target(&hash, work.target) {
+            metrics
+                .mining_shares_rejected
+                .with_label_values(&["low_difficulty_share"])
+                .inc();
+            return Ok(serde_json::json!({
+                "accepted": false,
+                "reason": "low_difficulty_share"
             }));
         }
 
@@ -1342,7 +1350,7 @@ impl RpcApi {
         let difficulty = adjust_mining_difficulty(parent_difficulty, parent_timestamp, timestamp);
 
         let mut header = BlockHeader {
-            version: 1,
+            version: POW_TARGET_HEADER_VERSION,
             parent_hash,
             uncle_hashes: Vec::new(),
             coinbase: parse_address(&self.config.coinbase)
@@ -1552,7 +1560,13 @@ impl RpcApi {
 
     fn store_block(&self, block: Block) -> Result<(), zeronet::NetworkError> {
         let height = block.header.number.as_u64();
-        global_store_block(block.clone())?;
+        // An explicit mining target override is a dev/test mode knob used by
+        // smoke scripts. In that mode the local node may intentionally accept
+        // non-consensus PoW for fast progression, so we keep those blocks local
+        // instead of pushing them into the globally validated sync cache.
+        if self.config.mining_work_target_leading_zero_bytes.is_none() {
+            global_store_block(block.clone())?;
+        }
         let mut history = self.block_history.write();
         history.insert(height, block);
         while history.len() > MAX_BLOCK_HISTORY {
@@ -1600,6 +1614,15 @@ impl RpcApi {
             .ok_or_else(|| RpcErrorObject::invalid_params("block must be object".to_string()))?;
 
         let hash = parse_hash_field(block, "hash")?;
+        let version = block
+            .get("version")
+            .and_then(|v| v.as_u64())
+            .map(|v| {
+                u32::try_from(v)
+                    .map_err(|_| RpcErrorObject::invalid_params("version overflow".to_string()))
+            })
+            .transpose()?
+            .unwrap_or(1);
         let parent_hash = parse_hash_field(block, "parent_hash")?;
         let number = parse_u64_hex_field(block, "number")?;
         let timestamp = block
@@ -1648,7 +1671,7 @@ impl RpcApi {
         }
 
         let mut header = BlockHeader {
-            version: 1,
+            version,
             parent_hash,
             uncle_hashes: Vec::new(),
             coinbase,
@@ -1694,6 +1717,47 @@ fn leading_zero_target_from_difficulty(difficulty: U256) -> usize {
         3
     } else {
         2
+    }
+}
+
+fn legacy_target_from_leading_zero_bytes(bytes: usize) -> U256 {
+    let mut target = [0xFFu8; 32];
+    let prefix = bytes.min(32);
+    target[..prefix].fill(0);
+    U256::from_big_endian(&target)
+}
+
+fn mining_target_for_difficulty(
+    difficulty: U256,
+    target_leading_zero_bytes_override: Option<usize>,
+) -> U256 {
+    target_leading_zero_bytes_override
+        .map(legacy_target_from_leading_zero_bytes)
+        .unwrap_or_else(|| pow_target_from_difficulty(difficulty))
+}
+
+fn leading_zero_bytes_for_target(target: U256) -> usize {
+    (target.leading_zeros() / 8) as usize
+}
+
+fn compute_mining_digest(parent_hash: Hash, height: u64, nonce: u64) -> [u8; 32] {
+    let mut data = Vec::new();
+    data.extend_from_slice(parent_hash.as_bytes());
+    data.extend_from_slice(&height.to_be_bytes());
+    data.extend_from_slice(&nonce.to_be_bytes());
+    zerocore::crypto::keccak256(&data)
+}
+
+fn legacy_pow_meets_difficulty(digest: &[u8; 32], difficulty: U256) -> bool {
+    digest.iter().take_while(|b| **b == 0).count()
+        >= leading_zero_target_from_difficulty(difficulty)
+}
+
+fn pow_meets_block_rule(header_version: u32, digest: &[u8; 32], parent_difficulty: U256) -> bool {
+    if header_version >= POW_TARGET_HEADER_VERSION {
+        pow_hash_meets_target(digest, pow_target_from_difficulty(parent_difficulty))
+    } else {
+        legacy_pow_meets_difficulty(digest, parent_difficulty)
     }
 }
 
@@ -2038,6 +2102,11 @@ fn validate_imported_block_header(
             "block hash does not match header contents".to_string(),
         ));
     }
+    if header.version == 0 {
+        return Err(RpcErrorObject::invalid_params(
+            "block version must be non-zero".to_string(),
+        ));
+    }
 
     header
         .validate(parent)
@@ -2053,23 +2122,18 @@ fn validate_imported_block_header(
         )));
     }
 
-    let mut data = Vec::new();
-    data.extend_from_slice(parent.hash.as_bytes());
-    data.extend_from_slice(&header.number.as_u64().to_be_bytes());
-    data.extend_from_slice(&header.nonce.to_be_bytes());
-    let expected_mix = zerocore::crypto::keccak256(&data);
+    let expected_mix = compute_mining_digest(parent.hash, header.number.as_u64(), header.nonce);
     if header.mix_hash != Hash::from_bytes(expected_mix) {
         return Err(RpcErrorObject::invalid_params(
             "block mix_hash does not match expected mining digest".to_string(),
         ));
     }
 
-    let leading = expected_mix.iter().take_while(|b| **b == 0).count();
-    let required_leading = leading_zero_target_from_difficulty(parent.difficulty);
-    if leading < required_leading {
+    if !pow_meets_block_rule(header.version, &expected_mix, parent.difficulty) {
         return Err(RpcErrorObject::invalid_params(format!(
-            "block pow below required difficulty: leading_zero_bytes={} required={}",
-            leading, required_leading
+            "block pow below required target: hash=0x{} target={}",
+            hex::encode(expected_mix),
+            pow_target_to_hex(pow_target_from_difficulty(parent.difficulty))
         )));
     }
 
@@ -2259,6 +2323,7 @@ fn compute_tx_to_json(tx_hash: Hash, result: &serde_json::Value) -> serde_json::
 
 fn block_to_zero_block_json(block: &Block) -> serde_json::Value {
     serde_json::json!({
+        "version": block.header.version,
         "hash": format!("0x{}", hex::encode(block.header.hash.as_bytes())),
         "parent_hash": format!("0x{}", hex::encode(block.header.parent_hash.as_bytes())),
         "number": format!("0x{:x}", block.header.number.as_u64()),
@@ -3117,11 +3182,12 @@ mod tests {
     }
 
     fn mine_one_block(api: &RpcApi, nonce: u64, miner: &str) -> serde_json::Value {
+        install_easy_pow_head_if_needed(api);
         let work = api.zero_get_work(None).expect("work should be available");
         let work_id = work["work_id"].as_str().unwrap().to_string();
         let prev_hash = work["prev_hash"].as_str().unwrap().to_string();
         let height = work["height"].as_u64().unwrap();
-        let target = work["target_leading_zero_bytes"].as_u64().unwrap() as usize;
+        let target = work_target(&work);
         let prev_hash_bytes =
             hex::decode(prev_hash.strip_prefix("0x").unwrap_or(&prev_hash)).unwrap();
         let (nonce, digest) = solve_work_digest(&prev_hash_bytes, height, nonce, target);
@@ -3138,7 +3204,7 @@ mod tests {
         prev_hash_bytes: &[u8],
         height: u64,
         start_nonce: u64,
-        target_leading_zero_bytes: usize,
+        target: U256,
     ) -> (u64, [u8; 32]) {
         let mut nonce = start_nonce;
         loop {
@@ -3147,11 +3213,57 @@ mod tests {
             data.extend_from_slice(&height.to_be_bytes());
             data.extend_from_slice(&nonce.to_be_bytes());
             let digest = zerocore::crypto::keccak256(&data);
-            if digest.iter().take_while(|b| **b == 0).count() >= target_leading_zero_bytes {
+            if pow_hash_meets_target(&digest, target) {
                 return (nonce, digest);
             }
             nonce = nonce.saturating_add(1);
         }
+    }
+
+    fn solve_bad_work_digest(
+        prev_hash_bytes: &[u8],
+        height: u64,
+        start_nonce: u64,
+        target: U256,
+    ) -> (u64, [u8; 32]) {
+        let mut nonce = start_nonce;
+        loop {
+            let mut data = Vec::new();
+            data.extend_from_slice(prev_hash_bytes);
+            data.extend_from_slice(&height.to_be_bytes());
+            data.extend_from_slice(&nonce.to_be_bytes());
+            let digest = zerocore::crypto::keccak256(&data);
+            if !pow_hash_meets_target(&digest, target) {
+                return (nonce, digest);
+            }
+            nonce = nonce.saturating_add(1);
+        }
+    }
+
+    fn work_target(work: &serde_json::Value) -> U256 {
+        let target = work["target"].as_str().expect("work target missing");
+        pow_target_from_hex(target).expect("work target should decode")
+    }
+
+    fn set_work_target(api: &RpcApi, work_id: &str, target: U256) {
+        let mut jobs = api.mining_jobs.write();
+        jobs.get_mut(work_id).expect("work id should exist").target = target;
+    }
+
+    fn install_easy_pow_head_if_needed(api: &RpcApi) {
+        let current = api.current_head_block();
+        if current.header.number != U256::zero() || current.header.hash != Hash::zero() {
+            return;
+        }
+        let mut header = legacy_rpc_test_root();
+        header.difficulty = U256::one();
+        header.hash = header.compute_hash();
+        let block = Block {
+            header,
+            uncles: Vec::new(),
+        };
+        zeronet::global_store_block(block.clone()).expect("easy test head should store");
+        *api.latest_block.write() = Some(block);
     }
 
     fn legacy_rpc_test_root() -> BlockHeader {
@@ -3186,15 +3298,13 @@ mod tests {
             data.extend_from_slice(&number.to_be_bytes());
             data.extend_from_slice(&nonce.to_be_bytes());
             let digest = zerocore::crypto::keccak256(&data);
-            if digest.iter().take_while(|b| **b == 0).count()
-                >= leading_zero_target_from_difficulty(parent.difficulty)
-            {
+            if pow_hash_meets_target(&digest, pow_target_from_difficulty(parent.difficulty)) {
                 break Hash::from_bytes(digest);
             }
             nonce = nonce.saturating_add(1);
         };
         let mut header = BlockHeader {
-            version: 1,
+            version: POW_TARGET_HEADER_VERSION,
             parent_hash: parent.hash,
             uncle_hashes: Vec::new(),
             coinbase: Address::zero(),
@@ -3332,17 +3442,22 @@ mod tests {
             .expect("zero_getWork should succeed");
         assert!(work.get("work_id").and_then(|v| v.as_str()).is_some());
         assert!(work.get("height").and_then(|v| v.as_u64()).is_some());
+        assert_eq!(work.get("version").and_then(|v| v.as_u64()), Some(2));
+        assert!(work.get("target").and_then(|v| v.as_str()).is_some());
+        assert!(work.get("difficulty").and_then(|v| v.as_str()).is_some());
         assert_eq!(
             work.get("target_leading_zero_bytes")
                 .and_then(|v| v.as_u64()),
             Some(2)
         );
+        assert!(work_target(&work) < legacy_target_from_leading_zero_bytes(2));
     }
 
     #[test]
     fn test_zero_get_work_uses_higher_p2p_synced_head() {
         let api = build_test_api_with_persistent_compute();
-        let mut parent = legacy_rpc_test_root();
+        install_easy_pow_head_if_needed(&api);
+        let mut parent = api.current_head_block().header;
         let mut synced_hash = Hash::zero();
         for number in 1..=7 {
             let block = make_rpc_test_block(number, &parent);
@@ -3364,6 +3479,7 @@ mod tests {
     #[test]
     fn test_zero_submit_work_accepts_valid_share() {
         let api = build_test_api_with_persistent_compute();
+        install_easy_pow_head_if_needed(&api);
         let work = api.zero_get_work(None).expect("work should be available");
         let work_id = work
             .get("work_id")
@@ -3379,10 +3495,10 @@ mod tests {
             .get("height")
             .and_then(|v| v.as_u64())
             .expect("height missing");
+        let target = work_target(&work);
 
         let prev_hash_bytes =
             hex::decode(prev_hash.strip_prefix("0x").unwrap_or(&prev_hash)).expect("prev hash hex");
-        let target = work["target_leading_zero_bytes"].as_u64().unwrap() as usize;
         let (nonce, digest) = solve_work_digest(&prev_hash_bytes, height, 42, target);
         let hash_hex = format!("0x{}", hex::encode(digest));
         let submit = api
@@ -3401,6 +3517,7 @@ mod tests {
     #[test]
     fn test_zero_submit_work_credits_coinbase_balance() {
         let api = build_test_api_with_persistent_compute();
+        install_easy_pow_head_if_needed(&api);
         let work = api.zero_get_work(None).expect("work should be available");
         let work_id = work
             .get("work_id")
@@ -3416,10 +3533,10 @@ mod tests {
             .get("height")
             .and_then(|v| v.as_u64())
             .expect("height missing");
+        let target = work_target(&work);
 
         let prev_hash_bytes =
             hex::decode(prev_hash.strip_prefix("0x").unwrap_or(&prev_hash)).expect("prev hash hex");
-        let target = work["target_leading_zero_bytes"].as_u64().unwrap() as usize;
         let (nonce, digest) = solve_work_digest(&prev_hash_bytes, height, 123, target);
         let hash_hex = format!("0x{}", hex::encode(digest));
 
@@ -3454,12 +3571,25 @@ mod tests {
             .get("work_id")
             .and_then(|v| v.as_str())
             .expect("work_id missing");
+        let prev_hash = work
+            .get("prev_hash")
+            .and_then(|v| v.as_str())
+            .expect("prev_hash missing")
+            .to_string();
+        let height = work
+            .get("height")
+            .and_then(|v| v.as_u64())
+            .expect("height missing");
+        set_work_target(&api, work_id, U256::zero());
+        let prev_hash_bytes =
+            hex::decode(prev_hash.strip_prefix("0x").unwrap_or(&prev_hash)).expect("prev hash hex");
+        let (nonce, digest) = solve_bad_work_digest(&prev_hash_bytes, height, 1, U256::zero());
 
         let submit = api
             .zero_submit_work(Some(vec![serde_json::json!({
                 "work_id": work_id,
-                "nonce": 1,
-                "hash_hex": "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                "nonce": nonce,
+                "hash_hex": format!("0x{}", hex::encode(digest)),
                 "miner": "test-miner"
             })]))
             .expect("submit should return result");
@@ -3477,15 +3607,16 @@ mod tests {
     #[test]
     fn test_zero_import_block_updates_latest_block() {
         let api = build_test_api_with_persistent_compute();
+        install_easy_pow_head_if_needed(&api);
 
         let first = api.zero_get_work(None).expect("get work");
         let work_id = first["work_id"].as_str().unwrap().to_string();
         let prev_hash = first["prev_hash"].as_str().unwrap().to_string();
         let height = first["height"].as_u64().unwrap();
+        let target = work_target(&first);
 
         let prev_hash_bytes =
             hex::decode(prev_hash.strip_prefix("0x").unwrap_or(&prev_hash)).unwrap();
-        let target = first["target_leading_zero_bytes"].as_u64().unwrap() as usize;
         let (nonce, digest) = solve_work_digest(&prev_hash_bytes, height, 7, target);
 
         let mined = api
@@ -4097,14 +4228,15 @@ mod tests {
     #[test]
     fn test_zero_submit_work_replay_is_rejected_after_accept() {
         let api = build_test_api_with_persistent_compute();
+        install_easy_pow_head_if_needed(&api);
         let work = api.zero_get_work(None).expect("work should be available");
         let work_id = work["work_id"].as_str().unwrap().to_string();
         let prev_hash = work["prev_hash"].as_str().unwrap().to_string();
         let height = work["height"].as_u64().unwrap();
+        let target = work_target(&work);
 
         let prev_hash_bytes =
             hex::decode(prev_hash.strip_prefix("0x").unwrap_or(&prev_hash)).unwrap();
-        let target = work["target_leading_zero_bytes"].as_u64().unwrap() as usize;
         let (nonce, digest) = solve_work_digest(&prev_hash_bytes, height, 77, target);
         let payload = serde_json::json!({
             "work_id": work_id,
@@ -4127,16 +4259,18 @@ mod tests {
     #[test]
     fn test_zero_submit_work_rejects_stale_template_after_head_advances() {
         let api = build_test_api_with_persistent_compute();
+        install_easy_pow_head_if_needed(&api);
         let stale_work = api.zero_get_work(None).expect("work should be available");
         let work_id = stale_work["work_id"].as_str().unwrap().to_string();
         let prev_hash = stale_work["prev_hash"].as_str().unwrap().to_string();
         let height = stale_work["height"].as_u64().unwrap();
+        let target = legacy_target_from_leading_zero_bytes(0);
+        set_work_target(&api, &work_id, target);
         let prev_hash_bytes =
             hex::decode(prev_hash.strip_prefix("0x").unwrap_or(&prev_hash)).unwrap();
-        let target = stale_work["target_leading_zero_bytes"].as_u64().unwrap() as usize;
         let (nonce, digest) = solve_work_digest(&prev_hash_bytes, height, 91, target);
 
-        let advanced = make_rpc_test_block(1, &legacy_rpc_test_root());
+        let advanced = make_rpc_test_block(1, &api.current_head_block().header);
         zeronet::global_store_block(advanced).expect("advance global head");
 
         let stale_submit = api
@@ -4163,7 +4297,7 @@ mod tests {
         {
             let mut jobs = api.mining_jobs.write();
             if let Some(job) = jobs.get_mut(&work_id) {
-                job.target_leading_zero_bytes = 0;
+                job.target = legacy_target_from_leading_zero_bytes(0);
             }
         }
 
@@ -4193,21 +4327,16 @@ mod tests {
     #[test]
     fn test_zero_import_block_rejects_parent_mismatch() {
         let api = build_test_api_with_persistent_compute();
+        install_easy_pow_head_if_needed(&api);
 
         // Mine one block first.
         let first = api.zero_get_work(None).expect("get work");
         let work_id = first["work_id"].as_str().unwrap().to_string();
         let prev_hash = first["prev_hash"].as_str().unwrap().to_string();
         let height = first["height"].as_u64().unwrap();
-        {
-            let mut jobs = api.mining_jobs.write();
-            if let Some(job) = jobs.get_mut(&work_id) {
-                job.target_leading_zero_bytes = 0;
-            }
-        }
+        let target = work_target(&first);
         let prev_hash_bytes =
             hex::decode(prev_hash.strip_prefix("0x").unwrap_or(&prev_hash)).unwrap();
-        let target = first["target_leading_zero_bytes"].as_u64().unwrap() as usize;
         let (nonce, digest) = solve_work_digest(&prev_hash_bytes, height, 9, target);
         let mined = api
             .zero_submit_work(Some(vec![serde_json::json!({

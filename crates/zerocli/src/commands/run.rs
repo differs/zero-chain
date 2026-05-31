@@ -7,7 +7,10 @@ use serde::Deserialize;
 use std::path::PathBuf;
 use zeroapi::rpc::RpcConfig;
 use zeroapi::{ApiConfig, ApiService};
-use zerocore::block::create_genesis_block;
+use zerocore::account::U256;
+use zerocore::block::{
+    create_genesis_block, pow_hash_meets_target, pow_target_from_hex, pow_target_to_hex,
+};
 use zerocore::crypto::keccak256;
 use zeronet::{configure_global_block_persistence, NetworkConfig, NetworkService};
 
@@ -266,7 +269,10 @@ struct WorkPayload {
     work_id: String,
     prev_hash: String,
     height: u64,
-    target_leading_zero_bytes: usize,
+    #[serde(default)]
+    target: Option<String>,
+    #[serde(default)]
+    target_leading_zero_bytes: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -331,6 +337,23 @@ fn compute_pow_hash(prev_hash: &[u8; 32], height: u64, nonce: u64) -> [u8; 32] {
     keccak256(&data)
 }
 
+fn legacy_target_from_leading_zero_bytes(bytes: usize) -> U256 {
+    let mut target = [0xFFu8; 32];
+    let prefix = bytes.min(32);
+    target[..prefix].fill(0);
+    U256::from_big_endian(&target)
+}
+
+fn resolve_work_target(work: &WorkPayload) -> anyhow::Result<U256> {
+    if let Some(target) = &work.target {
+        return pow_target_from_hex(target).map_err(|err| anyhow!(err));
+    }
+    let leading = work
+        .target_leading_zero_bytes
+        .ok_or_else(|| anyhow!("mining work missing target"))?;
+    Ok(legacy_target_from_leading_zero_bytes(leading))
+}
+
 async fn run_rpc_backed_miner(rpc_url: String, rpc_token: Option<String>, miner_label: String) {
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
@@ -381,13 +404,23 @@ async fn run_rpc_backed_miner(rpc_url: String, rpc_token: Option<String>, miner_
 
         let mut prev_hash = [0u8; 32];
         prev_hash.copy_from_slice(&prev_hash_bytes);
+        let target = match resolve_work_target(&work) {
+            Ok(target) => target,
+            Err(err) => {
+                println!(
+                    "   ⚠️ Invalid mining target in work {}: {}",
+                    work.work_id, err
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                continue;
+            }
+        };
 
         let mut nonce = 0u64;
         loop {
             let hash = compute_pow_hash(&prev_hash, work.height, nonce);
-            let leading_zeros = hash.iter().take_while(|&&b| b == 0).count();
 
-            if leading_zeros >= work.target_leading_zero_bytes {
+            if pow_hash_meets_target(&hash, target) {
                 let hash_hex = format!("0x{}", hex::encode(hash));
                 let submit = rpc_call::<SubmitWorkPayload>(
                     &client,
@@ -440,9 +473,13 @@ async fn run_rpc_backed_miner(rpc_url: String, rpc_token: Option<String>, miner_
 
             nonce = nonce.saturating_add(1);
             if nonce.is_multiple_of(50_000) {
+                let leading_zero_bits = U256::from_big_endian(&hash).leading_zeros();
                 println!(
-                    "   Mining block #{}... nonce: {} (leading zeros: {})",
-                    work.height, nonce, leading_zeros
+                    "   Mining block #{}... nonce: {} (leading zero bits: {}, target: {})",
+                    work.height,
+                    nonce,
+                    leading_zero_bits,
+                    pow_target_to_hex(target)
                 );
             }
             if nonce.is_multiple_of(10_000) {

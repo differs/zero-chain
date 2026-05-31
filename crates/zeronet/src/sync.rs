@@ -17,7 +17,9 @@ use tokio::task::JoinHandle;
 use tokio::time::{interval, timeout, Duration, MissedTickBehavior};
 use zerocore::account::Account;
 use zerocore::account::U256;
-use zerocore::block::{Block, BlockHeader};
+use zerocore::block::{
+    pow_hash_meets_target, pow_target_from_difficulty, pow_target_to_hex, Block, BlockHeader,
+};
 use zerocore::crypto::Address;
 use zerocore::crypto::Hash;
 
@@ -27,8 +29,9 @@ const SYNC_BATCH_LIMIT: u64 = 8;
 const TARGET_BLOCK_INTERVAL_SECS: u64 = 10;
 const MIN_MINING_DIFFICULTY: u128 = 250_000;
 const BASE_MINING_DIFFICULTY: u128 = 1_000_000;
-const MAX_MINING_DIFFICULTY: u128 = 16_000_000;
+const MAX_MINING_DIFFICULTY: u128 = 1_000_000_000;
 const MAX_SYNC_EXTRA_DATA_BYTES: usize = 64;
+const POW_TARGET_HEADER_VERSION: u32 = 2;
 
 /// Serializable sync checkpoint for restart recovery.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -712,6 +715,9 @@ fn validate_header_contents(
     if header.hash != expected_hash {
         return Err("header_hash_verification_failed".to_string());
     }
+    if header.version == 0 {
+        return Err("invalid_block_version".to_string());
+    }
     if header.parent_hash != parent.hash {
         return Err(format!(
             "parent_hash_mismatch: expected={}, got={}",
@@ -746,12 +752,11 @@ fn validate_header_contents(
         return Err("mix_hash_mismatch".to_string());
     }
 
-    let leading = expected_mix.iter().take_while(|b| **b == 0).count();
-    let required = leading_zero_target_from_difficulty(parent.difficulty);
-    if leading < required {
+    if !pow_meets_block_rule(header.version, &expected_mix, parent.difficulty) {
         return Err(format!(
-            "pow_below_target: leading_zero_bytes={} required={}",
-            leading, required
+            "pow_below_target: hash=0x{} target={}",
+            hex::encode(expected_mix),
+            pow_target_to_hex(pow_target_from_difficulty(parent.difficulty))
         ));
     }
 
@@ -836,6 +841,19 @@ fn leading_zero_target_from_difficulty(difficulty: U256) -> usize {
         3
     } else {
         2
+    }
+}
+
+fn legacy_pow_meets_difficulty(digest: &[u8; 32], difficulty: U256) -> bool {
+    digest.iter().take_while(|b| **b == 0).count()
+        >= leading_zero_target_from_difficulty(difficulty)
+}
+
+fn pow_meets_block_rule(header_version: u32, digest: &[u8; 32], parent_difficulty: U256) -> bool {
+    if header_version >= POW_TARGET_HEADER_VERSION {
+        pow_hash_meets_target(digest, pow_target_from_difficulty(parent_difficulty))
+    } else {
+        legacy_pow_meets_difficulty(digest, parent_difficulty)
     }
 }
 
@@ -961,8 +979,7 @@ mod tests {
         let mut mix_hash = Hash::zero();
         loop {
             let digest = compute_mining_digest(parent.hash, number, nonce);
-            let leading = digest.iter().take_while(|b| **b == 0).count();
-            if leading >= leading_zero_target_from_difficulty(parent.difficulty) {
+            if legacy_pow_meets_difficulty(&digest, parent.difficulty) {
                 mix_hash = Hash::from_bytes(digest);
                 break;
             }
@@ -984,6 +1001,45 @@ mod tests {
             difficulty,
             nonce,
             extra_data: format!("sync-test-{number}").into_bytes(),
+            mix_hash,
+            base_fee_per_gas: U256::from(1_000_000_000u64),
+            hash: Hash::zero(),
+        };
+        header.hash = header.compute_hash();
+        Block {
+            header,
+            uncles: Vec::new(),
+        }
+    }
+
+    fn make_version2_pow_block(number: u64, parent: &BlockHeader, timestamp: u64) -> Block {
+        let difficulty = adjust_mining_difficulty(parent.difficulty, parent.timestamp, timestamp);
+        let mut nonce = 0u64;
+        let mut mix_hash = Hash::zero();
+        loop {
+            let digest = compute_mining_digest(parent.hash, number, nonce);
+            if pow_hash_meets_target(&digest, pow_target_from_difficulty(parent.difficulty)) {
+                mix_hash = Hash::from_bytes(digest);
+                break;
+            }
+            nonce = nonce.saturating_add(1);
+        }
+
+        let mut header = BlockHeader {
+            version: POW_TARGET_HEADER_VERSION,
+            parent_hash: parent.hash,
+            uncle_hashes: Vec::new(),
+            coinbase: Address::zero(),
+            state_root: Hash::zero(),
+            transactions_root: Hash::zero(),
+            receipts_root: Hash::zero(),
+            number: U256::from(number),
+            gas_limit: 30_000_000,
+            gas_used: 0,
+            timestamp,
+            difficulty,
+            nonce,
+            extra_data: format!("sync-v2-test-{number}").into_bytes(),
             mix_hash,
             base_fee_per_gas: U256::from(1_000_000_000u64),
             hash: Hash::zero(),
@@ -1048,6 +1104,14 @@ mod tests {
             snapshot.state_proof,
             derive_state_proof(&headers[2].hash, &snapshot)
         );
+    }
+
+    #[test]
+    fn test_validate_block_against_parent_accepts_version2_full_target_pow() {
+        let mut parent = legacy_mining_root_header();
+        parent.difficulty = U256::one();
+        let block = make_version2_pow_block(1, &parent, 30);
+        validate_block_against_parent(&parent, &block.header).expect("version2 pow block");
     }
 
     #[tokio::test]

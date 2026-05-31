@@ -283,7 +283,7 @@ impl std::ops::Div for U256 {
         let mut remainder = Self::zero();
 
         for i in 0..256 {
-            remainder = remainder.wrapping_mul(Self::from(2));
+            remainder = remainder << 1usize;
 
             let bit = (self.0[i / 8] >> (7 - (i % 8))) & 1;
             if bit == 1 {
@@ -292,8 +292,7 @@ impl std::ops::Div for U256 {
 
             if remainder >= other {
                 remainder = remainder.wrapping_sub(other);
-                let bit_pos = 255 - i;
-                quotient.0[bit_pos / 8] |= 1 << (7 - (bit_pos % 8));
+                quotient.0[i / 8] |= 1 << (7 - (i % 8));
             }
         }
 
@@ -857,6 +856,16 @@ mod tests {
         let (result, overflow) = a.overflowing_add(U256::zero());
         assert!(!overflow);
         assert_eq!(result.as_u64(), 100);
+    }
+
+    #[test]
+    fn test_u256_division_preserves_big_endian_bit_order() {
+        let quotient = U256::from(100) / U256::from(4);
+        assert_eq!(quotient.as_u64(), 25);
+
+        let max = U256::from_big_endian(&[0xFFu8; 32]);
+        let half = max / U256::from(2);
+        assert_eq!(half.to_big_endian()[0], 0x7F);
     }
 
     #[test]

@@ -80,12 +80,10 @@ impl BlockHeader {
     }
 
     pub fn verify_pow(&self) -> Result<(), BlockError> {
-        let target = difficulty_to_target(self.difficulty);
+        let target = pow_target_from_difficulty(self.difficulty);
         let pow_hash = compute_pow_hash(self, self.nonce);
 
-        // Convert hash to U256 for comparison
-        let pow_hash_u256 = U256::from_big_endian(pow_hash.as_bytes());
-        if pow_hash_u256 > target {
+        if !pow_hash_meets_target(pow_hash.as_bytes(), target) {
             return Err(BlockError::InvalidPow);
         }
 
@@ -158,8 +156,50 @@ pub fn create_genesis_block() -> Block {
     }
 }
 
-fn difficulty_to_target(difficulty: U256) -> U256 {
-    U256::from_big_endian(&[0xFFu8; 32]) / difficulty
+pub fn max_pow_target() -> U256 {
+    U256::from_big_endian(&[0xFFu8; 32])
+}
+
+pub fn pow_target_from_difficulty(difficulty: U256) -> U256 {
+    if difficulty.is_zero() {
+        return max_pow_target();
+    }
+    let divisor = difficulty.as_u128();
+    if divisor == 0 {
+        return U256::zero();
+    }
+    if divisor > (u128::MAX >> 8) {
+        return U256::zero();
+    }
+
+    let mut quotient = [0u8; 32];
+    let mut remainder = 0u128;
+    for slot in &mut quotient {
+        let value = remainder * 256 + 0xFF;
+        *slot = (value / divisor).min(0xFF) as u8;
+        remainder = value % divisor;
+    }
+    U256::from_big_endian(&quotient)
+}
+
+pub fn pow_hash_meets_target(pow_hash: &[u8], target: U256) -> bool {
+    U256::from_big_endian(pow_hash) <= target
+}
+
+pub fn pow_target_to_hex(target: U256) -> String {
+    format!("0x{}", hex::encode(target.to_big_endian()))
+}
+
+pub fn pow_target_from_hex(input: &str) -> Result<U256, String> {
+    let decoded = hex::decode(input.strip_prefix("0x").unwrap_or(input))
+        .map_err(|err| format!("invalid pow target hex: {err}"))?;
+    if decoded.len() != 32 {
+        return Err(format!(
+            "pow target must decode to 32 bytes, got {}",
+            decoded.len()
+        ));
+    }
+    Ok(U256::from_big_endian(&decoded))
 }
 
 fn compute_pow_hash(header: &BlockHeader, nonce: u64) -> Hash {
@@ -178,5 +218,34 @@ mod tests {
 
         assert_eq!(genesis.header.number, U256::zero());
         assert_eq!(genesis.header.parent_hash, Hash::zero());
+    }
+
+    #[test]
+    fn test_pow_target_uses_full_256_bit_comparison() {
+        let mut target_bytes = [0xFFu8; 32];
+        target_bytes[..4].copy_from_slice(&[0x00, 0x00, 0x00, 0x10]);
+        let target = U256::from_big_endian(&target_bytes);
+        let mut below = [0u8; 32];
+        below[..4].copy_from_slice(&[0x00, 0x00, 0x00, 0x10]);
+        let mut above = [0u8; 32];
+        above[..4].copy_from_slice(&[0x00, 0x00, 0x00, 0x11]);
+
+        assert!(pow_hash_meets_target(&below, target));
+        assert!(!pow_hash_meets_target(&above, target));
+    }
+
+    #[test]
+    fn test_pow_target_from_difficulty_is_continuous_below_byte_boundary() {
+        let target = pow_target_from_difficulty(U256::from_u128(1_000_000));
+        assert!(!target.is_zero());
+        assert_eq!(target.leading_zeros() / 8, 2);
+        assert!(
+            target
+                < U256::from_big_endian(&[
+                    0, 0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                    0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                ])
+        );
     }
 }
