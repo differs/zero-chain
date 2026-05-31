@@ -24,6 +24,11 @@ use zerocore::crypto::Hash;
 const SYNC_TICK_SECS: u64 = 2;
 const SYNC_RESPONSE_TIMEOUT_SECS: u64 = 3;
 const SYNC_BATCH_LIMIT: u64 = 8;
+const TARGET_BLOCK_INTERVAL_SECS: u64 = 10;
+const MIN_MINING_DIFFICULTY: u128 = 250_000;
+const BASE_MINING_DIFFICULTY: u128 = 1_000_000;
+const MAX_MINING_DIFFICULTY: u128 = 16_000_000;
+const MAX_SYNC_EXTRA_DATA_BYTES: usize = 64;
 
 /// Serializable sync checkpoint for restart recovery.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,14 +102,16 @@ impl SyncManager {
         peer_manager: Arc<crate::PeerManager>,
         state_proof_verifier: Arc<dyn StateProofVerifier>,
     ) -> Self {
-        set_global_synced_height(0);
         let (inbound_tx, inbound_rx) = mpsc::channel(512);
+        let initial_height = global_latest_block()
+            .map(|block| block.header.number.as_u64())
+            .unwrap_or_else(global_synced_height);
         Self {
             state: Arc::new(RwLock::new(SyncState::Idle)),
             peer_manager,
             running: Arc::new(AtomicBool::new(false)),
             task: RwLock::new(None),
-            local_height: Arc::new(RwLock::new(0)),
+            local_height: Arc::new(RwLock::new(initial_height)),
             inbound_tx,
             inbound_rx: RwLock::new(Some(inbound_rx)),
             state_proof_verifier,
@@ -322,7 +329,7 @@ impl SyncManager {
                     }
                 };
 
-                if let Err(err) = validate_headers(request_start, &headers) {
+                if let Err(err) = validate_headers_against_local_chain(request_start, &headers) {
                     retries = retries.saturating_add(1);
                     tracing::warn!(
                         "sync invalid headers from peer {} start {}: {}",
@@ -440,6 +447,7 @@ impl SyncManager {
                 global_replace_accounts(snapshot.accounts.clone());
                 global_replace_compute_txs(snapshot.compute_txs.clone());
 
+                let mut store_ok = true;
                 for header in &headers {
                     if global_block_by_number(header.number)
                         .map(|b| b.header.hash == header.hash)
@@ -456,11 +464,24 @@ impl SyncManager {
                                 retries,
                             };
                             peer_manager.update_score(&peer_id, -20);
-                            continue;
+                            store_ok = false;
+                            break;
                         }
                         block.header.transactions_root = Hash::zero();
                     }
-                    global_store_block(block);
+                    if let Err(err) = global_store_block(block) {
+                        retries = retries.saturating_add(1);
+                        *state.write() = SyncState::Recovering {
+                            reason: format!("block_store_failed:{err}"),
+                            retries,
+                        };
+                        peer_manager.update_score(&peer_id, -20);
+                        store_ok = false;
+                        break;
+                    }
+                }
+                if !store_ok {
+                    continue;
                 }
                 *local_height.write() = last_header.number;
                 set_global_synced_height(last_header.number);
@@ -564,7 +585,7 @@ fn verify_sync_header_hash(header: &SyncHeader) -> bool {
     reconstructed.header.compute_hash() == header.hash
 }
 
-fn validate_headers(
+pub(crate) fn validate_headers_against_local_chain(
     expected_start: u64,
     headers: &[SyncHeader],
 ) -> std::result::Result<(), String> {
@@ -579,26 +600,243 @@ fn validate_headers(
         ));
     }
 
-    for (idx, header) in headers.iter().enumerate() {
-        if idx > 0 {
-            let prev = &headers[idx - 1];
-            if header.number != prev.number.saturating_add(1) {
-                return Err("non_contiguous_header_numbers".to_string());
-            }
-            if header.parent_hash != prev.hash {
-                return Err("parent_hash_mismatch".to_string());
-            }
-            if header.timestamp < prev.timestamp {
-                return Err("timestamp_regressed".to_string());
-            }
-        }
+    let mut parent_candidates = parent_candidates_for_start(expected_start)?;
+    let mut accepted_parent: Option<BlockHeader> = None;
 
-        if !verify_sync_header_hash(header) {
-            return Err("header_hash_verification_failed".to_string());
+    for candidate in parent_candidates.drain(..) {
+        if validate_sync_header_against_parent(&candidate, &headers[0]).is_ok() {
+            accepted_parent = Some(candidate);
+            break;
         }
     }
 
+    let Some(mut parent_header) = accepted_parent else {
+        return Err("first_header_parent_or_pow_invalid".to_string());
+    };
+
+    for (idx, header) in headers.iter().enumerate() {
+        if idx > 0 && header.number != headers[idx - 1].number.saturating_add(1) {
+            return Err("non_contiguous_header_numbers".to_string());
+        }
+        validate_sync_header_against_parent(&parent_header, header)?;
+        parent_header = block_from_sync_header(header).header;
+    }
+
     Ok(())
+}
+
+fn parent_candidates_for_start(
+    expected_start: u64,
+) -> std::result::Result<Vec<BlockHeader>, String> {
+    if expected_start == 0 {
+        return Err("sync from genesis header is not supported".to_string());
+    }
+
+    if let Some(parent) = expected_start
+        .checked_sub(1)
+        .and_then(global_block_by_number)
+        .map(|block| block.header)
+    {
+        let mut candidates = vec![parent];
+        if expected_start == 1 {
+            candidates.push(legacy_mining_root_header());
+            candidates.push(zerocore::block::create_genesis_block().header);
+        }
+        return Ok(candidates);
+    }
+
+    if expected_start == 1 {
+        return Ok(vec![
+            legacy_mining_root_header(),
+            zerocore::block::create_genesis_block().header,
+        ]);
+    }
+
+    Err(format!(
+        "missing local parent for header start {}",
+        expected_start
+    ))
+}
+
+pub(crate) fn validate_block_against_parent(
+    parent: &BlockHeader,
+    header: &BlockHeader,
+) -> std::result::Result<(), String> {
+    validate_header_contents(parent, header)
+}
+
+pub(crate) fn validate_block_against_root(header: &BlockHeader) -> std::result::Result<(), String> {
+    validate_header_contents(&legacy_mining_root_header(), header).or_else(|_| {
+        validate_header_contents(&zerocore::block::create_genesis_block().header, header)
+    })
+}
+
+pub(crate) fn validate_persisted_block_chain(blocks: &[Block]) -> std::result::Result<(), String> {
+    let Some(first) = blocks.first() else {
+        return Ok(());
+    };
+
+    if first.header.number.as_u64() == 0 {
+        validate_genesis_like_header(&first.header)?;
+    } else if first.header.number.as_u64() == 1 {
+        validate_block_against_root(&first.header)?;
+    } else {
+        return Err(format!(
+            "persisted block store starts at height {}, expected 0 or 1",
+            first.header.number.as_u64()
+        ));
+    }
+
+    for pair in blocks.windows(2) {
+        let parent = &pair[0].header;
+        let child = &pair[1].header;
+        validate_block_against_parent(parent, child)?;
+    }
+
+    Ok(())
+}
+
+fn validate_sync_header_against_parent(
+    parent: &BlockHeader,
+    header: &SyncHeader,
+) -> std::result::Result<(), String> {
+    let block = block_from_sync_header(header);
+    validate_header_contents(parent, &block.header)
+}
+
+fn validate_header_contents(
+    parent: &BlockHeader,
+    header: &BlockHeader,
+) -> std::result::Result<(), String> {
+    let expected_hash = header.compute_hash();
+    if header.hash != expected_hash {
+        return Err("header_hash_verification_failed".to_string());
+    }
+    if header.parent_hash != parent.hash {
+        return Err(format!(
+            "parent_hash_mismatch: expected={}, got={}",
+            parent.hash, header.parent_hash
+        ));
+    }
+    if header.number != parent.number + U256::one() {
+        return Err("invalid_block_number".to_string());
+    }
+    if header.timestamp < parent.timestamp {
+        return Err("timestamp_regressed".to_string());
+    }
+    if header.extra_data.len() > MAX_SYNC_EXTRA_DATA_BYTES {
+        return Err("extra_data_too_large".to_string());
+    }
+
+    let expected_difficulty =
+        adjust_mining_difficulty(parent.difficulty, parent.timestamp, header.timestamp);
+    let legacy_root_base_difficulty = is_legacy_mining_root(parent)
+        && header.number == U256::one()
+        && header.difficulty == U256::from_u128(BASE_MINING_DIFFICULTY);
+    if header.difficulty != expected_difficulty && !legacy_root_base_difficulty {
+        return Err(format!(
+            "invalid_difficulty: expected 0x{:x}, got 0x{:x}",
+            expected_difficulty.as_u64(),
+            header.difficulty.as_u64()
+        ));
+    }
+
+    let expected_mix = compute_mining_digest(parent.hash, header.number.as_u64(), header.nonce);
+    if header.mix_hash != Hash::from_bytes(expected_mix) {
+        return Err("mix_hash_mismatch".to_string());
+    }
+
+    let leading = expected_mix.iter().take_while(|b| **b == 0).count();
+    let required = leading_zero_target_from_difficulty(parent.difficulty);
+    if leading < required {
+        return Err(format!(
+            "pow_below_target: leading_zero_bytes={} required={}",
+            leading, required
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_genesis_like_header(header: &BlockHeader) -> std::result::Result<(), String> {
+    if header.number != U256::zero() {
+        return Err("genesis_record_number_mismatch".to_string());
+    }
+    if header.parent_hash != Hash::zero() {
+        return Err("genesis_record_parent_mismatch".to_string());
+    }
+    if header.hash != header.compute_hash() {
+        return Err("genesis_record_hash_mismatch".to_string());
+    }
+    Ok(())
+}
+
+pub(crate) fn legacy_mining_root_header() -> BlockHeader {
+    BlockHeader {
+        version: 1,
+        parent_hash: Hash::zero(),
+        uncle_hashes: Vec::new(),
+        coinbase: Address::zero(),
+        state_root: Hash::zero(),
+        transactions_root: Hash::zero(),
+        receipts_root: Hash::zero(),
+        number: U256::zero(),
+        gas_limit: 30_000_000,
+        gas_used: 0,
+        timestamp: 0,
+        difficulty: U256::from_u128(BASE_MINING_DIFFICULTY),
+        nonce: 0,
+        extra_data: Vec::new(),
+        mix_hash: Hash::zero(),
+        base_fee_per_gas: U256::from(1_000_000_000u64),
+        hash: Hash::zero(),
+    }
+}
+
+fn is_legacy_mining_root(header: &BlockHeader) -> bool {
+    header.number == U256::zero()
+        && header.hash == Hash::zero()
+        && header.parent_hash == Hash::zero()
+        && header.difficulty == U256::from_u128(BASE_MINING_DIFFICULTY)
+}
+
+pub(crate) fn adjust_mining_difficulty(
+    parent_difficulty: U256,
+    parent_timestamp: u64,
+    now: u64,
+) -> U256 {
+    let elapsed = now.saturating_sub(parent_timestamp);
+    let mut next = parent_difficulty.as_u64() as u128;
+    if next == 0 {
+        next = BASE_MINING_DIFFICULTY;
+    }
+
+    if elapsed <= TARGET_BLOCK_INTERVAL_SECS / 2 {
+        next = next.saturating_mul(110) / 100;
+    } else if elapsed >= TARGET_BLOCK_INTERVAL_SECS.saturating_mul(2) {
+        next = next.saturating_mul(90) / 100;
+    }
+
+    U256::from_u128(next.clamp(MIN_MINING_DIFFICULTY, MAX_MINING_DIFFICULTY))
+}
+
+fn compute_mining_digest(parent_hash: Hash, height: u64, nonce: u64) -> [u8; 32] {
+    let mut data = Vec::new();
+    data.extend_from_slice(parent_hash.as_bytes());
+    data.extend_from_slice(&height.to_be_bytes());
+    data.extend_from_slice(&nonce.to_be_bytes());
+    zerocore::crypto::keccak256(&data)
+}
+
+fn leading_zero_target_from_difficulty(difficulty: U256) -> usize {
+    let raw = difficulty.as_u64() as u128;
+    if raw >= 8_000_000 {
+        4
+    } else if raw >= 2_000_000 {
+        3
+    } else {
+        2
+    }
 }
 
 async fn wait_for_headers(
@@ -717,10 +955,23 @@ mod tests {
 
     static TEST_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
-    fn make_block(number: u64, parent_hash: Hash, timestamp: u64) -> Block {
+    fn make_block(number: u64, parent: &BlockHeader, timestamp: u64) -> Block {
+        let difficulty = adjust_mining_difficulty(parent.difficulty, parent.timestamp, timestamp);
+        let mut nonce = 0u64;
+        let mut mix_hash = Hash::zero();
+        loop {
+            let digest = compute_mining_digest(parent.hash, number, nonce);
+            let leading = digest.iter().take_while(|b| **b == 0).count();
+            if leading >= leading_zero_target_from_difficulty(parent.difficulty) {
+                mix_hash = Hash::from_bytes(digest);
+                break;
+            }
+            nonce = nonce.saturating_add(1);
+        }
+
         let mut header = BlockHeader {
             version: 1,
-            parent_hash,
+            parent_hash: parent.hash,
             uncle_hashes: Vec::new(),
             coinbase: Address::zero(),
             state_root: Hash::zero(),
@@ -730,12 +981,10 @@ mod tests {
             gas_limit: 30_000_000,
             gas_used: 0,
             timestamp,
-            difficulty: U256::from(1_000_000_000_000_000u64),
-            nonce: number.saturating_mul(17).saturating_add(7),
+            difficulty,
+            nonce,
             extra_data: format!("sync-test-{number}").into_bytes(),
-            mix_hash: Hash::from_bytes(zerocore::crypto::keccak256(
-                format!("mix-{number}").as_bytes(),
-            )),
+            mix_hash,
             base_fee_per_gas: U256::from(1_000_000_000u64),
             hash: Hash::zero(),
         };
@@ -748,22 +997,20 @@ mod tests {
 
     fn seed_chain(head: u64) {
         crate::global_reset_sync_cache();
-        let genesis = create_genesis_block();
-        let mut parent_hash = genesis.header.hash;
-        crate::global_store_block(genesis);
+        let mut parent = legacy_mining_root_header();
 
         for number in 1..=head {
-            let block = make_block(number, parent_hash, number.saturating_mul(10));
-            parent_hash = block.header.hash;
-            crate::global_store_block(block);
+            let block = make_block(number, &parent, number.saturating_mul(30));
+            parent = block.header.clone();
+            crate::global_store_block(block).expect("seed block should store");
         }
     }
 
     #[tokio::test]
     async fn test_chain_responses_from_global_blocks() {
         let _guard = TEST_LOCK.lock().await;
-        let manager = SyncManager::new(Arc::new(crate::PeerManager::new(4)));
         seed_chain(6);
+        let manager = SyncManager::new(Arc::new(crate::PeerManager::new(4)));
         manager.set_local_height(6);
 
         let headers = manager.build_headers_response(2, 3);
@@ -806,6 +1053,7 @@ mod tests {
     #[tokio::test]
     async fn test_sync_progresses_with_real_request_response_flow() {
         let _guard = TEST_LOCK.lock().await;
+        crate::global_reset_sync_cache();
         let peer_manager = Arc::new(crate::PeerManager::new(8));
         let sync = Arc::new(SyncManager::new(peer_manager.clone()));
 
@@ -884,6 +1132,7 @@ mod tests {
     #[tokio::test]
     async fn checkpoint_roundtrip_restores_height_and_state() {
         let _guard = TEST_LOCK.lock().await;
+        crate::global_reset_sync_cache();
         let manager = SyncManager::new(Arc::new(crate::PeerManager::new(4)));
         manager.set_local_height(12);
         manager.import_checkpoint(&SyncCheckpoint {
@@ -903,5 +1152,16 @@ mod tests {
                 retries: 3
             }
         );
+    }
+
+    #[tokio::test]
+    async fn new_manager_preserves_existing_global_height() {
+        let _guard = TEST_LOCK.lock().await;
+        seed_chain(5);
+
+        let manager = SyncManager::new(Arc::new(crate::PeerManager::new(4)));
+
+        assert_eq!(manager.local_height(), 5);
+        assert_eq!(crate::global_synced_height(), 5);
     }
 }

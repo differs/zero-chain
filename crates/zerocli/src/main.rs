@@ -145,6 +145,18 @@ enum Commands {
         #[arg(long = "bootnode")]
         bootnodes: Vec<String>,
 
+        /// Optional explicit stable local P2P peer id
+        #[arg(long)]
+        p2p_peer_id: Option<String>,
+
+        /// Path used to load/create a stable local P2P peer id
+        #[arg(long)]
+        p2p_peer_id_path: Option<String>,
+
+        /// JSON-lines block header store used for P2P sync restart recovery
+        #[arg(long)]
+        p2p_sync_blocks_path: Option<String>,
+
         /// Max connected peers
         #[arg(long, default_value = "50")]
         max_peers: u32,
@@ -481,6 +493,9 @@ async fn main() -> Result<()> {
             p2p_ws_listen_port,
             p2p_ws_external_url,
             bootnodes,
+            p2p_peer_id,
+            p2p_peer_id_path,
+            p2p_sync_blocks_path,
             max_peers,
             disable_discovery,
             disable_sync,
@@ -586,6 +601,15 @@ async fn main() -> Result<()> {
             if !bootnodes.is_empty() {
                 println!("   bootnodes: {}", bootnodes.join(", "));
             }
+            if let Some(peer_id) = &p2p_peer_id {
+                println!("   p2p peer id: {}", peer_id);
+            }
+            if let Some(path) = &p2p_peer_id_path {
+                println!("   p2p peer id path: {}", path);
+            }
+            if let Some(path) = &p2p_sync_blocks_path {
+                println!("   p2p sync block store: {}", path);
+            }
 
             commands::run::run_node(commands::run::RunNodeConfig {
                 mine,
@@ -603,6 +627,9 @@ async fn main() -> Result<()> {
                 p2p_ws_listen_port,
                 p2p_ws_external_url,
                 bootnodes,
+                p2p_peer_id,
+                p2p_peer_id_path,
+                p2p_sync_blocks_path,
                 max_peers,
                 enable_discovery,
                 enable_sync: !disable_sync,

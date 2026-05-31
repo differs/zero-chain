@@ -4,11 +4,12 @@ use crate::Result;
 use anyhow::{anyhow, bail};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
+use std::path::PathBuf;
 use zeroapi::rpc::RpcConfig;
 use zeroapi::{ApiConfig, ApiService};
 use zerocore::block::create_genesis_block;
 use zerocore::crypto::keccak256;
-use zeronet::{NetworkConfig, NetworkService};
+use zeronet::{configure_global_block_persistence, NetworkConfig, NetworkService};
 
 pub struct RunNodeConfig {
     pub mine: bool,
@@ -26,6 +27,9 @@ pub struct RunNodeConfig {
     pub p2p_ws_listen_port: Option<u16>,
     pub p2p_ws_external_url: Option<String>,
     pub bootnodes: Vec<String>,
+    pub p2p_peer_id: Option<String>,
+    pub p2p_peer_id_path: Option<String>,
+    pub p2p_sync_blocks_path: Option<String>,
     pub max_peers: u32,
     pub enable_discovery: bool,
     pub enable_sync: bool,
@@ -54,6 +58,9 @@ pub async fn run_node(cfg: RunNodeConfig) -> Result<()> {
         p2p_ws_listen_port,
         p2p_ws_external_url,
         bootnodes,
+        p2p_peer_id,
+        p2p_peer_id_path,
+        p2p_sync_blocks_path,
         max_peers,
         enable_discovery,
         enable_sync,
@@ -124,6 +131,15 @@ pub async fn run_node(cfg: RunNodeConfig) -> Result<()> {
     if let Some(ref banlist_path) = p2p_banlist_path {
         println!("   P2P banlist: {}", banlist_path);
     }
+    let p2p_peer_id_path = p2p_peer_id_path.unwrap_or_else(|| format!("{data_dir}/p2p-peer-id"));
+    let p2p_sync_blocks_path =
+        p2p_sync_blocks_path.unwrap_or_else(|| format!("{data_dir}/p2p-blocks.jsonl"));
+    if let Some(peer_id) = &p2p_peer_id {
+        println!("   P2P peer id: {}", peer_id);
+    } else {
+        println!("   P2P peer id path: {}", p2p_peer_id_path);
+    }
+    println!("   P2P sync block store: {}", p2p_sync_blocks_path);
     if mine {
         let display_coinbase = coinbase
             .clone()
@@ -155,6 +171,8 @@ pub async fn run_node(cfg: RunNodeConfig) -> Result<()> {
         .as_ref()
         .map(|cfg| cfg.network_id)
         .unwrap_or(10086);
+    configure_global_block_persistence(Some(PathBuf::from(&p2p_sync_blocks_path)))?;
+
     let _api_service = if let Some(mut cfg) = rpc_config.clone() {
         let rpc_token = cfg.auth_token.clone();
         cfg.port = http_port;
@@ -200,6 +218,9 @@ pub async fn run_node(cfg: RunNodeConfig) -> Result<()> {
         ws_listen_addr: p2p_ws_listen_addr,
         ws_listen_port: p2p_ws_listen_port,
         ws_external_url: p2p_ws_external_url,
+        local_peer_id: p2p_peer_id,
+        peer_id_path: Some(PathBuf::from(p2p_peer_id_path)),
+        sync_blocks_path: Some(PathBuf::from(p2p_sync_blocks_path)),
         max_peers,
         min_peers: max_peers.min(25),
         bootnodes,

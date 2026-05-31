@@ -27,11 +27,12 @@ use async_trait::async_trait;
 use futures::{SinkExt, StreamExt};
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
-use serde::de::DeserializeOwned;
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::io;
+use std::fs::{self, OpenOptions};
+use std::io::{self, BufRead, BufReader, Write};
 use std::net::{IpAddr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
@@ -45,6 +46,8 @@ use tokio_tungstenite::{accept_async, connect_async, MaybeTlsStream, WebSocketSt
 use url::Url;
 use uuid::Uuid;
 use zerocore::account::Account;
+use zerocore::account::U256;
+use zerocore::block::{Block, BlockHeader};
 use zerocore::crypto::Hash;
 
 static GLOBAL_PEER_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -52,6 +55,8 @@ static GLOBAL_PEER_INFOS: Lazy<RwLock<Vec<PeerInfo>>> = Lazy::new(|| RwLock::new
 static GLOBAL_SYNCED_HEIGHT: AtomicU64 = AtomicU64::new(0);
 static GLOBAL_BLOCKS: Lazy<RwLock<BTreeMap<u64, zerocore::block::Block>>> =
     Lazy::new(|| RwLock::new(BTreeMap::new()));
+static GLOBAL_BLOCK_PERSISTENCE_PATH: Lazy<RwLock<Option<PathBuf>>> =
+    Lazy::new(|| RwLock::new(None));
 static GLOBAL_SYNC_ACCOUNTS: Lazy<RwLock<HashMap<zerocore::crypto::Address, Account>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
 static GLOBAL_SYNC_COMPUTE_TXS: Lazy<RwLock<HashMap<Hash, SyncComputeTxRecord>>> =
@@ -72,7 +77,7 @@ const PEER_IDLE_TIMEOUT_SECS: u64 = 45;
 const PEER_SEND_BUFFER: usize = 256;
 const DEFAULT_DEDUP_TTL_SECS: u64 = 5 * 60;
 const MAX_DEDUP_ENTRIES: usize = 8192;
-const MAX_GLOBAL_BLOCKS: usize = 8192;
+const MAX_GLOBAL_BLOCKS: usize = 50_000;
 const MAX_GLOBAL_SYNC_TX_INDEX: usize = 100_000;
 const DISCOVERY_DIAL_INTERVAL_SECS: u64 = 5;
 const SYNC_HEAD_ANNOUNCE_INTERVAL_SECS: u64 = 10;
@@ -226,20 +231,58 @@ pub fn set_global_synced_height(height: u64) {
 }
 
 /// Store a canonical block snapshot for sync/read APIs.
-pub fn global_store_block(block: zerocore::block::Block) {
+pub fn global_store_block(block: zerocore::block::Block) -> Result<()> {
     let height = block.header.number.as_u64();
-    let mut blocks = GLOBAL_BLOCKS.write();
-    blocks.insert(height, block);
-    while blocks.len() > MAX_GLOBAL_BLOCKS {
-        let Some(oldest) = blocks.keys().next().copied() else {
-            break;
-        };
-        blocks.remove(&oldest);
+    validate_global_block_insert(&block)?;
+    persist_global_block(&block).map_err(NetworkError::IO)?;
+    {
+        let mut blocks = GLOBAL_BLOCKS.write();
+        blocks.insert(height, block.clone());
+        while blocks.len() > MAX_GLOBAL_BLOCKS {
+            let Some(oldest) = blocks.keys().next().copied() else {
+                break;
+            };
+            blocks.remove(&oldest);
+        }
     }
     let prev = global_synced_height();
     if height > prev {
         set_global_synced_height(height);
     }
+    Ok(())
+}
+
+fn validate_global_block_insert(block: &Block) -> Result<()> {
+    let height = block.header.number.as_u64();
+    if let Some(existing) = GLOBAL_BLOCKS.read().get(&height).cloned() {
+        if existing.header.hash == block.header.hash {
+            return Ok(());
+        }
+        return Err(NetworkError::ProtocolError(format!(
+            "conflicting block at height {}: existing={} incoming={}",
+            height, existing.header.hash, block.header.hash
+        )));
+    }
+
+    if height == 0 {
+        return crate::sync::validate_persisted_block_chain(std::slice::from_ref(block))
+            .map_err(NetworkError::ProtocolError);
+    }
+
+    if let Some(parent) = GLOBAL_BLOCKS.read().get(&height.saturating_sub(1)).cloned() {
+        return crate::sync::validate_block_against_parent(&parent.header, &block.header)
+            .map_err(NetworkError::ProtocolError);
+    }
+
+    if height == 1 {
+        return crate::sync::validate_block_against_root(&block.header)
+            .map_err(NetworkError::ProtocolError);
+    }
+
+    Err(NetworkError::ProtocolError(format!(
+        "missing parent block for height {}",
+        height
+    )))
 }
 
 /// Read a canonical block snapshot by number.
@@ -270,6 +313,255 @@ pub fn global_reset_sync_cache() {
     GLOBAL_SYNC_COMPUTE_TXS.write().clear();
     GLOBAL_SYNC_COMPUTE_ORDER.write().clear();
     set_global_synced_height(0);
+}
+
+/// Configure optional process-wide block persistence for P2P sync recovery.
+///
+/// The persisted data is a JSON-lines header store. It is intentionally simple:
+/// every accepted block appends one record, and startup rebuilds the in-memory
+/// sync cache from the latest record per height.
+pub fn configure_global_block_persistence(path: Option<PathBuf>) -> Result<()> {
+    *GLOBAL_BLOCK_PERSISTENCE_PATH.write() = path.clone();
+
+    let Some(path) = path else {
+        return Ok(());
+    };
+
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+
+    let loaded = load_persisted_blocks(&path)?;
+    if loaded.is_empty() {
+        return Ok(());
+    }
+
+    let mut max_height = 0u64;
+    {
+        let mut blocks = GLOBAL_BLOCKS.write();
+        for block in loaded {
+            let height = block.header.number.as_u64();
+            max_height = max_height.max(height);
+            blocks.insert(height, block);
+        }
+        while blocks.len() > MAX_GLOBAL_BLOCKS {
+            let Some(oldest) = blocks.keys().next().copied() else {
+                break;
+            };
+            blocks.remove(&oldest);
+        }
+    }
+    set_global_synced_height(global_synced_height().max(max_height));
+    tracing::info!(
+        "loaded persisted P2P sync blocks up to height {} from {}",
+        max_height,
+        path.display()
+    );
+    Ok(())
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PersistedBlockRecord {
+    version: u32,
+    number: u64,
+    hash: Hash,
+    parent_hash: Hash,
+    timestamp: u64,
+    difficulty: U256,
+    nonce: u64,
+    coinbase: zerocore::crypto::Address,
+    mix_hash: Hash,
+    extra_data: Vec<u8>,
+}
+
+impl From<&Block> for PersistedBlockRecord {
+    fn from(block: &Block) -> Self {
+        Self {
+            version: 1,
+            number: block.header.number.as_u64(),
+            hash: block.header.hash,
+            parent_hash: block.header.parent_hash,
+            timestamp: block.header.timestamp,
+            difficulty: block.header.difficulty,
+            nonce: block.header.nonce,
+            coinbase: block.header.coinbase,
+            mix_hash: block.header.mix_hash,
+            extra_data: block.header.extra_data.clone(),
+        }
+    }
+}
+
+impl PersistedBlockRecord {
+    fn into_block(self) -> Block {
+        Block {
+            header: BlockHeader {
+                version: 1,
+                parent_hash: self.parent_hash,
+                uncle_hashes: Vec::new(),
+                coinbase: self.coinbase,
+                state_root: Hash::zero(),
+                transactions_root: Hash::zero(),
+                receipts_root: Hash::zero(),
+                number: U256::from(self.number),
+                gas_limit: 30_000_000,
+                gas_used: 0,
+                timestamp: self.timestamp,
+                difficulty: self.difficulty,
+                nonce: self.nonce,
+                extra_data: self.extra_data,
+                mix_hash: self.mix_hash,
+                base_fee_per_gas: U256::from(1_000_000_000u64),
+                hash: self.hash,
+            },
+            uncles: Vec::new(),
+        }
+    }
+}
+
+fn persist_global_block(block: &Block) -> io::Result<()> {
+    let path = GLOBAL_BLOCK_PERSISTENCE_PATH.read().clone();
+    let Some(path) = path else {
+        return Ok(());
+    };
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+
+    let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+    serde_json::to_writer(&mut file, &PersistedBlockRecord::from(block))
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    file.write_all(b"\n")?;
+    file.sync_data()?;
+    Ok(())
+}
+
+fn load_persisted_blocks(path: &Path) -> Result<Vec<Block>> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let contents = fs::read_to_string(path)?;
+    let lines: Vec<&str> = contents.lines().collect();
+    let mut by_height = BTreeMap::new();
+    for (idx, line) in lines.iter().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let record: PersistedBlockRecord = match serde_json::from_str(line) {
+            Ok(record) => record,
+            Err(err) if idx + 1 == lines.len() => {
+                tracing::warn!(
+                    "ignoring truncated trailing persisted block record {} in {}: {}",
+                    idx + 1,
+                    path.display(),
+                    err
+                );
+                break;
+            }
+            Err(err) => {
+                return Err(NetworkError::Serialization(format!(
+                    "invalid persisted block record {} in {}: {}",
+                    idx + 1,
+                    path.display(),
+                    err
+                )));
+            }
+        };
+        if record.version != 1 {
+            return Err(NetworkError::Serialization(format!(
+                "unsupported persisted block record version {} in {} at line {}",
+                record.version,
+                path.display(),
+                idx + 1
+            )));
+        }
+        by_height.insert(record.number, record.into_block());
+    }
+    let blocks: Vec<Block> = by_height.into_values().collect();
+    crate::sync::validate_persisted_block_chain(&blocks).map_err(|err| {
+        NetworkError::Serialization(format!(
+            "invalid persisted block chain in {}: {}",
+            path.display(),
+            err
+        ))
+    })?;
+    Ok(blocks)
+}
+
+fn resolve_local_peer_id(config: &NetworkConfig) -> Result<String> {
+    if let Some(peer_id) = config.local_peer_id.as_deref() {
+        validate_peer_id(peer_id)?;
+        return Ok(peer_id.to_string());
+    }
+
+    if let Some(path) = config.peer_id_path.as_deref() {
+        return load_or_create_peer_id(path);
+    }
+
+    Ok(format!("node-{}", Uuid::new_v4()))
+}
+
+fn load_or_create_peer_id(path: &Path) -> Result<String> {
+    if path.exists() {
+        let peer_id = fs::read_to_string(path)?.trim().to_string();
+        validate_peer_id(&peer_id)?;
+        return Ok(peer_id);
+    }
+
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+
+    let peer_id = format!("node-{}", Uuid::new_v4());
+    validate_peer_id(&peer_id)?;
+    write_peer_id_file(path, &peer_id)?;
+    Ok(peer_id)
+}
+
+fn write_peer_id_file(path: &Path, peer_id: &str) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(peer_id.as_bytes())?;
+        file.write_all(b"\n")?;
+        file.sync_data()?;
+        return Ok(());
+    }
+
+    #[cfg(not(unix))]
+    {
+        let mut file = OpenOptions::new().create_new(true).write(true).open(path)?;
+        file.write_all(peer_id.as_bytes())?;
+        file.write_all(b"\n")?;
+        file.sync_data()?;
+        Ok(())
+    }
+}
+
+fn validate_peer_id(peer_id: &str) -> Result<()> {
+    let len = peer_id.len();
+    if len == 0 || len > 128 {
+        return Err(NetworkError::ProtocolError(
+            "peer id must be 1..=128 bytes".to_string(),
+        ));
+    }
+    if peer_id.chars().any(char::is_whitespace) {
+        return Err(NetworkError::ProtocolError(
+            "peer id must not contain whitespace".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// Record or update an account snapshot visible to RPC readers.
@@ -387,6 +679,12 @@ pub struct NetworkConfig {
     pub min_peers: u32,
     /// Bootstrap nodes
     pub bootnodes: Vec<String>,
+    /// Optional explicit stable local peer id.
+    pub local_peer_id: Option<String>,
+    /// Optional path used to load/create a stable local peer id.
+    pub peer_id_path: Option<PathBuf>,
+    /// Optional JSON-lines block header store used for P2P sync restart recovery.
+    pub sync_blocks_path: Option<PathBuf>,
     /// Node name
     pub node_name: String,
     /// Enable discovery
@@ -426,6 +724,9 @@ impl Default for NetworkConfig {
             max_peers: 50,
             min_peers: 25,
             bootnodes: Vec::new(),
+            local_peer_id: None,
+            peer_id_path: None,
+            sync_blocks_path: None,
             node_name: "ZeroChain/v0.1.0".to_string(),
             enable_discovery: true,
             enable_sync: true,
@@ -459,7 +760,8 @@ pub struct NetworkService {
 impl NetworkService {
     /// Create new network service
     pub fn new(config: NetworkConfig) -> Result<Self> {
-        let local_peer_id = format!("node-{}", Uuid::new_v4().simple());
+        configure_global_block_persistence(config.sync_blocks_path.clone())?;
+        let local_peer_id = resolve_local_peer_id(&config)?;
         let peer_manager = Arc::new(PeerManager::new_with_policy(
             config.max_peers,
             config.banlist_path.clone().map(PathBuf::from),
@@ -2019,6 +2321,48 @@ mod tests {
         );
     }
 
+    fn make_test_block_with_parent(number: u64, parent: &BlockHeader) -> Block {
+        let timestamp = parent.timestamp.saturating_add(30);
+        let difficulty =
+            crate::sync::adjust_mining_difficulty(parent.difficulty, parent.timestamp, timestamp);
+        let mut nonce = 0u64;
+        let mix_hash = loop {
+            let mut data = Vec::new();
+            data.extend_from_slice(parent.hash.as_bytes());
+            data.extend_from_slice(&number.to_be_bytes());
+            data.extend_from_slice(&nonce.to_be_bytes());
+            let digest = zerocore::crypto::keccak256(&data);
+            if digest.iter().take_while(|b| **b == 0).count() >= 2 {
+                break Hash::from_bytes(digest);
+            }
+            nonce = nonce.saturating_add(1);
+        };
+        let mut header = BlockHeader {
+            version: 1,
+            parent_hash: parent.hash,
+            uncle_hashes: Vec::new(),
+            coinbase: zerocore::crypto::Address::zero(),
+            state_root: Hash::zero(),
+            transactions_root: Hash::zero(),
+            receipts_root: Hash::zero(),
+            number: U256::from(number),
+            gas_limit: 30_000_000,
+            gas_used: 0,
+            timestamp,
+            difficulty,
+            nonce,
+            extra_data: format!("p2p-persist-test-{number}").into_bytes(),
+            mix_hash,
+            base_fee_per_gas: U256::from(1_000_000_000u64),
+            hash: Hash::zero(),
+        };
+        header.hash = header.compute_hash();
+        Block {
+            header,
+            uncles: Vec::new(),
+        }
+    }
+
     #[tokio::test]
     async fn test_network_service() {
         let config = NetworkConfig {
@@ -2039,6 +2383,96 @@ mod tests {
 
         network.stop().await.unwrap();
         assert!(!*network.is_running.read());
+    }
+
+    #[test]
+    fn test_network_service_persists_peer_id_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let peer_id_path = dir.path().join("p2p-peer-id");
+        let config = NetworkConfig {
+            listen_addr: "127.0.0.1".to_string(),
+            listen_port: unused_tcp_port(),
+            enable_discovery: false,
+            enable_sync: false,
+            peer_id_path: Some(peer_id_path.clone()),
+            ..Default::default()
+        };
+
+        let first = NetworkService::new(config.clone()).unwrap();
+        let second = NetworkService::new(config).unwrap();
+
+        assert_eq!(first.local_peer_id, second.local_peer_id);
+        assert_eq!(
+            fs::read_to_string(peer_id_path).unwrap().trim(),
+            first.local_peer_id
+        );
+    }
+
+    #[test]
+    fn test_persisted_block_records_roundtrip_with_header_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("p2p-blocks.jsonl");
+        let block = make_test_block_with_parent(1, &crate::sync::legacy_mining_root_header());
+        {
+            let mut file = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&path)
+                .unwrap();
+            serde_json::to_writer(&mut file, &PersistedBlockRecord::from(&block)).unwrap();
+            file.write_all(b"\n").unwrap();
+        }
+
+        let loaded = load_persisted_blocks(&path).unwrap();
+
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].header.number, block.header.number);
+        assert_eq!(loaded[0].header.hash, block.header.hash);
+        assert_eq!(loaded[0].header.compute_hash(), block.header.hash);
+    }
+
+    #[test]
+    fn test_persisted_block_loader_ignores_truncated_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("p2p-blocks.jsonl");
+        let block = make_test_block_with_parent(1, &crate::sync::legacy_mining_root_header());
+        {
+            let mut file = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&path)
+                .unwrap();
+            serde_json::to_writer(&mut file, &PersistedBlockRecord::from(&block)).unwrap();
+            file.write_all(b"\n{\"version\":1").unwrap();
+        }
+
+        let loaded = load_persisted_blocks(&path).unwrap();
+
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].header.hash, block.header.hash);
+    }
+
+    #[test]
+    fn test_persisted_block_loader_rejects_invalid_middle_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("p2p-blocks.jsonl");
+        let first = make_test_block_with_parent(1, &crate::sync::legacy_mining_root_header());
+        let second = make_test_block_with_parent(2, &first.header);
+        {
+            let mut file = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&path)
+                .unwrap();
+            serde_json::to_writer(&mut file, &PersistedBlockRecord::from(&first)).unwrap();
+            file.write_all(b"\n{\"version\":1\n").unwrap();
+            serde_json::to_writer(&mut file, &PersistedBlockRecord::from(&second)).unwrap();
+            file.write_all(b"\n").unwrap();
+        }
+
+        let err = load_persisted_blocks(&path).unwrap_err();
+
+        assert!(err.to_string().contains("invalid persisted block record"));
     }
 
     #[tokio::test]

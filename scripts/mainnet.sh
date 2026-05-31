@@ -34,6 +34,7 @@ Roles:
 
 Options:
   --mine
+  --no-mine
   --coinbase ZER0x...
   --clean-data
   --bootnode enode://...|wss://... repeatable
@@ -276,7 +277,13 @@ start_node() {
         fi
         echo "mine=${mine} disable_local_miner=${disable_local_miner} rpc_rate_limit_per_minute=${rpc_rate_limit_per_minute:-default}"
         if [[ "${role}" == "bootnode" && "${disable_p2p_tcp}" != "true" ]]; then
-            echo "bootnode_enode_hint=enode://BOOTNODE_PEER_ID@${p2p_listen_addr}:${p2p_port}"
+            local peer_id
+            peer_id="$(tr -d '[:space:]' < "${DATA_DIR}/p2p-peer-id" 2>/dev/null || true)"
+            if [[ -n "${peer_id}" ]]; then
+                echo "bootnode_enode_hint=enode://${peer_id}@${p2p_listen_addr}:${p2p_port}"
+            else
+                echo "bootnode_enode_hint=enode://BOOTNODE_PEER_ID@${p2p_listen_addr}:${p2p_port}"
+            fi
         fi
         if [[ ${#bootnodes[@]} -gt 0 ]]; then
             echo "bootnodes=${bootnodes[*]}"
@@ -382,6 +389,10 @@ case "${cmd}" in
             case "$1" in
                 --mine)
                     mine="true"
+                    shift
+                    ;;
+                --no-mine)
+                    mine="false"
                     shift
                     ;;
                 --coinbase)
