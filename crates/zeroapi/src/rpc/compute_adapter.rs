@@ -51,7 +51,7 @@ impl RpcComputeAdapter {
             scheduler,
             planner,
             runner,
-            config.compute_fallback_mode,
+            config.compute_fallback_policy(),
         ));
 
         Self {

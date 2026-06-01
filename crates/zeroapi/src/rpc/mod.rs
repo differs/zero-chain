@@ -303,8 +303,15 @@ impl RpcConfig {
             batch_window_ms: self.compute_batch_window_ms,
             max_batch_size: self.compute_max_batch_size,
             max_pending: self.compute_max_pending,
-            lane_strategy: self.compute_lane_strategy,
+            lane_strategy: std::sync::Arc::new(self.compute_lane_strategy),
         }
+    }
+
+    /// Returns the compute fallback policy selected by this config.
+    pub fn compute_fallback_policy(
+        &self,
+    ) -> std::sync::Arc<dyn zerocore::compute::batch::ComputeFallbackPolicy> {
+        self.compute_fallback_mode.build_policy()
     }
 }
 

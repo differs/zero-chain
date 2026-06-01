@@ -18,8 +18,9 @@ pub use agent::{AgentScheduler, AgentSpec, AgentTask, InMemoryAgentScheduler};
 pub use batch::{
     ComputeAccessSet, ComputeBatchGroup, ComputeBatchOutcome, ComputeBatchPlan,
     ComputeBatchPlanner, ComputeBatchRunner, ComputeConflictPolicy, ComputeExecutionService,
-    ComputeFallbackMode, DefaultComputeBatchPlanner, DefaultComputeConflictPolicy,
-    ParallelComputeBatchRunner, PlannedComputeTx,
+    ComputeFallbackDisposition, ComputeFallbackMode, ComputeFallbackPolicy,
+    DefaultComputeBatchPlanner, DefaultComputeConflictPolicy, DisabledComputeFallbackPolicy,
+    ParallelComputeBatchRunner, PlannedComputeTx, SerialComputeFallbackPolicy,
 };
 pub use domain::{DomainConfig, DomainRegistry, InMemoryDomainRegistry};
 pub use error::ComputeError;
@@ -34,8 +35,8 @@ pub use policy::{
 };
 pub use primitives::{DomainId, ObjectId, ObjectPointer, OutputId, ResourceId, TxId, Version};
 pub use scheduler::{
-    ComputeLaneStrategy, ComputeScheduleError, ComputeScheduleTicket, ComputeScheduler,
-    ComputeSchedulerConfig, InMemoryComputeScheduler, PendingComputeTx,
+    ComputeLaneKeyStrategy, ComputeLaneStrategy, ComputeScheduleError, ComputeScheduleTicket,
+    ComputeScheduler, ComputeSchedulerConfig, InMemoryComputeScheduler, PendingComputeTx,
 };
 pub use tx::{
     Command, ComputeTx, Metadata, ObjectReadRef, OutputProposal, SignatureScheme, TxSignature,

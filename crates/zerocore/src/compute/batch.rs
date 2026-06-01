@@ -16,7 +16,7 @@ use super::{
     execution::{BasicTxExecutor, BasicTxValidator, ObjectStore, ValidationReport},
     policy::{AuthorizationPolicy, ResourcePolicy},
     primitives::{DomainId, ObjectId, OutputId, TxId},
-    scheduler::{ComputeScheduler, PendingComputeTx},
+    scheduler::{ComputeScheduleError, ComputeScheduler, PendingComputeTx},
     tx::ComputeTx,
 };
 
@@ -39,8 +39,91 @@ impl Default for ComputeFallbackMode {
 }
 
 impl ComputeFallbackMode {
-    fn allows_fallback(self) -> bool {
-        matches!(self, Self::SerialOnFailure)
+    /// Builds the runtime policy object for this mode.
+    pub fn build_policy(self) -> Arc<dyn ComputeFallbackPolicy> {
+        match self {
+            Self::Disabled => Arc::new(DisabledComputeFallbackPolicy),
+            Self::SerialOnFailure => Arc::new(SerialComputeFallbackPolicy),
+        }
+    }
+}
+
+/// Fallback disposition for a compute execution failure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ComputeFallbackDisposition {
+    /// Reject the tx or batch.
+    Reject,
+    /// Execute the affected txs serially.
+    RunSerial,
+}
+
+/// Fallback policy hook.
+pub trait ComputeFallbackPolicy: Send + Sync {
+    /// Fallback choice when scheduler admission fails.
+    fn on_schedule_reject(
+        &self,
+        tx: &ComputeTx,
+        err: &ComputeScheduleError,
+    ) -> ComputeFallbackDisposition;
+    /// Fallback choice when batch planning fails.
+    fn on_plan_error(
+        &self,
+        pending: &[PendingComputeTx],
+        err: &ComputeError,
+    ) -> ComputeFallbackDisposition;
+    /// Fallback choice when a submitted tx cannot be resolved in the outcome cache.
+    fn on_missing_outcome(&self, tx: &ComputeTx) -> ComputeFallbackDisposition;
+}
+
+/// Strict fallback policy.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DisabledComputeFallbackPolicy;
+
+impl ComputeFallbackPolicy for DisabledComputeFallbackPolicy {
+    fn on_schedule_reject(
+        &self,
+        _tx: &ComputeTx,
+        _err: &ComputeScheduleError,
+    ) -> ComputeFallbackDisposition {
+        ComputeFallbackDisposition::Reject
+    }
+
+    fn on_plan_error(
+        &self,
+        _pending: &[PendingComputeTx],
+        _err: &ComputeError,
+    ) -> ComputeFallbackDisposition {
+        ComputeFallbackDisposition::Reject
+    }
+
+    fn on_missing_outcome(&self, _tx: &ComputeTx) -> ComputeFallbackDisposition {
+        ComputeFallbackDisposition::Reject
+    }
+}
+
+/// Serial fallback policy used by the default runtime mode.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SerialComputeFallbackPolicy;
+
+impl ComputeFallbackPolicy for SerialComputeFallbackPolicy {
+    fn on_schedule_reject(
+        &self,
+        _tx: &ComputeTx,
+        _err: &ComputeScheduleError,
+    ) -> ComputeFallbackDisposition {
+        ComputeFallbackDisposition::RunSerial
+    }
+
+    fn on_plan_error(
+        &self,
+        _pending: &[PendingComputeTx],
+        _err: &ComputeError,
+    ) -> ComputeFallbackDisposition {
+        ComputeFallbackDisposition::RunSerial
+    }
+
+    fn on_missing_outcome(&self, _tx: &ComputeTx) -> ComputeFallbackDisposition {
+        ComputeFallbackDisposition::RunSerial
     }
 }
 
@@ -419,7 +502,7 @@ pub struct ComputeExecutionService {
     scheduler: Arc<dyn ComputeScheduler>,
     planner: Arc<dyn ComputeBatchPlanner>,
     runner: Arc<dyn ComputeBatchRunner>,
-    fallback_mode: ComputeFallbackMode,
+    fallback_policy: Arc<dyn ComputeFallbackPolicy>,
     completed: RwLock<HashMap<TxId, ComputeBatchOutcome>>,
     completed_order: RwLock<VecDeque<TxId>>,
 }
@@ -431,14 +514,14 @@ impl ComputeExecutionService {
         scheduler: Arc<dyn ComputeScheduler>,
         planner: Arc<dyn ComputeBatchPlanner>,
         runner: Arc<dyn ComputeBatchRunner>,
-        fallback_mode: ComputeFallbackMode,
+        fallback_policy: Arc<dyn ComputeFallbackPolicy>,
     ) -> Self {
         Self {
             store,
             scheduler,
             planner,
             runner,
-            fallback_mode,
+            fallback_policy,
             completed: RwLock::new(HashMap::new()),
             completed_order: RwLock::new(VecDeque::new()),
         }
@@ -466,12 +549,14 @@ impl ComputeExecutionService {
         for chunk in pending.chunks(batch_size) {
             let chunk_outcomes = match self.planner.plan(chunk, self.store.as_ref()) {
                 Ok(plan) => self.runner.run_plan(plan),
-                Err(_err) if self.fallback_mode.allows_fallback() => chunk
-                    .iter()
-                    .cloned()
-                    .map(|pending| self.runner.run_serial(pending))
-                    .collect(),
-                Err(err) => return Err(err),
+                Err(err) => match self.fallback_policy.on_plan_error(chunk, &err) {
+                    ComputeFallbackDisposition::Reject => return Err(err),
+                    ComputeFallbackDisposition::RunSerial => chunk
+                        .iter()
+                        .cloned()
+                        .map(|pending| self.runner.run_serial(pending))
+                        .collect(),
+                },
             };
             self.record_outcomes(&chunk_outcomes);
             outcomes.extend(chunk_outcomes);
@@ -487,14 +572,16 @@ impl ComputeExecutionService {
         let pending = PendingComputeTx::new(tx.clone(), lane_key, Instant::now());
         let ticket = match self.submit(tx.clone()) {
             Ok(ticket) => ticket,
-            Err(_err) if self.fallback_mode.allows_fallback() => {
-                let outcome = self.runner.run_serial(pending);
-                self.record_outcomes(std::slice::from_ref(&outcome));
-                return Ok(outcome);
-            }
-            Err(err) => {
-                return Err(ComputeError::InvalidOperation(err.to_string()));
-            }
+            Err(err) => match self.fallback_policy.on_schedule_reject(&tx, &err) {
+                ComputeFallbackDisposition::Reject => {
+                    return Err(ComputeError::InvalidOperation(err.to_string()));
+                }
+                ComputeFallbackDisposition::RunSerial => {
+                    let outcome = self.runner.run_serial(pending);
+                    self.record_outcomes(std::slice::from_ref(&outcome));
+                    return Ok(outcome);
+                }
+            },
         };
 
         let wait_ms = self.scheduler.config().batch_window_ms;
@@ -507,16 +594,17 @@ impl ComputeExecutionService {
             return Ok(outcome);
         }
 
-        if self.fallback_mode.allows_fallback() {
-            let outcome = self.runner.run_serial(pending);
-            self.record_outcomes(std::slice::from_ref(&outcome));
-            return Ok(outcome);
+        match self.fallback_policy.on_missing_outcome(&tx) {
+            ComputeFallbackDisposition::Reject => Err(ComputeError::InvalidOperation(format!(
+                "compute outcome missing after submit for {}",
+                hex::encode(ticket.tx_id.0.as_bytes())
+            ))),
+            ComputeFallbackDisposition::RunSerial => {
+                let outcome = self.runner.run_serial(pending);
+                self.record_outcomes(std::slice::from_ref(&outcome));
+                Ok(outcome)
+            }
         }
-
-        Err(ComputeError::InvalidOperation(format!(
-            "compute outcome missing after submit for {}",
-            hex::encode(ticket.tx_id.0.as_bytes())
-        )))
     }
 
     fn record_outcomes(&self, outcomes: &[ComputeBatchOutcome]) {
@@ -666,5 +754,26 @@ mod tests {
         let access_a = policy.access_set(&tx_a, store.as_ref()).unwrap();
         let access_b = policy.access_set(&tx_b, store.as_ref()).unwrap();
         assert!(policy.conflicts(&access_a, &access_b));
+    }
+
+    #[test]
+    fn fallback_policy_distinguishes_reject_and_serial() {
+        let tx = build_tx(
+            3,
+            DomainId(0),
+            OutputId(crate::crypto::Hash::from_bytes([4; 32])),
+            ObjectId(crate::crypto::Hash::from_bytes([5; 32])),
+            6,
+        );
+        let err = ComputeScheduleError::QueueFull;
+
+        assert_eq!(
+            DisabledComputeFallbackPolicy.on_schedule_reject(&tx, &err),
+            ComputeFallbackDisposition::Reject
+        );
+        assert_eq!(
+            SerialComputeFallbackPolicy.on_schedule_reject(&tx, &err),
+            ComputeFallbackDisposition::RunSerial
+        );
     }
 }

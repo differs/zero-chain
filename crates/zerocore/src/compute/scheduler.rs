@@ -2,6 +2,7 @@
 
 use std::{
     collections::{BTreeMap, VecDeque},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -13,6 +14,12 @@ use super::{
     primitives::{DomainId, ObjectId, OutputId, TxId},
     tx::ComputeTx,
 };
+
+/// Lane key strategy abstraction.
+pub trait ComputeLaneKeyStrategy: Send + Sync {
+    /// Returns the lane key for a tx.
+    fn lane_key(&self, tx: &ComputeTx) -> String;
+}
 
 /// Lane selection policy for batching.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,8 +67,14 @@ impl ComputeLaneStrategy {
     }
 }
 
+impl ComputeLaneKeyStrategy for ComputeLaneStrategy {
+    fn lane_key(&self, tx: &ComputeTx) -> String {
+        (*self).lane_key(tx)
+    }
+}
+
 /// Scheduler tuning knobs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone)]
 pub struct ComputeSchedulerConfig {
     /// Wait this long before a pending tx becomes batch-ready.
     pub batch_window_ms: u64,
@@ -70,7 +83,7 @@ pub struct ComputeSchedulerConfig {
     /// Maximum number of pending txs held in memory.
     pub max_pending: usize,
     /// Lane partitioning strategy.
-    pub lane_strategy: ComputeLaneStrategy,
+    pub lane_strategy: Arc<dyn ComputeLaneKeyStrategy>,
 }
 
 impl Default for ComputeSchedulerConfig {
@@ -79,7 +92,7 @@ impl Default for ComputeSchedulerConfig {
             batch_window_ms: 15,
             max_batch_size: 64,
             max_pending: 4_096,
-            lane_strategy: ComputeLaneStrategy::ByDomain,
+            lane_strategy: Arc::new(ComputeLaneStrategy::ByDomain),
         }
     }
 }
@@ -242,7 +255,7 @@ impl ComputeScheduler for InMemoryComputeScheduler {
     }
 
     fn config(&self) -> ComputeSchedulerConfig {
-        self.config
+        self.config.clone()
     }
 }
 
@@ -256,7 +269,7 @@ mod tests {
             batch_window_ms: 0,
             max_batch_size: 1,
             max_pending: 1,
-            lane_strategy: ComputeLaneStrategy::ByDomain,
+            lane_strategy: Arc::new(ComputeLaneStrategy::ByDomain),
         });
 
         let tx = ComputeTx {
@@ -312,6 +325,48 @@ mod tests {
         let lane_key = strategy.lane_key(&tx);
         assert!(lane_key.contains("domain:7"));
         assert!(lane_key.contains("out:") || lane_key.contains("tx:") || lane_key.contains("in:"));
+    }
+
+    #[derive(Default)]
+    struct PrefixLaneStrategy;
+
+    impl ComputeLaneKeyStrategy for PrefixLaneStrategy {
+        fn lane_key(&self, tx: &ComputeTx) -> String {
+            format!("custom:{}", hex::encode(tx.tx_id.0.as_bytes()))
+        }
+    }
+
+    #[test]
+    fn scheduler_accepts_custom_lane_strategy_object() {
+        let scheduler = InMemoryComputeScheduler::new(ComputeSchedulerConfig {
+            batch_window_ms: 0,
+            max_batch_size: 8,
+            max_pending: 8,
+            lane_strategy: Arc::new(PrefixLaneStrategy),
+        });
+
+        let tx = ComputeTx {
+            tx_id: TxId(crate::crypto::Hash::from_bytes([4; 32])),
+            domain_id: DomainId(3),
+            command: super::super::tx::Command::Burn,
+            input_set: vec![],
+            read_set: vec![],
+            output_proposals: vec![],
+            fee: 0,
+            nonce: Some(1),
+            metadata: vec![],
+            payload: vec![],
+            deadline_unix_secs: None,
+            chain_id: None,
+            network_id: None,
+            witness: super::super::tx::TxWitness {
+                signatures: vec![],
+                threshold: None,
+            },
+        };
+
+        let ticket = scheduler.submit(tx).expect("submit should work");
+        assert!(ticket.lane_key.starts_with("custom:"));
     }
 }
 
