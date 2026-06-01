@@ -521,6 +521,15 @@ impl<S: ObjectStore, A: AuthorizationPolicy, R: ResourcePolicy, D: DomainRegistr
         };
 
         let report = validator.validate(tx)?;
+        self.commit_prevalidated(tx, report)
+    }
+
+    /// Commits a transaction after validation has already been performed.
+    pub fn commit_prevalidated(
+        &self,
+        tx: &ComputeTx,
+        report: ValidationReport,
+    ) -> ComputeResult<ValidationReport> {
         register_replay_nonce(tx, &self.replay_nonce_registry)?;
         for id in &tx.input_set {
             self.store.mark_spent(*id)?;

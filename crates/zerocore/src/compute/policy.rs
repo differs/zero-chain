@@ -7,7 +7,7 @@ use super::{
 };
 use crate::crypto::{Address, Hash};
 use ed25519_dalek::{Signature as Ed25519Signature, Verifier as _};
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 /// Authorization policy checks ownership/capability validity.
 pub trait AuthorizationPolicy: Send + Sync {
@@ -403,5 +403,27 @@ impl ResourcePolicy for NoopResourcePolicy {
         }
 
         Ok(())
+    }
+}
+
+impl<A: AuthorizationPolicy + ?Sized> AuthorizationPolicy for Arc<A> {
+    fn authorize(
+        &self,
+        tx: &ComputeTx,
+        inputs: &[ObjectOutput],
+        reads: &[ObjectOutput],
+    ) -> ComputeResult<()> {
+        self.as_ref().authorize(tx, inputs, reads)
+    }
+}
+
+impl<R: ResourcePolicy + ?Sized> ResourcePolicy for Arc<R> {
+    fn check_resources(
+        &self,
+        tx: &ComputeTx,
+        inputs: &[ObjectOutput],
+        reads: &[ObjectOutput],
+    ) -> ComputeResult<()> {
+        self.as_ref().check_resources(tx, inputs, reads)
     }
 }

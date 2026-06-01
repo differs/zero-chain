@@ -1,5 +1,7 @@
 //! JSON-RPC Server Implementation
 
+mod compute_adapter;
+
 use axum::{
     extract::{ConnectInfo, DefaultBodyLimit, State},
     http::HeaderMap,
@@ -23,10 +25,10 @@ use zerocore::block::{
 };
 use zerocore::compute::domain::DomainRegistry;
 use zerocore::compute::{
-    BasicTxExecutor, Command, ComputeTx, DefaultAuthorizationPolicy, DomainConfig, DomainId,
-    InMemoryDomainRegistry, InMemoryObjectStore, NoopResourcePolicy, ObjectId, ObjectKind,
-    ObjectOutput, ObjectStore, OutputId, OutputProposal, Ownership, ResourceMap, ResourceValue,
-    Script, SignatureScheme, TxSignature, TxWitness, Version,
+    batch::ComputeFallbackMode, scheduler::ComputeLaneStrategy, Command, ComputeTx, DomainConfig,
+    DomainId, InMemoryDomainRegistry, InMemoryObjectStore, ObjectId, ObjectKind, ObjectOutput,
+    ObjectStore, OutputId, OutputProposal, Ownership, ResourceMap, ResourceValue, Script,
+    SignatureScheme, TxSignature, TxWitness, Version,
 };
 use zerocore::crypto::{Address, Hash};
 use zerocore::state::StateDb;
@@ -38,6 +40,8 @@ use zeronet::{
 };
 use zerostore::db::{KeyValueDB, MemDatabase, RedbDatabase, RocksDb};
 use zerostore::ComputeStore;
+
+use compute_adapter::RpcComputeAdapter;
 
 static RPC_METRICS: RpcMetricsHandle = RpcMetricsHandle(OnceCell::new());
 const MAX_MINING_JOBS: usize = 2_048;
@@ -171,6 +175,16 @@ pub struct RpcConfig {
     pub mining_enabled: bool,
     /// Optional legacy override for the mining work target as whole leading-zero bytes.
     pub mining_work_target_leading_zero_bytes: Option<usize>,
+    /// Compute batch window in milliseconds.
+    pub compute_batch_window_ms: u64,
+    /// Maximum number of compute txs per batch slice.
+    pub compute_max_batch_size: usize,
+    /// Maximum number of pending compute txs admitted before backpressure.
+    pub compute_max_pending: usize,
+    /// Lane partitioning strategy for compute batching.
+    pub compute_lane_strategy: ComputeLaneStrategy,
+    /// Failure fallback mode for compute batching.
+    pub compute_fallback_mode: ComputeFallbackMode,
     /// Optional static auth token for all JSON-RPC requests.
     pub auth_token: Option<String>,
     /// Per-client request budget per rolling minute. `0` means disabled.
@@ -217,6 +231,11 @@ impl Default for RpcConfig {
             coinbase_addresses: Vec::new(),
             mining_enabled: false,
             mining_work_target_leading_zero_bytes: None,
+            compute_batch_window_ms: 15,
+            compute_max_batch_size: 64,
+            compute_max_pending: 4_096,
+            compute_lane_strategy: ComputeLaneStrategy::ByDomain,
+            compute_fallback_mode: ComputeFallbackMode::SerialOnFailure,
             auth_token: None,
             rate_limit_per_minute: 600,
         }
@@ -250,6 +269,15 @@ impl RpcConfig {
                 );
             }
         }
+        if self.compute_batch_window_ms > 3_600_000 {
+            return Err("compute_batch_window_ms is unreasonably large".to_string());
+        }
+        if self.compute_max_batch_size == 0 {
+            return Err("compute_max_batch_size must be non-zero".to_string());
+        }
+        if self.compute_max_pending == 0 {
+            return Err("compute_max_pending must be non-zero".to_string());
+        }
         if let Some(token) = &self.auth_token {
             if token.trim().is_empty() {
                 return Err("auth_token cannot be empty".to_string());
@@ -266,6 +294,16 @@ impl RpcConfig {
                 }
                 Ok(())
             }
+        }
+    }
+
+    /// Returns a compute scheduler config derived from this RPC config.
+    pub fn compute_scheduler_config(&self) -> zerocore::compute::scheduler::ComputeSchedulerConfig {
+        zerocore::compute::scheduler::ComputeSchedulerConfig {
+            batch_window_ms: self.compute_batch_window_ms,
+            max_batch_size: self.compute_max_batch_size,
+            max_pending: self.compute_max_pending,
+            lane_strategy: self.compute_lane_strategy,
         }
     }
 }
@@ -358,6 +396,7 @@ pub struct RpcApi {
     block_history: RwLock<BTreeMap<u64, Block>>,
     compute_store: Arc<dyn ObjectStore>,
     domain_registry: Arc<InMemoryDomainRegistry>,
+    compute_adapter: Arc<RpcComputeAdapter>,
     submitted_compute_results: RwLock<HashMap<Hash, serde_json::Value>>,
     submitted_compute_order: RwLock<VecDeque<Hash>>,
     persistent_compute_store: Option<Arc<ComputeStore>>,
@@ -409,6 +448,7 @@ struct GetWorkRequest {
 
 impl RpcApi {
     pub fn new(config: RpcConfig, state_db: Arc<StateDb>) -> Self {
+        let compute_store: Arc<dyn ObjectStore> = Arc::new(InMemoryObjectStore::new());
         let domain_registry = Arc::new(InMemoryDomainRegistry::new());
         domain_registry.upsert_domain(DomainConfig {
             domain_id: DomainId(0),
@@ -416,14 +456,20 @@ impl RpcApi {
             vm: "wasm".to_string(),
             public: true,
         });
+        let compute_adapter = Arc::new(RpcComputeAdapter::new_with_config(
+            compute_store.clone(),
+            domain_registry.clone(),
+            &config,
+        ));
 
         Self {
             config,
             state_db,
             latest_block: RwLock::new(None),
             block_history: RwLock::new(BTreeMap::new()),
-            compute_store: Arc::new(InMemoryObjectStore::new()),
+            compute_store,
             domain_registry,
+            compute_adapter,
             submitted_compute_results: RwLock::new(HashMap::new()),
             submitted_compute_order: RwLock::new(VecDeque::new()),
             persistent_compute_store: None,
@@ -443,6 +489,11 @@ impl RpcApi {
         compute_store: Arc<dyn ObjectStore>,
         domain_registry: Arc<InMemoryDomainRegistry>,
     ) -> Self {
+        let compute_adapter = Arc::new(RpcComputeAdapter::new_with_config(
+            compute_store.clone(),
+            domain_registry.clone(),
+            &config,
+        ));
         Self {
             config,
             state_db,
@@ -450,6 +501,7 @@ impl RpcApi {
             block_history: RwLock::new(BTreeMap::new()),
             compute_store,
             domain_registry,
+            compute_adapter,
             submitted_compute_results: RwLock::new(HashMap::new()),
             submitted_compute_order: RwLock::new(VecDeque::new()),
             persistent_compute_store: None,
@@ -469,13 +521,20 @@ impl RpcApi {
         compute_store: Arc<ComputeStore>,
         domain_registry: Arc<InMemoryDomainRegistry>,
     ) -> Self {
+        let compute_store_dyn: Arc<dyn ObjectStore> = compute_store.clone();
+        let compute_adapter = Arc::new(RpcComputeAdapter::new_with_config(
+            compute_store_dyn.clone(),
+            domain_registry.clone(),
+            &config,
+        ));
         Self {
             config,
             state_db,
             latest_block: RwLock::new(None),
             block_history: RwLock::new(BTreeMap::new()),
-            compute_store: compute_store.clone(),
+            compute_store: compute_store_dyn,
             domain_registry,
+            compute_adapter,
             submitted_compute_results: RwLock::new(HashMap::new()),
             submitted_compute_order: RwLock::new(VecDeque::new()),
             persistent_compute_store: Some(compute_store),
@@ -552,7 +611,7 @@ impl RpcApi {
             "zero_getOutput" => self.zero_get_output(params),
             "zero_getDomain" => self.zero_get_domain(params),
             "zero_simulateComputeTx" => self.zero_simulate_compute_tx(params),
-            "zero_submitComputeTx" => self.zero_submit_compute_tx(params),
+            "zero_submitComputeTx" => self.zero_submit_compute_tx(params).await,
             "zero_getComputeTxResult" => self.zero_get_compute_tx_result(params),
             "zero_listComputeTxResults" => self.zero_list_compute_tx_results(params),
             "zero_getOperationByHash" => self.zero_get_operation_by_hash(params),
@@ -744,36 +803,10 @@ impl RpcApi {
 
         let tx = parse_compute_tx(tx_value)?;
         validate_compute_tx_network(&tx, &self.config)?;
-        let executor = BasicTxExecutor::new(
-            self.compute_store.clone(),
-            DefaultAuthorizationPolicy,
-            NoopResourcePolicy,
-            self.domain_registry.clone(),
-        );
-
-        let validator = zerocore::compute::BasicTxValidator {
-            store: &executor.store,
-            authorization: &executor.authorization,
-            resources: &executor.resources,
-            domains: &executor.domains,
-        };
-
-        match validator.validate(&tx) {
-            Ok(report) => Ok(serde_json::json!({
-                "ok": true,
-                "inputs": report.inputs.len(),
-                "reads": report.reads.len(),
-                "outputs": tx.output_proposals.len(),
-                "tx_id": format!("0x{}", hex::encode(tx.tx_id.0.as_bytes())),
-            })),
-            Err(err) => Ok(serde_json::json!({
-                "ok": false,
-                "error": compute_error_to_json(&err),
-            })),
-        }
+        self.compute_adapter.simulate_compute_tx(tx)
     }
 
-    fn zero_submit_compute_tx(
+    async fn zero_submit_compute_tx(
         &self,
         params: Option<Vec<serde_json::Value>>,
     ) -> Result<serde_json::Value, RpcErrorObject> {
@@ -811,26 +844,7 @@ impl RpcApi {
             }));
         }
 
-        let executor = BasicTxExecutor::new(
-            self.compute_store.clone(),
-            DefaultAuthorizationPolicy,
-            NoopResourcePolicy,
-            self.domain_registry.clone(),
-        );
-
-        let report = executor
-            .execute(&tx)
-            .map_err(|e| RpcErrorObject::invalid_params(format!("compute execute failed: {e}")))?;
-        let submitted_at_unix = current_unix_secs();
-
-        let result = serde_json::json!({
-            "ok": true,
-            "tx_id": format!("0x{}", hex::encode(tx.tx_id.0.as_bytes())),
-            "consumed_inputs": report.inputs.len(),
-            "read_objects": report.reads.len(),
-            "created_outputs": tx.output_proposals.len(),
-            "submitted_at_unix": submitted_at_unix,
-        });
+        let result = self.compute_adapter.submit_compute_tx(tx.clone()).await?;
 
         if let Some(persistent) = &self.persistent_compute_store {
             let serialized = serde_json::to_string(&result).map_err(|e| {
@@ -1850,14 +1864,14 @@ fn adjust_mining_difficulty(parent_difficulty: U256, parent_timestamp: u64, now:
     U256::from_u128(bounded)
 }
 
-fn current_unix_secs() -> u64 {
+pub(super) fn current_unix_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
 }
 
-fn compute_error_to_json(err: &zerocore::compute::ComputeError) -> serde_json::Value {
+pub(super) fn compute_error_to_json(err: &zerocore::compute::ComputeError) -> serde_json::Value {
     let (numeric_code, code, category) = match err {
         zerocore::compute::ComputeError::DomainNotRegistered(_)
         | zerocore::compute::ComputeError::DomainNotPublic(_)
@@ -4171,8 +4185,8 @@ mod tests {
         zeronet::global_reset_sync_cache();
     }
 
-    #[test]
-    fn test_zero_list_compute_tx_results_returns_paginated_items() {
+    #[tokio::test]
+    async fn test_zero_list_compute_tx_results_returns_paginated_items() {
         let api = build_test_api_with_persistent_compute();
         let tx_a = canonicalize_and_sign_compute_tx(serde_json::json!({
             "tx_id": format!("0x{}", hex::encode([0x21u8; 32])),
@@ -4229,9 +4243,11 @@ mod tests {
 
         let _ = api
             .zero_submit_compute_tx(Some(vec![tx_a]))
+            .await
             .expect("submit compute tx a");
         let _ = api
             .zero_submit_compute_tx(Some(vec![tx_b]))
+            .await
             .expect("submit compute tx b");
 
         let listed = api
@@ -4701,8 +4717,8 @@ mod tests {
         assert!(limiter.allow_request("10.0.0.1"));
     }
 
-    #[test]
-    fn test_zero_submit_compute_tx_rejects_network_mismatch() {
+    #[tokio::test]
+    async fn test_zero_submit_compute_tx_rejects_network_mismatch() {
         let api = build_test_api_with_compute();
 
         let tx = canonicalize_and_sign_compute_tx(serde_json::json!({
@@ -4732,6 +4748,7 @@ mod tests {
 
         let err = api
             .zero_submit_compute_tx(Some(vec![tx]))
+            .await
             .expect_err("network mismatch should be rejected");
         assert_eq!(err.code, -32602);
         assert_eq!(
@@ -4876,8 +4893,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_zero_simulate_and_submit_compute_tx() {
+    #[tokio::test]
+    async fn test_zero_simulate_and_submit_compute_tx() {
         let api = build_test_api_with_compute();
 
         let tx = canonicalize_and_sign_compute_tx(serde_json::json!({
@@ -4914,6 +4931,7 @@ mod tests {
 
         let submit = api
             .zero_submit_compute_tx(Some(vec![tx.clone()]))
+            .await
             .expect("submit should succeed");
         assert_eq!(submit.get("ok").and_then(|v| v.as_bool()), Some(true));
 
@@ -4927,6 +4945,7 @@ mod tests {
 
         let dup = api
             .zero_submit_compute_tx(Some(vec![tx]))
+            .await
             .expect("duplicate submit should return cached result");
         assert_eq!(dup.get("duplicate").and_then(|v| v.as_bool()), Some(true));
     }
@@ -5213,8 +5232,8 @@ mod tests {
         assert_eq!(err.code, -32602);
     }
 
-    #[test]
-    fn test_zero_get_compute_tx_result_with_persistent_store() {
+    #[tokio::test]
+    async fn test_zero_get_compute_tx_result_with_persistent_store() {
         let api = build_test_api_with_persistent_compute();
         let tx = canonicalize_and_sign_compute_tx(serde_json::json!({
             "tx_id": format!("0x{}", hex::encode([0xA1u8; 32])),
@@ -5248,6 +5267,7 @@ mod tests {
 
         let submit = api
             .zero_submit_compute_tx(Some(vec![tx]))
+            .await
             .expect("submit should succeed");
         assert_eq!(submit.get("ok").and_then(|v| v.as_bool()), Some(true));
 
